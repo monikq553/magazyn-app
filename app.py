@@ -69,21 +69,23 @@ def init_db():
     CREATE TABLE IF NOT EXISTS users(
     id SERIAL PRIMARY KEY,
     username TEXT UNIQUE,
-    password TEXT
+    password TEXT,
+    role TEXT
     );
     """)
 
-    # 🔥 reset admina (bezpieczne na start)
+    # 🔥 reset admina
     cur.execute("DELETE FROM users WHERE username='admin'")
     cur.execute(
-        "INSERT INTO users(username, password) VALUES (%s,%s)",
-        ("admin", generate_password_hash("1234"))
+        "INSERT INTO users(username, password, role) VALUES (%s,%s,%s)",
+        ("admin", generate_password_hash("1234"), "admin")
     )
 
     conn.commit()
     conn.close()
 
-# 🔥 uruchomienie na Render
+
+# 🔥 start DB
 init_db()
 
 
@@ -93,6 +95,16 @@ def login_required(f):
     def decorated(*args, **kwargs):
         if 'user' not in session:
             return redirect('/login')
+        return f(*args, **kwargs)
+    return decorated
+
+
+# 🔒 ADMIN REQUIRED
+def admin_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if session.get('role') != 'admin':
+            return "Brak dostępu"
         return f(*args, **kwargs)
     return decorated
 
@@ -113,6 +125,7 @@ def login():
 
         if user and check_password_hash(user[2], password):
             session['user'] = username
+            session['role'] = user[3]
             return redirect('/')
         else:
             return "Błędne dane"
@@ -208,7 +221,6 @@ def receive_full():
     cur = conn.cursor()
 
     warehouse = request.form['warehouse']
-
     names = request.form.getlist('name')
     qtys = request.form.getlist('qty')
     units = request.form.getlist('unit')
@@ -263,6 +275,43 @@ def historia():
         days.setdefault(d[1], []).append(d)
 
     return render_template("historia.html", days=days)
+
+
+# 👥 PANEL UŻYTKOWNIKÓW
+@app.route('/users')
+@admin_required
+def users():
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute("SELECT id, username, role FROM users")
+    users = cur.fetchall()
+
+    conn.close()
+
+    return render_template("users.html", users=users)
+
+
+# ➕ DODAJ UŻYTKOWNIKA
+@app.route('/add_user', methods=['POST'])
+@admin_required
+def add_user():
+    conn = db()
+    cur = conn.cursor()
+
+    username = request.form['username']
+    password = generate_password_hash(request.form['password'])
+    role = request.form['role']
+
+    cur.execute(
+        "INSERT INTO users(username, password, role) VALUES (%s,%s,%s)",
+        (username, password, role)
+    )
+
+    conn.commit()
+    conn.close()
+
+    return redirect('/users')
 
 
 # 🚀 LOCAL
