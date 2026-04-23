@@ -74,6 +74,12 @@ def init_db():
     );
     """)
 
+# 🔥 jeśli tabela była stara → dodaj kolumnę
+cur.execute("""
+ALTER TABLE users
+ADD COLUMN IF NOT EXISTS role TEXT;
+""")
+
     # 🔥 reset admina
     cur.execute("DELETE FROM users WHERE username='admin'")
     cur.execute(
