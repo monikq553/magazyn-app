@@ -1,0 +1,39 @@
+<div style="
+background:white;
+padding:25px;
+border-radius:12px;
+">
+
+<h2>📄 Dokument WZ</h2>
+
+<p><b>Numer:</b> {{doc[5]}}</p>
+<p><b>Kontrahent:</b> {{doc[2]}}</p>
+<p><b>Data:</b> {{doc[1]}}</p>
+
+<hr>
+
+<table style="width:100%; border-collapse:collapse;">
+
+<tr style="background:#f1f2f6;">
+<th>Produkt</th>
+<th>Ilość</th>
+</tr>
+
+{% for i in items %}
+
+<tr>
+<td style="padding:10px; border-bottom:1px solid #eee;">{{i[0]}}</td>
+<td>{{i[1]}}</td>
+</tr>
+
+{% endfor %}
+
+</table>
+
+{% if doc[4] %}
+<hr>
+<h3>📸 Zdjęcie</h3>
+<img src="/static/uploads/{{doc[4]}}" style="max-width:100%;">
+{% endif %}
+
+</div>

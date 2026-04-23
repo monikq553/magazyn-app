@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html>
+<body>
+
+<h2>Raport {{date}}</h2>
+
+<a href="/report_pdf/{{date}}">📄 PDF</a>
+
+<h3>Wydania</h3>
+{% for i in issues %}
+<p>{{i[0]}} - {{i[1]}}</p>
+{% endfor %}
+
+<h3>Przyjęcia</h3>
+{% for r in receipts %}
+<p>{{r[0]}} - {{r[1]}}</p>
+{% endfor %}
+
+</body>
+</html>

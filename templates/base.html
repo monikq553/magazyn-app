@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="UTF-8">
+<title>Magazyn</title>
+
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+
+<style>
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    font-family: 'Inter', sans-serif;
+    background: #f5f6fa;
+    color: #1f2937;
+}
+
+/* 🔝 TOPBAR */
+.topbar {
+    background: white;
+    padding: 16px 30px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid #e5e7eb;
+}
+
+.logo {
+    font-weight: 600;
+    font-size: 18px;
+    letter-spacing: 0.3px;
+}
+
+/* MENU */
+.menu a {
+    margin-left: 20px;
+    text-decoration: none;
+    color: #6b7280;
+    font-size: 14px;
+    transition: 0.2s;
+}
+
+.menu a:hover {
+    color: #111827;
+}
+
+/* CONTENT */
+.container {
+    padding: 30px;
+}
+
+/* KARTY */
+.card {
+    background: white;
+    border-radius: 14px;
+    padding: 20px;
+    border: 1px solid #e5e7eb;
+    transition: 0.2s;
+}
+
+.card:hover {
+    border-color: #d1d5db;
+    box-shadow: 0 6px 20px rgba(0,0,0,0.04);
+}
+
+/* BUTTON */
+button, .btn {
+    background: #111827;
+    color: white;
+    border: none;
+    padding: 10px 14px;
+    border-radius: 10px;
+    cursor: pointer;
+    font-size: 14px;
+}
+
+button:hover {
+    background: #000;
+}
+
+/* DELETE */
+.btn-danger {
+    background: #ef4444;
+}
+
+/* INPUT */
+input, select {
+    padding: 10px;
+    border-radius: 10px;
+    border: 1px solid #e5e7eb;
+    font-size: 14px;
+}
+
+input:focus {
+    border-color: #111827;
+    outline: none;
+}
+
+/* GRID */
+.grid {
+    display: grid;
+    gap: 20px;
+}
+</style>
+
+</head>
+
+<body>
+
+<div class="topbar">
+    <div class="logo">MAGAZYN</div>
+
+    <div class="menu">
+        <a href="/">Start</a>
+        <a href="/magazyny">Magazyny</a>
+        <a href="/przyjecie">Przyjęcie</a>
+        <a href="/wydanie">Wydanie</a>
+        <a href="/historia">Historia</a>
+    </div>
+</div>
+
+<div class="container">
+
+<div style="margin-bottom:20px;">
+    <button onclick="goBack()" style="
+        background:none;
+        border:none;
+        color:#6b7280;
+        cursor:pointer;
+        font-size:14px;
+    ">
+        ← Wróć
+    </button>
+</div>
+{% block content %}{% endblock %}
+</div>
+
+</body>
+</html>
+<script>
+function goBack() {
+    window.history.back();
+}
+</script>
