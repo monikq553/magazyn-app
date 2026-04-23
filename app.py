@@ -266,18 +266,32 @@ def preview_excel():
     file = request.files.get('file')
     warehouse = request.form.get('warehouse')
 
-    df = pd.read_excel(file)
+    if not file:
+        return "Brak pliku"
+
+    try:
+        df = pd.read_excel(file)
+    except:
+        df = pd.read_csv(file)
+
+    # 🔥 ujednolicenie nazw kolumn
+    df.columns = [str(c).lower().strip() for c in df.columns]
 
     data = []
+
     for _, row in df.iterrows():
-        data.append({
-            "name": str(row[0]),
-            "qty": str(row[1]),
-            "unit": str(row[2]) if len(row) > 2 else ""
-        })
+        name = str(row.get('nazwa') or row.get('produkt') or "").strip()
+        qty = str(row.get('ilosc') or row.get('ilość') or "0").replace(",", ".")
+        unit = str(row.get('jednostka') or "").strip()
+
+        if name:
+            data.append({
+                "name": name,
+                "qty": qty,
+                "unit": unit
+            })
 
     return render_template("preview_import.html", data=data, warehouse=warehouse)
-
 
 # 💾 IMPORT
 @app.route('/import_excel', methods=['POST'])
