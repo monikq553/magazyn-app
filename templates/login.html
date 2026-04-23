@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div style="max-width:400px; margin:80px auto; background:white; padding:30px; border-radius:12px; box-shadow:0 4px 15px rgba(0,0,0,0.1);">
+
+<h2 style="margin-bottom:20px;">🔐 Logowanie</h2>
+
+<form method="POST">
+    <input name="username" placeholder="Login" style="width:100%; padding:10px; margin-bottom:10px;">
+    <input name="password" type="password" placeholder="Hasło" style="width:100%; padding:10px; margin-bottom:15px;">
+    
+    <button style="width:100%; padding:10px; background:#6c5ce7; color:white; border:none; border-radius:8px;">
+        Zaloguj
+    </button>
+</form>
+
+</div>
+
+{% endblock %}
