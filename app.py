@@ -280,7 +280,55 @@ def import_excel():
 
     return redirect('/magazyn/' + warehouse)
 
+def init_db():
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS products(
+    id SERIAL PRIMARY KEY,
+    name TEXT,
+    qty REAL,
+    unit TEXT,
+    warehouse TEXT,
+    price_netto REAL,
+    vat REAL
+    );
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS packages(
+    id SERIAL PRIMARY KEY,
+    product_id INTEGER,
+    package_number TEXT,
+    qty REAL
+    );
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS issue_docs(
+    id SERIAL PRIMARY KEY,
+    date TEXT,
+    kontrahent TEXT,
+    warehouse TEXT,
+    image TEXT,
+    doc_number TEXT
+    );
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS issue_items(
+    id SERIAL PRIMARY KEY,
+    doc_id INTEGER,
+    product_id INTEGER,
+    qty REAL
+    );
+    """)
+
+    conn.commit()
+    conn.close()
 
 # 🚀 START
 if __name__ == '__main__':
+    init_db()
     app.run()
