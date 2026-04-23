@@ -5,9 +5,10 @@ from functools import wraps
 from datetime import datetime
 import pandas as pd
 import psycopg2
+from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
-app.secret_key = "supersecretkey"  # 🔥 wymagane do logowania
+app.secret_key = "supersecretkey"
 
 UPLOAD_FOLDER = "static/uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -72,18 +73,19 @@ def init_db():
     );
     """)
 
-    # 🔥 pierwszy użytkownik
-    cur.execute("""
-    INSERT INTO users (username, password)
-    VALUES ('admin','1234')
-    ON CONFLICT (username) DO NOTHING
-    """)
+    # 🔥 admin jeśli nie istnieje
+    cur.execute("SELECT * FROM users WHERE username=%s", ("admin",))
+    if not cur.fetchone():
+        cur.execute(
+            "INSERT INTO users(username, password) VALUES (%s,%s)",
+            ("admin", generate_password_hash("1234"))
+        )
 
     conn.commit()
     conn.close()
 
 
-# 🔥 INIT NA START (Render)
+# 🔥 uruchomienie na Render
 init_db()
 
 
@@ -107,14 +109,11 @@ def login():
         conn = db()
         cur = conn.cursor()
 
-        cur.execute(
-            "SELECT * FROM users WHERE username=%s AND password=%s",
-            (username, password)
-        )
+        cur.execute("SELECT * FROM users WHERE username=%s", (username,))
         user = cur.fetchone()
         conn.close()
 
-        if user:
+        if user and check_password_hash(user[2], password):
             session['user'] = username
             return redirect('/')
         else:
@@ -224,8 +223,6 @@ def receive_full():
         except:
             qty = 0
 
-        unit = units[i]
-
         if not name or qty <= 0:
             continue
 
@@ -243,30 +240,8 @@ def receive_full():
         else:
             cur.execute(
                 "INSERT INTO products(name, qty, unit, warehouse, price_netto, vat) VALUES (%s,%s,%s,%s,0,0)",
-                (name, qty, unit, warehouse)
+                (name, qty, units[i], warehouse)
             )
-
-    conn.commit()
-    conn.close()
-
-    return redirect('/magazyn/' + warehouse)
-
-
-# 📤 WYDANIE
-@app.route('/issue_doc', methods=['POST'])
-@login_required
-def issue_doc():
-    conn = db()
-    cur = conn.cursor()
-
-    doc_number = request.form['doc_number']
-    kontrahent = request.form['kontrahent']
-    warehouse = request.form['warehouse']
-
-    cur.execute(
-        "INSERT INTO issue_docs(date, kontrahent, warehouse, image, doc_number) VALUES (%s,%s,%s,%s,%s)",
-        (datetime.now().strftime("%Y-%m-%d"), kontrahent, warehouse, "", doc_number)
-    )
 
     conn.commit()
     conn.close()
@@ -290,59 +265,6 @@ def historia():
         days.setdefault(d[1], []).append(d)
 
     return render_template("historia.html", days=days)
-
-
-# 🔥 EXCEL PODGLĄD
-@app.route('/preview_excel', methods=['POST'])
-@login_required
-def preview_excel():
-    file = request.files.get('file')
-    warehouse = request.form.get('warehouse')
-
-    df = pd.read_excel(file)
-    df.columns = [str(c).lower() for c in df.columns]
-
-    data = []
-
-    for _, row in df.iterrows():
-        name = str(row.get('nazwa') or "").strip()
-        qty = str(row.get('ilosc') or "0")
-
-        if name:
-            data.append({"name": name, "qty": qty, "unit": ""})
-
-    return render_template("preview_import.html", data=data, warehouse=warehouse)
-
-
-# 💾 IMPORT
-@app.route('/import_excel', methods=['POST'])
-@login_required
-def import_excel():
-    conn = db()
-    cur = conn.cursor()
-
-    warehouse = request.form.get('warehouse')
-    names = request.form.getlist('name')
-    qtys = request.form.getlist('qty')
-
-    for i in range(len(names)):
-        try:
-            qty = float(qtys[i])
-        except:
-            qty = 0
-
-        if qty <= 0:
-            continue
-
-        cur.execute(
-            "INSERT INTO products(name, qty, unit, warehouse, price_netto, vat) VALUES (%s,%s,%s,%s,0,0)",
-            (names[i], qty, "", warehouse)
-        )
-
-    conn.commit()
-    conn.close()
-
-    return redirect('/magazyn/' + warehouse)
 
 
 # 🚀 LOCAL
