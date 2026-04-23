@@ -75,10 +75,11 @@ def init_db():
 
     # 🔥 admin jeśli nie istnieje
     cur.execute("SELECT * FROM users WHERE username=%s", ("admin",))
-    if not cur.fetchone():
-        cur.execute(
-            "INSERT INTO users(username, password) VALUES (%s,%s)",
-            ("admin", generate_password_hash("1234"))
+    cur.execute("DELETE FROM users WHERE username='admin'")
+cur.execute(
+    "INSERT INTO users(username, password) VALUES (%s,%s)",
+    ("admin", generate_password_hash("1234"))
+)
         )
 
     conn.commit()
