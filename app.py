@@ -11,9 +11,63 @@ UPLOAD_FOLDER = "static/uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 
-# 🔥 DB ONLINE
+# 🔥 DB
 def db():
     return psycopg2.connect(os.environ.get("DATABASE_URL"))
+
+
+# 🔥 INIT DB (WAŻNE – uruchamia się zawsze)
+def init_db():
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS products(
+    id SERIAL PRIMARY KEY,
+    name TEXT,
+    qty REAL,
+    unit TEXT,
+    warehouse TEXT,
+    price_netto REAL,
+    vat REAL
+    );
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS packages(
+    id SERIAL PRIMARY KEY,
+    product_id INTEGER,
+    package_number TEXT,
+    qty REAL
+    );
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS issue_docs(
+    id SERIAL PRIMARY KEY,
+    date TEXT,
+    kontrahent TEXT,
+    warehouse TEXT,
+    image TEXT,
+    doc_number TEXT
+    );
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS issue_items(
+    id SERIAL PRIMARY KEY,
+    doc_id INTEGER,
+    product_id INTEGER,
+    qty REAL
+    );
+    """)
+
+    conn.commit()
+    conn.close()
+
+
+# 🔥 WAŻNE – wykona się na Renderze
+init_db()
 
 
 # 🟢 HOME
@@ -68,7 +122,7 @@ def wydanie():
     return render_template("wydanie.html", products=products, packages=packages)
 
 
-# ❌ USUŃ PRODUKT + PACZKI
+# ❌ USUŃ PRODUKT
 @app.route('/delete_product/<int:id>', methods=['POST'])
 def delete_product(id):
     conn = db()
@@ -83,14 +137,13 @@ def delete_product(id):
     return "OK"
 
 
-# 📥 PRZYJĘCIE + PACZKI
+# 📥 PRZYJĘCIE
 @app.route('/receive_full', methods=['POST'])
 def receive_full():
     conn = db()
     cur = conn.cursor()
 
     warehouse = request.form['warehouse']
-    date = request.form['date'] or datetime.now().strftime("%Y-%m-%d")
 
     names = request.form.getlist('name')
     qtys = request.form.getlist('qty')
@@ -133,7 +186,7 @@ def receive_full():
             )
             pid = cur.fetchone()[0]
 
-        # 🔥 PACZKI
+        # PACZKI
         if warehouse == "Drewno":
             while package_index < len(package_numbers):
                 p_num = package_numbers[package_index]
@@ -159,7 +212,7 @@ def receive_full():
     return redirect('/magazyn/' + warehouse)
 
 
-# 📤 WYDANIE + ZDJĘCIE
+# 📤 WYDANIE
 @app.route('/issue_doc', methods=['POST'])
 def issue_doc():
     conn = db()
@@ -185,7 +238,6 @@ def issue_doc():
 
     product_ids = request.form.getlist('product_id')
     qtys = request.form.getlist('qty')
-    package_ids = request.form.getlist('package_id')
 
     for i in range(len(product_ids)):
         if product_ids[i] and qtys[i]:
@@ -201,12 +253,6 @@ def issue_doc():
                 "UPDATE products SET qty = qty - %s WHERE id=%s",
                 (q, pid)
             )
-
-            if package_ids and package_ids[i]:
-                cur.execute(
-                    "UPDATE packages SET qty = qty - %s WHERE id=%s",
-                    (q, int(package_ids[i]))
-                )
 
     conn.commit()
     conn.close()
@@ -280,55 +326,7 @@ def import_excel():
 
     return redirect('/magazyn/' + warehouse)
 
-def init_db():
-    conn = db()
-    cur = conn.cursor()
 
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS products(
-    id SERIAL PRIMARY KEY,
-    name TEXT,
-    qty REAL,
-    unit TEXT,
-    warehouse TEXT,
-    price_netto REAL,
-    vat REAL
-    );
-    """)
-
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS packages(
-    id SERIAL PRIMARY KEY,
-    product_id INTEGER,
-    package_number TEXT,
-    qty REAL
-    );
-    """)
-
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS issue_docs(
-    id SERIAL PRIMARY KEY,
-    date TEXT,
-    kontrahent TEXT,
-    warehouse TEXT,
-    image TEXT,
-    doc_number TEXT
-    );
-    """)
-
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS issue_items(
-    id SERIAL PRIMARY KEY,
-    doc_id INTEGER,
-    product_id INTEGER,
-    qty REAL
-    );
-    """)
-
-    conn.commit()
-    conn.close()
-
-# 🚀 START
+# 🚀 LOCAL ONLY
 if __name__ == '__main__':
-    init_db()
     app.run()
