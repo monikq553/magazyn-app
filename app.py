@@ -270,8 +270,15 @@ def historia():
 
     conn.close()
 
-    return render_template("historia.html", docs=docs)
+    # 🔥 grupowanie po dacie
+    days = {}
+    for d in docs:
+        day = d[1]  # kolumna date
+        if day not in days:
+            days[day] = []
+        days[day].append(d)
 
+    return render_template("historia.html", days=days)
 
 # 🔥 EXCEL PODGLĄD
 @app.route('/preview_excel', methods=['POST'])
