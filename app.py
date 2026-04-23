@@ -25,62 +25,21 @@ def init_db():
     cur = conn.cursor()
 
     cur.execute("""
-    CREATE TABLE IF NOT EXISTS products(
-    id SERIAL PRIMARY KEY,
-    name TEXT,
-    qty REAL,
-    unit TEXT,
-    warehouse TEXT,
-    price_netto REAL,
-    vat REAL
-    );
-    """)
-
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS packages(
-    id SERIAL PRIMARY KEY,
-    product_id INTEGER,
-    package_number TEXT,
-    qty REAL
-    );
-    """)
-
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS issue_docs(
-    id SERIAL PRIMARY KEY,
-    date TEXT,
-    kontrahent TEXT,
-    warehouse TEXT,
-    image TEXT,
-    doc_number TEXT
-    );
-    """)
-
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS issue_items(
-    id SERIAL PRIMARY KEY,
-    doc_id INTEGER,
-    product_id INTEGER,
-    qty REAL
-    );
-    """)
-
-    cur.execute("""
     CREATE TABLE IF NOT EXISTS users(
-    id SERIAL PRIMARY KEY,
-    username TEXT UNIQUE,
-    password TEXT,
-    role TEXT
+        id SERIAL PRIMARY KEY,
+        username TEXT UNIQUE,
+        password TEXT,
+        role TEXT
     );
     """)
 
-# 🔥 jeśli tabela była stara → dodaj kolumnę
-cur.execute("""
-ALTER TABLE users
-ADD COLUMN IF NOT EXISTS role TEXT;
-""")
+    # 🔥 jeśli tabela była stara → dodaj kolumnę
+    cur.execute("""
+    ALTER TABLE users
+    ADD COLUMN IF NOT EXISTS role TEXT;
+    """)
 
-    # 🔥 reset admina
+    # 🔥 reset admina (MUSI BYĆ NA TYM SAMYM POZIOMIE WCIĘCIA)
     cur.execute("DELETE FROM users WHERE username='admin'")
     cur.execute(
         "INSERT INTO users(username, password, role) VALUES (%s,%s,%s)",
@@ -89,7 +48,6 @@ ADD COLUMN IF NOT EXISTS role TEXT;
 
     conn.commit()
     conn.close()
-
 
 # 🔥 start DB
 init_db()
