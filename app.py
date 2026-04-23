@@ -1,11 +1,13 @@
 import os
 from werkzeug.utils import secure_filename
-from flask import Flask, render_template, request, redirect
+from flask import Flask, render_template, request, redirect, session
+from functools import wraps
 from datetime import datetime
 import pandas as pd
 import psycopg2
 
 app = Flask(__name__)
+app.secret_key = "supersecretkey"  # 🔥 wymagane do logowania
 
 UPLOAD_FOLDER = "static/uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -16,7 +18,7 @@ def db():
     return psycopg2.connect(os.environ.get("DATABASE_URL"))
 
 
-# 🔥 INIT DB (WAŻNE – uruchamia się zawsze)
+# 🔥 INIT DB
 def init_db():
     conn = db()
     cur = conn.cursor()
@@ -62,28 +64,89 @@ def init_db():
     );
     """)
 
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS users(
+    id SERIAL PRIMARY KEY,
+    username TEXT UNIQUE,
+    password TEXT
+    );
+    """)
+
+    # 🔥 pierwszy użytkownik
+    cur.execute("""
+    INSERT INTO users (username, password)
+    VALUES ('admin','1234')
+    ON CONFLICT (username) DO NOTHING
+    """)
+
     conn.commit()
     conn.close()
 
 
-# 🔥 WAŻNE – wykona się na Renderze
+# 🔥 INIT NA START (Render)
 init_db()
+
+
+# 🔒 LOGIN REQUIRED
+def login_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if 'user' not in session:
+            return redirect('/login')
+        return f(*args, **kwargs)
+    return decorated
+
+
+# 🔐 LOGIN
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        username = request.form['username']
+        password = request.form['password']
+
+        conn = db()
+        cur = conn.cursor()
+
+        cur.execute(
+            "SELECT * FROM users WHERE username=%s AND password=%s",
+            (username, password)
+        )
+        user = cur.fetchone()
+        conn.close()
+
+        if user:
+            session['user'] = username
+            return redirect('/')
+        else:
+            return "Błędne dane"
+
+    return render_template("login.html")
+
+
+# 🔓 LOGOUT
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect('/login')
 
 
 # 🟢 HOME
 @app.route('/')
+@login_required
 def home():
     return render_template("home.html")
 
 
 # 🟢 MAGAZYNY
 @app.route('/magazyny')
+@login_required
 def magazyny():
     return render_template("magazyny.html")
 
 
 # 🟢 MAGAZYN
 @app.route('/magazyn/<name>')
+@login_required
 def magazyn(name):
     conn = db()
     cur = conn.cursor()
@@ -101,12 +164,14 @@ def magazyn(name):
 
 # 🟢 PRZYJĘCIE
 @app.route('/przyjecie')
+@login_required
 def przyjecie():
     return render_template("przyjecie.html")
 
 
 # 🟢 WYDANIE
 @app.route('/wydanie')
+@login_required
 def wydanie():
     conn = db()
     cur = conn.cursor()
@@ -124,6 +189,7 @@ def wydanie():
 
 # ❌ USUŃ PRODUKT
 @app.route('/delete_product/<int:id>', methods=['POST'])
+@login_required
 def delete_product(id):
     conn = db()
     cur = conn.cursor()
@@ -139,6 +205,7 @@ def delete_product(id):
 
 # 📥 PRZYJĘCIE
 @app.route('/receive_full', methods=['POST'])
+@login_required
 def receive_full():
     conn = db()
     cur = conn.cursor()
@@ -148,11 +215,6 @@ def receive_full():
     names = request.form.getlist('name')
     qtys = request.form.getlist('qty')
     units = request.form.getlist('unit')
-
-    package_numbers = request.form.getlist('package_number')
-    package_qtys = request.form.getlist('package_qty')
-
-    package_index = 0
 
     for i in range(len(names)):
         name = names[i].strip()
@@ -165,177 +227,6 @@ def receive_full():
         unit = units[i]
 
         if not name or qty <= 0:
-            continue
-
-        cur.execute(
-            "SELECT id FROM products WHERE name=%s AND warehouse=%s",
-            (name, warehouse)
-        )
-        product = cur.fetchone()
-
-        if product:
-            pid = product[0]
-            cur.execute(
-                "UPDATE products SET qty = qty + %s WHERE id=%s",
-                (qty, pid)
-            )
-        else:
-            cur.execute(
-                "INSERT INTO products(name, qty, unit, warehouse, price_netto, vat) VALUES (%s,%s,%s,%s,0,0) RETURNING id",
-                (name, qty, unit, warehouse)
-            )
-            pid = cur.fetchone()[0]
-
-        # PACZKI
-        if warehouse == "Drewno":
-            while package_index < len(package_numbers):
-                p_num = package_numbers[package_index]
-                p_qty = package_qtys[package_index]
-                package_index += 1
-
-                if not p_num:
-                    break
-
-                try:
-                    p_qty = float((p_qty or "0").replace(",", "."))
-                except:
-                    p_qty = 0
-
-                cur.execute(
-                    "INSERT INTO packages(product_id, package_number, qty) VALUES (%s,%s,%s)",
-                    (pid, p_num, p_qty)
-                )
-
-    conn.commit()
-    conn.close()
-
-    return redirect('/magazyn/' + warehouse)
-
-
-# 📤 WYDANIE
-@app.route('/issue_doc', methods=['POST'])
-def issue_doc():
-    conn = db()
-    cur = conn.cursor()
-
-    doc_number = request.form['doc_number']
-    kontrahent = request.form['kontrahent']
-    warehouse = request.form['warehouse']
-    date = request.form['date'] or datetime.now().strftime("%Y-%m-%d")
-
-    image = request.files.get('image')
-    filename = ""
-
-    if image and image.filename:
-        filename = secure_filename(image.filename)
-        image.save(os.path.join(UPLOAD_FOLDER, filename))
-
-    cur.execute(
-        "INSERT INTO issue_docs(date, kontrahent, warehouse, image, doc_number) VALUES (%s,%s,%s,%s,%s) RETURNING id",
-        (date, kontrahent, warehouse, filename, doc_number)
-    )
-    doc_id = cur.fetchone()[0]
-
-    product_ids = request.form.getlist('product_id')
-    qtys = request.form.getlist('qty')
-
-    for i in range(len(product_ids)):
-        if product_ids[i] and qtys[i]:
-            pid = int(product_ids[i])
-            q = float(qtys[i].replace(",", "."))
-
-            cur.execute(
-                "INSERT INTO issue_items(doc_id, product_id, qty) VALUES (%s,%s,%s)",
-                (doc_id, pid, q)
-            )
-
-            cur.execute(
-                "UPDATE products SET qty = qty - %s WHERE id=%s",
-                (q, pid)
-            )
-
-    conn.commit()
-    conn.close()
-
-    return redirect('/magazyn/' + warehouse)
-
-# HISTORIA
-@app.route('/historia')
-def historia():
-    conn = db()
-    cur = conn.cursor()
-
-    cur.execute("SELECT * FROM issue_docs ORDER BY id DESC")
-    docs = cur.fetchall()
-
-    conn.close()
-
-    # 🔥 grupowanie po dacie
-    days = {}
-    for d in docs:
-        day = d[1]  # kolumna date
-        if day not in days:
-            days[day] = []
-        days[day].append(d)
-
-    return render_template("historia.html", days=days)
-
-# 🔥 EXCEL PODGLĄD
-@app.route('/preview_excel', methods=['POST'])
-def preview_excel():
-    file = request.files.get('file')
-    warehouse = request.form.get('warehouse')
-
-    if not file:
-        return "Brak pliku"
-
-    try:
-        df = pd.read_excel(file)
-    except:
-        df = pd.read_csv(file)
-
-    # 🔥 ujednolicenie nazw kolumn
-    df.columns = [str(c).lower().strip() for c in df.columns]
-
-    data = []
-
-    for _, row in df.iterrows():
-        name = str(row.get('nazwa') or row.get('produkt') or "").strip()
-        qty = str(row.get('ilosc') or row.get('ilość') or "0").replace(",", ".")
-        unit = str(row.get('jednostka') or "").strip()
-
-        if name:
-            data.append({
-                "name": name,
-                "qty": qty,
-                "unit": unit
-            })
-
-    return render_template("preview_import.html", data=data, warehouse=warehouse)
-
-# 💾 IMPORT
-@app.route('/import_excel', methods=['POST'])
-def import_excel():
-    conn = db()
-    cur = conn.cursor()
-
-    warehouse = request.form.get('warehouse')
-
-    names = request.form.getlist('name')
-    qtys = request.form.getlist('qty')
-    units = request.form.getlist('unit')
-
-    for i in range(len(names)):
-        name = names[i]
-
-        try:
-            qty = float(qtys[i].replace(",", "."))
-        except:
-            qty = 0
-
-        unit = units[i]
-
-        if qty <= 0:
             continue
 
         cur.execute(
@@ -361,6 +252,99 @@ def import_excel():
     return redirect('/magazyn/' + warehouse)
 
 
-# 🚀 LOCAL ONLY
+# 📤 WYDANIE
+@app.route('/issue_doc', methods=['POST'])
+@login_required
+def issue_doc():
+    conn = db()
+    cur = conn.cursor()
+
+    doc_number = request.form['doc_number']
+    kontrahent = request.form['kontrahent']
+    warehouse = request.form['warehouse']
+
+    cur.execute(
+        "INSERT INTO issue_docs(date, kontrahent, warehouse, image, doc_number) VALUES (%s,%s,%s,%s,%s)",
+        (datetime.now().strftime("%Y-%m-%d"), kontrahent, warehouse, "", doc_number)
+    )
+
+    conn.commit()
+    conn.close()
+
+    return redirect('/magazyn/' + warehouse)
+
+
+# 📊 HISTORIA
+@app.route('/historia')
+@login_required
+def historia():
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute("SELECT * FROM issue_docs ORDER BY id DESC")
+    docs = cur.fetchall()
+    conn.close()
+
+    days = {}
+    for d in docs:
+        days.setdefault(d[1], []).append(d)
+
+    return render_template("historia.html", days=days)
+
+
+# 🔥 EXCEL PODGLĄD
+@app.route('/preview_excel', methods=['POST'])
+@login_required
+def preview_excel():
+    file = request.files.get('file')
+    warehouse = request.form.get('warehouse')
+
+    df = pd.read_excel(file)
+    df.columns = [str(c).lower() for c in df.columns]
+
+    data = []
+
+    for _, row in df.iterrows():
+        name = str(row.get('nazwa') or "").strip()
+        qty = str(row.get('ilosc') or "0")
+
+        if name:
+            data.append({"name": name, "qty": qty, "unit": ""})
+
+    return render_template("preview_import.html", data=data, warehouse=warehouse)
+
+
+# 💾 IMPORT
+@app.route('/import_excel', methods=['POST'])
+@login_required
+def import_excel():
+    conn = db()
+    cur = conn.cursor()
+
+    warehouse = request.form.get('warehouse')
+    names = request.form.getlist('name')
+    qtys = request.form.getlist('qty')
+
+    for i in range(len(names)):
+        try:
+            qty = float(qtys[i])
+        except:
+            qty = 0
+
+        if qty <= 0:
+            continue
+
+        cur.execute(
+            "INSERT INTO products(name, qty, unit, warehouse, price_netto, vat) VALUES (%s,%s,%s,%s,0,0)",
+            (names[i], qty, "", warehouse)
+        )
+
+    conn.commit()
+    conn.close()
+
+    return redirect('/magazyn/' + warehouse)
+
+
+# 🚀 LOCAL
 if __name__ == '__main__':
     app.run()
