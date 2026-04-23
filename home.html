@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<style>
+.grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 25px;
+    max-width: 900px;
+}
+
+.card {
+    background: white;
+    padding: 25px;
+    border-radius: 14px;
+    border: 1px solid #e5e7eb;
+    cursor: pointer;
+    transition: 0.2s;
+}
+
+.card:hover {
+    border-color: #d1d5db;
+    box-shadow: 0 6px 20px rgba(0,0,0,0.04);
+}
+
+.title {
+    font-size: 15px;
+    font-weight: 600;
+}
+
+.subtitle {
+    font-size: 13px;
+    color: #6b7280;
+    margin-top: 6px;
+}
+</style>
+
+<h2>📊 Panel główny</h2>
+
+<div class="grid">
+
+<div class="card" onclick="go('/magazyny')">
+    <div class="title">Magazyny</div>
+    <div class="subtitle">Przegląd stanów</div>
+</div>
+
+<div class="card" onclick="go('/przyjecie')">
+    <div class="title">Przyjęcie</div>
+    <div class="subtitle">Dodaj towar</div>
+</div>
+
+<div class="card" onclick="go('/wydanie')">
+    <div class="title">Wydanie</div>
+    <div class="subtitle">Wystaw WZ</div>
+</div>
+
+<div class="card" onclick="go('/historia')">
+    <div class="title">Historia</div>
+    <div class="subtitle">Dokumenty</div>
+</div>
+
+</div>
+
+<script>
+function go(url) {
+    window.location.href = url;
+}
+</script>
+
+{% endblock %}

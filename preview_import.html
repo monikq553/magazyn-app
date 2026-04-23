@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<style>
+.box {
+    background:white;
+    padding:25px;
+    border-radius:12px;
+    max-width:900px;
+    margin:auto;
+}
+
+table {
+    width:100%;
+    border-collapse:collapse;
+}
+
+td, th {
+    padding:10px;
+    border-bottom:1px solid #eee;
+}
+
+input {
+    width:100%;
+    padding:6px;
+    border-radius:6px;
+    border:1px solid #ddd;
+}
+
+button {
+    background:#6c5ce7;
+    color:white;
+    border:none;
+    padding:10px;
+    border-radius:8px;
+    cursor:pointer;
+}
+</style>
+
+<div class="box">
+
+<h2>📊 Podgląd importu</h2>
+
+<form method="POST" action="/import_excel">
+
+<input type="hidden" name="warehouse" value="{{warehouse}}">
+
+<table>
+<tr>
+<th>Nazwa</th>
+<th>Ilość</th>
+<th>Jednostka</th>
+</tr>
+
+{% for row in data %}
+<tr>
+<td><input name="name" value="{{row.name}}"></td>
+<td><input name="qty" value="{{row.qty}}"></td>
+<td><input name="unit" value="{{row.unit}}"></td>
+</tr>
+{% endfor %}
+
+</table>
+
+<br>
+
+<button>✅ Zapisz do magazynu</button>
+
+</form>
+
+</div>
+
+{% endblock %}

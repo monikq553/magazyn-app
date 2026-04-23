@@ -1,0 +1,205 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<style>
+.box {
+    background:white;
+    padding:25px;
+    border-radius:12px;
+    max-width:800px;
+    margin:auto;
+}
+
+input, select {
+    padding:10px;
+    border-radius:8px;
+    border:1px solid #ddd;
+    width:100%;
+    margin-bottom:10px;
+}
+
+button {
+    background:#6c5ce7;
+    color:white;
+    border:none;
+    padding:10px;
+    border-radius:8px;
+    cursor:pointer;
+}
+
+.add { background:#00b894; }
+.remove { background:red; }
+
+.item {
+    background:#f9f9f9;
+    padding:15px;
+    border-radius:10px;
+    margin-bottom:15px;
+}
+</style>
+
+<div class="box">
+
+<h2>📥 Przyjęcie towaru</h2>
+
+<form method="POST" action="/receive_full">
+
+<!-- 🔝 DANE FAKTURY -->
+<select name="warehouse" id="warehouse" onchange="toggleWood()">
+<option>Drewno</option>
+<option>Farby</option>
+<option>Śruby i wkręty</option>
+<option>Pellet</option>
+<option>Inne</option>
+</select>
+
+<input type="date" name="date">
+<input name="invoice" placeholder="Faktura">
+<input name="kontrahent" placeholder="Kontrahent">
+
+<hr>
+
+<h3>📦 Produkty</h3>
+
+<div id="items">
+
+<div class="item">
+
+<input name="name" placeholder="Produkt">
+<input name="qty" placeholder="Ilość">
+
+<select name="unit">
+<option>m2</option>
+<option>m3</option>
+<option>szt</option>
+<option>l</option>
+<option>opak</option>
+</select>
+
+<!-- 🔥 PACZKI -->
+<div class="wood-section" style="display:none;">
+<h4>Paczki</h4>
+
+<div class="packages">
+
+<div style="display:flex; gap:10px;">
+<input name="package_number" placeholder="Nr paczki">
+<input name="package_qty" placeholder="Ilość">
+</div>
+
+</div>
+
+<button type="button" onclick="addPackage(this)">➕ Paczka</button>
+</div>
+
+<button type="button" class="remove" onclick="removeItem(this)">❌ Usuń</button>
+
+</div>
+
+</div>
+
+<button type="button" class="add" onclick="addItem()">➕ Dodaj produkt</button>
+
+<hr>
+
+<button type="submit">💾 Zapisz przyjęcie</button>
+
+</form>
+
+</div>
+
+
+<!-- 🔥 IMPORT EXCEL -->
+<div class="box" style="margin-top:20px;">
+
+<h3>📊 Import z Excela</h3>
+
+<form method="POST" action="/preview_excel" enctype="multipart/form-data">
+
+<select name="warehouse">
+<option>Drewno</option>
+<option>Farby</option>
+<option>Śruby i wkręty</option>
+<option>Pellet</option>
+<option>Inne</option>
+</select>
+
+<input type="file" name="file" accept=".xlsx,.csv" required>
+
+<button>📥 Wczytaj plik (podgląd)</button>
+
+</form>
+
+</div>
+
+
+<script>
+function addItem() {
+    let div = document.createElement("div");
+    div.classList.add("item");
+
+    div.innerHTML = `
+    <input name="name" placeholder="Produkt">
+    <input name="qty" placeholder="Ilość">
+
+    <select name="unit">
+        <option>m2</option>
+        <option>m3</option>
+        <option>szt</option>
+        <option>l</option>
+        <option>opak</option>
+    </select>
+
+    <div class="wood-section" style="display:none;">
+        <h4>Paczki</h4>
+
+        <div class="packages">
+            <div style="display:flex; gap:10px;">
+                <input name="package_number" placeholder="Nr paczki">
+                <input name="package_qty" placeholder="Ilość">
+            </div>
+        </div>
+
+        <button type="button" onclick="addPackage(this)">➕ Paczka</button>
+    </div>
+
+    <button type="button" class="remove" onclick="removeItem(this)">❌ Usuń</button>
+    `;
+
+    document.getElementById("items").appendChild(div);
+    toggleWood();
+}
+
+function removeItem(btn) {
+    btn.parentElement.remove();
+}
+
+function addPackage(btn) {
+    let container = btn.parentElement.querySelector(".packages");
+
+    let div = document.createElement("div");
+    div.style.display = "flex";
+    div.style.gap = "10px";
+
+    div.innerHTML = `
+        <input name="package_number" placeholder="Nr paczki">
+        <input name="package_qty" placeholder="Ilość">
+    `;
+
+    container.appendChild(div);
+}
+
+function toggleWood() {
+    let warehouse = document.getElementById("warehouse").value;
+
+    document.querySelectorAll(".wood-section").forEach(el => {
+        el.style.display = warehouse === "Drewno" ? "block" : "none";
+    });
+}
+
+// start
+document.addEventListener("DOMContentLoaded", toggleWood);
+</script>
+
+{% endblock %}

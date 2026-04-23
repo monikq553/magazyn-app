@@ -1,0 +1,261 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<style>
+.box {
+    background:white;
+    padding:25px;
+    border-radius:12px;
+    box-shadow:0 4px 10px rgba(0,0,0,0.05);
+    max-width:700px;
+}
+
+input, select {
+    padding:10px;
+    border-radius:8px;
+    border:1px solid #ddd;
+    width:100%;
+    margin-bottom:10px;
+}
+
+button {
+    background:#111827;
+    color:white;
+    border:none;
+    padding:10px;
+    border-radius:8px;
+    margin-top:10px;
+    cursor:pointer;
+}
+
+.add { background:#00b894; }
+
+.item {
+    padding:12px;
+    background:#f9f9f9;
+    border-radius:8px;
+    margin-bottom:10px;
+}
+
+.info {
+    font-size:13px;
+    color:#555;
+    margin-top:5px;
+}
+
+.suggestions div {
+    padding:8px;
+    cursor:pointer;
+}
+
+.suggestions div:hover {
+    background:#f1f2f6;
+}
+</style>
+
+<div class="box">
+
+<h2>📄 Dokument WZ (Wydanie)</h2>
+
+<!-- 🔥 POPRAWIONY FORM -->
+<form method="POST" action="/issue_doc" enctype="multipart/form-data">
+
+<input name="doc_number" placeholder="Numer WZ / faktury">
+<input name="kontrahent" placeholder="Kontrahent">
+<input type="date" name="date">
+
+<select name="warehouse">
+<option>Drewno</option>
+<option>Farby</option>
+<option>Śruby i wkręty</option>
+<option>Pellet</option>
+<option>Inne</option>
+</select>
+
+<!-- 🔥 NOWE: ZDJĘCIE -->
+<input type="file" name="image">
+
+<hr>
+
+<h3>Pozycje</h3>
+
+<div id="items">
+
+<div class="item">
+
+<div style="position:relative;">
+    <input type="text" placeholder="Wpisz produkt..."
+    onkeyup="searchProduct(this)"
+    class="product-input">
+
+    <input type="hidden" name="product_id">
+
+    <div class="suggestions" style="
+        position:absolute;
+        background:white;
+        width:100%;
+        border:1px solid #ddd;
+        border-radius:8px;
+        display:none;
+        max-height:150px;
+        overflow:auto;
+        z-index:10;
+    "></div>
+</div>
+
+<div class="info"></div>
+
+<select name="package_id" onchange="showPackageInfo(this)">
+<option value="">-- wybierz paczkę --</option>
+{% for pkg in packages %}
+<option value="{{pkg[0]}}" data-product="{{pkg[1]}}" data-qty="{{pkg[3]}}">
+Paczka {{pkg[2]}} ({{pkg[3]}})
+</option>
+{% endfor %}
+</select>
+
+<div class="info package-info"></div>
+
+<input name="qty" placeholder="Ilość" oninput="calculateTotal()">
+
+<select name="unit">
+<option>m2</option>
+<option>m3</option>
+<option>szt</option>
+<option>l</option>
+<option>opak</option>
+</select>
+
+<input name="price_netto" placeholder="Cena netto" oninput="nettoToBrutto(this); calculateTotal()">
+<input name="price_brutto" placeholder="Cena brutto" oninput="bruttoToNetto(this); calculateTotal()">
+
+<button type="button" onclick="removeItem(this)" style="background:red;">❌</button>
+
+</div>
+
+</div>
+
+<button type="button" class="add" onclick="addItem()">➕ Dodaj pozycję</button>
+
+<hr>
+
+<h3>💰 Suma: <span id="total">0.00</span> zł</h3>
+
+<button>Wydaj</button>
+
+</form>
+
+</div>
+
+<script>
+const VAT = 1.23;
+let isUpdating = false;
+
+const PRODUCTS = [
+{% for p in products %}
+{ id: {{p[0]}}, name: "{{p[1]}}", qty: "{{p[2]}}", unit: "{{p[3]}}" },
+{% endfor %}
+];
+
+function searchProduct(input) {
+    let value = input.value.toLowerCase();
+    let box = input.parentElement.querySelector(".suggestions");
+    let hidden = input.parentElement.querySelector("input[name='product_id']");
+    let info = input.closest(".item").querySelector(".info");
+
+    box.innerHTML = "";
+
+    if (!value) {
+        box.style.display = "none";
+        hidden.value = "";
+        return;
+    }
+
+    let found = PRODUCTS.filter(p => p.name.toLowerCase().includes(value));
+
+    found.forEach(p => {
+        let div = document.createElement("div");
+        div.innerText = p.name;
+
+        div.onclick = () => {
+            input.value = p.name;
+            hidden.value = p.id;
+
+            info.innerHTML = "📦 Stan: " + p.qty + " " + p.unit;
+            box.style.display = "none";
+
+            let pkgSelect = input.closest(".item").querySelector("select[name='package_id']");
+            Array.from(pkgSelect.options).forEach(opt => {
+                if (!opt.value) return;
+                opt.style.display = (opt.dataset.product == p.id) ? "block" : "none";
+            });
+        };
+
+        box.appendChild(div);
+    });
+
+    box.style.display = "block";
+}
+
+function showPackageInfo(select) {
+    let option = select.options[select.selectedIndex];
+    let qty = option.dataset.qty || "";
+
+    let info = select.parentElement.querySelector(".package-info");
+    info.innerHTML = qty ? "📦 W paczce: " + qty : "";
+}
+
+function nettoToBrutto(input) {
+    if (isUpdating) return;
+    isUpdating = true;
+
+    let netto = parseFloat(input.value.replace(",", "."));
+    if (!isNaN(netto)) {
+        let brutto = netto * VAT;
+        input.parentElement.querySelector("input[name='price_brutto']").value = brutto.toFixed(2);
+    }
+
+    isUpdating = false;
+}
+
+function bruttoToNetto(input) {
+    if (isUpdating) return;
+    isUpdating = true;
+
+    let brutto = parseFloat(input.value.replace(",", "."));
+    if (!isNaN(brutto)) {
+        let netto = brutto / VAT;
+        input.parentElement.querySelector("input[name='price_netto']").value = netto.toFixed(2);
+    }
+
+    isUpdating = false;
+}
+
+function calculateTotal() {
+    let total = 0;
+
+    document.querySelectorAll(".item").forEach(item => {
+        let qty = parseFloat(item.querySelector("input[name='qty']").value?.replace(",", ".")) || 0;
+        let brutto = parseFloat(item.querySelector("input[name='price_brutto']").value?.replace(",", ".")) || 0;
+
+        total += qty * brutto;
+    });
+
+    document.getElementById("total").innerText = total.toFixed(2);
+}
+
+function addItem() {
+    let div = document.createElement("div");
+    div.classList.add("item");
+    div.innerHTML = document.querySelector(".item").innerHTML;
+    document.getElementById("items").appendChild(div);
+}
+
+function removeItem(btn) {
+    btn.parentElement.remove();
+    calculateTotal();
+}
+</script>
+
+{% endblock %}
