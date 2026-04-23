@@ -259,6 +259,19 @@ def issue_doc():
 
     return redirect('/magazyn/' + warehouse)
 
+# HISTORIA
+@app.route('/historia')
+def historia():
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute("SELECT * FROM issue_docs ORDER BY id DESC")
+    docs = cur.fetchall()
+
+    conn.close()
+
+    return render_template("historia.html", docs=docs)
+
 
 # 🔥 EXCEL PODGLĄD
 @app.route('/preview_excel', methods=['POST'])
