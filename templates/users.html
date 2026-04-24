@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+
+{% block content %}
+
+<div style="max-width:600px; margin:40px auto;">
+
+<h2>👥 Użytkownicy</h2>
+
+<form method="POST" action="/add_user" style="margin-bottom:20px;">
+    <input name="username" placeholder="Login" style="width:100%; padding:10px; margin-bottom:10px;">
+    <input name="password" placeholder="Hasło" style="width:100%; padding:10px; margin-bottom:10px;">
+    
+    <select name="role" style="width:100%; padding:10px; margin-bottom:10px;">
+        <option value="user">Pracownik</option>
+        <option value="admin">Admin</option>
+    </select>
+
+    <button style="width:100%; padding:10px; background:#6c5ce7; color:white; border:none; border-radius:8px;">
+        ➕ Dodaj użytkownika
+    </button>
+</form>
+
+<hr>
+
+{% for u in users %}
+<div style="padding:10px; background:#f1f2f6; border-radius:8px; margin-bottom:10px;">
+    👤 {{u[1]}} | 🔑 {{u[2]}}
+</div>
+{% endfor %}
+
+</div>
+
+{% endblock %}
