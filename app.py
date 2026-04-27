@@ -203,6 +203,28 @@ def wydanie():
 
     return render_template("wydanie.html", products=products, packages=packages)
 
+@app.route('/issue_doc', methods=['POST'])
+@login_required
+def issue_doc():
+    conn = db()
+    cur = conn.cursor()
+
+    doc_number = request.form.get('doc_number')
+    kontrahent = request.form.get('kontrahent')
+    warehouse = request.form.get('warehouse')
+
+    date = datetime.now().strftime("%Y-%m-%d")
+
+    cur.execute(
+        "INSERT INTO issue_docs(date, kontrahent, warehouse, image, doc_number) VALUES (%s,%s,%s,%s,%s)",
+        (date, kontrahent, warehouse, "", doc_number)
+    )
+
+    conn.commit()
+    conn.close()
+
+    return redirect('/historia')
+
 # 📊 HISTORIA
 @app.route('/historia')
 @login_required
