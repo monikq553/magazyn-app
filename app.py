@@ -29,8 +29,6 @@ def init_db():
     );
     """)
 
-    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT;")
-
     # PRODUCTS
     cur.execute("""
     CREATE TABLE IF NOT EXISTS products(
@@ -41,6 +39,16 @@ def init_db():
         warehouse TEXT,
         price_netto REAL DEFAULT 0,
         vat REAL DEFAULT 0
+    );
+    """)
+
+    # 🔥 PACKAGES (NOWE)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS packages(
+        id SERIAL PRIMARY KEY,
+        product_id INTEGER,
+        number TEXT,
+        qty REAL
     );
     """)
 
@@ -56,7 +64,7 @@ def init_db():
     );
     """)
 
-    # ISSUE ITEMS (🔥 KLUCZOWE)
+    # ISSUE ITEMS
     cur.execute("""
     CREATE TABLE IF NOT EXISTS issue_items(
         id SERIAL PRIMARY KEY,
@@ -91,41 +99,22 @@ def login_required(f):
     return decorated
 
 
-# 🔒 ADMIN REQUIRED
-def admin_required(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        if 'user' not in session:
-            return redirect('/login')
-
-        if session.get('role') != 'admin':
-            return "Brak dostępu"
-
-        return f(*args, **kwargs)
-    return decorated
-
-
 # 🔐 LOGIN
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
-        username = request.form['username']
-        password = request.form['password']
-
         conn = db()
         cur = conn.cursor()
 
-        cur.execute("SELECT * FROM users WHERE username=%s", (username,))
+        cur.execute("SELECT * FROM users WHERE username=%s", (request.form['username'],))
         user = cur.fetchone()
-
         conn.close()
 
-        if user and check_password_hash(user[2], password):
-            session['user'] = username
+        if user and check_password_hash(user[2], request.form['password']):
+            session['user'] = user[1]
             session['role'] = user[3]
             return redirect('/')
-        else:
-            return "Błędne dane"
+        return "Błędne dane"
 
     return render_template("login.html")
 
@@ -142,36 +131,6 @@ def logout():
 @login_required
 def home():
     return render_template("home.html")
-
-
-# 📊 DASHBOARD
-@app.route('/dashboard')
-@login_required
-def dashboard():
-    conn = db()
-    cur = conn.cursor()
-
-    cur.execute("SELECT COUNT(*) FROM products")
-    total_products = cur.fetchone()[0]
-
-    cur.execute("SELECT SUM(qty) FROM products")
-    total_qty = cur.fetchone()[0] or 0
-
-    cur.execute("SELECT name, qty FROM products ORDER BY qty DESC LIMIT 5")
-    top = cur.fetchall()
-
-    conn.close()
-
-    names = [t[0] for t in top]
-    qtys = [float(t[1]) for t in top]
-
-    return render_template(
-        "dashboard.html",
-        total_products=total_products,
-        total_qty=total_qty,
-        names=names,
-        qtys=qtys
-    )
 
 
 # 🟢 MAGAZYNY
@@ -199,21 +158,7 @@ def magazyn(name):
     return render_template("index.html", products=products, warehouse=name)
 
 
-# ❌ USUŃ PRODUKT
-@app.route('/delete_product/<int:id>', methods=['POST'])
-@login_required
-def delete_product(id):
-    conn = db()
-    cur = conn.cursor()
-
-    cur.execute("DELETE FROM products WHERE id=%s", (id,))
-
-    conn.commit()
-    conn.close()
-
-    return redirect(request.referrer)
-
-# 🟢 PRZYJĘCIE
+# 📥 PRZYJĘCIE (VIEW)
 @app.route('/przyjecie')
 @login_required
 def przyjecie():
@@ -223,18 +168,77 @@ def przyjecie():
     cur.execute("SELECT * FROM products")
     products = cur.fetchall()
 
-    # 🔥 DODAJ TO
     cur.execute("SELECT * FROM packages")
     packages = cur.fetchall()
 
     conn.close()
 
-    return render_template(
-        "przyjecie.html",
-        products=products,
-        packages=packages
+    return render_template("przyjecie.html", products=products, packages=packages)
+
+
+# 📥 PRZYJĘCIE (LOGIKA)
+@app.route('/receive_doc', methods=['POST'])
+@login_required
+def receive_doc():
+    conn = db()
+    cur = conn.cursor()
+
+    date = datetime.now().strftime("%Y-%m-%d")
+
+    cur.execute(
+        "INSERT INTO issue_docs(date, kontrahent, warehouse, image, doc_number) VALUES (%s,%s,%s,%s,%s) RETURNING id",
+        (date, request.form.get('kontrahent'), "PZ", "", "PZ")
     )
-# 🟢 WYDANIE
+    doc_id = cur.fetchone()[0]
+
+    product_ids = request.form.getlist('product_id')
+    qtys = request.form.getlist('qty')
+    warehouses = request.form.getlist('warehouse')
+    package_numbers = request.form.getlist('package_number')
+
+    for i in range(len(product_ids)):
+        if not product_ids[i]:
+            continue
+
+        pid = int(product_ids[i])
+
+        try:
+            qty = float(qtys[i].replace(",", "."))
+        except:
+            qty = 0
+
+        warehouse = warehouses[i]
+        package = package_numbers[i]
+
+        if qty <= 0:
+            continue
+
+        # 🔥 update produktu
+        cur.execute(
+            "UPDATE products SET qty = qty + %s WHERE id=%s",
+            (qty, pid)
+        )
+
+        # 🔥 zapis pozycji
+        cur.execute(
+            "INSERT INTO issue_items(doc_id, product_id, qty, warehouse) VALUES (%s,%s,%s,%s)",
+            (doc_id, pid, qty, warehouse)
+        )
+
+        # 🔥 PACZKA
+        if package:
+            cur.execute(
+                "INSERT INTO packages(product_id, number, qty) VALUES (%s,%s,%s)",
+                (pid, package, qty)
+            )
+
+    conn.commit()
+    conn.close()
+
+    return redirect('/historia')
+
+
+# 📤 WYDANIE
 @app.route('/wydanie')
 @login_required
 def wydanie():
@@ -248,157 +252,6 @@ def wydanie():
 
     return render_template("wydanie.html", products=products)
 
-# 📥 PRZYJĘCIE - zapis dokumentu
-@app.route('/receive_doc', methods=['POST'])
-@login_required
-def receive_doc():
-    conn = db()
-    cur = conn.cursor()
-
-    kontrahent = request.form.get('kontrahent')
-    date = datetime.now().strftime("%Y-%m-%d")
-
-    # zapis dokumentu (możesz zrobić osobną tabelę później)
-    cur.execute(
-        "INSERT INTO issue_docs(date, kontrahent, warehouse, image, doc_number) VALUES (%s,%s,%s,%s,%s) RETURNING id",
-        (date, kontrahent, "PRZYJĘCIE", "", "PZ")
-    )
-
-    doc_id = cur.fetchone()[0]
-
-    # 🔥 pobieranie list (wiele pozycji)
-    product_ids = request.form.getlist('product_id')
-    qtys = request.form.getlist('qty')
-    warehouses = request.form.getlist('warehouse')
-
-    for i in range(len(product_ids)):
-        pid = product_ids[i]
-        warehouse = warehouses[i]
-
-        try:
-            qty = float(qtys[i].replace(",", "."))
-        except:
-            qty = 0
-
-        if not pid or qty <= 0:
-            continue
-
-        # 🔥 aktualizacja magazynu
-        cur.execute(
-            "SELECT id FROM products WHERE id=%s AND warehouse=%s",
-            (pid, warehouse)
-        )
-        product = cur.fetchone()
-
-        if product:
-            cur.execute(
-                "UPDATE products SET qty = qty + %s WHERE id=%s",
-                (qty, pid)
-            )
-
-        # 🔥 zapis pozycji (historia)
-        cur.execute(
-            "INSERT INTO issue_items(doc_id, product_id, qty) VALUES (%s,%s,%s)",
-            (doc_id, pid, qty)
-        )
-
-    conn.commit()
-    conn.close()
-
-    return redirect('/historia')
-
-# 🔥 ISSUE DOC (MULTI MAGAZYN)
-@app.route('/issue_doc', methods=['POST'])
-@login_required
-def issue_doc():
-    conn = db()
-    cur = conn.cursor()
-
-    kontrahent = request.form.get('kontrahent')
-
-    date = datetime.now().strftime("%Y-%m-%d")
-
-    # 🔥 numer auto
-    cur.execute("SELECT COUNT(*) FROM issue_docs")
-    count = cur.fetchone()[0] + 1
-    doc_number = f"WZ/{count}/{datetime.now().year}"
-
-    cur.execute(
-        "INSERT INTO issue_docs(date, kontrahent, warehouse, image, doc_number) VALUES (%s,%s,%s,%s,%s) RETURNING id",
-        (date, kontrahent, "", "", doc_number)
-    )
-    doc_id = cur.fetchone()[0]
-
-    product_ids = request.form.getlist('product_id')
-    qtys = request.form.getlist('qty')
-    warehouses = request.form.getlist('warehouse')
-
-    for i in range(len(product_ids)):
-        if not product_ids[i]:
-            continue
-
-        pid = int(product_ids[i])
-        wh = warehouses[i]
-
-        try:
-            q = float(qtys[i].replace(",", "."))
-        except:
-            q = 0
-
-        if q <= 0:
-            continue
-
-        # 🔥 stan
-        cur.execute(
-            "SELECT qty FROM products WHERE id=%s AND warehouse=%s",
-            (pid, wh)
-        )
-        res = cur.fetchone()
-
-        if not res or res[0] < q:
-            conn.close()
-            return f"Brak stanu w magazynie {wh}"
-
-        # zapis pozycji
-        cur.execute(
-            "INSERT INTO issue_items(doc_id, product_id, qty, warehouse) VALUES (%s,%s,%s,%s)",
-            (doc_id, pid, q, wh)
-        )
-
-        # odejmowanie
-        cur.execute(
-            "UPDATE products SET qty = qty - %s WHERE id=%s AND warehouse=%s",
-            (q, pid, wh)
-        )
-
-    conn.commit()
-    conn.close()
-
-    return redirect(f'/doc/{doc_id}')
-
-
-# 📄 SZCZEGÓŁ
-@app.route('/doc/<int:id>')
-@login_required
-def doc_detail(id):
-    conn = db()
-    cur = conn.cursor()
-
-    cur.execute("SELECT * FROM issue_docs WHERE id=%s", (id,))
-    doc = cur.fetchone()
-
-    cur.execute("""
-        SELECT p.name, i.qty, i.warehouse
-        FROM issue_items i
-        JOIN products p ON p.id = i.product_id
-        WHERE i.doc_id=%s
-    """, (id,))
-    items = cur.fetchall()
-
-    conn.close()
-
-    return render_template("doc_detail.html", doc=doc, items=items)
-
 
 # 📊 HISTORIA
 @app.route('/historia')
@@ -407,9 +260,8 @@ def historia():
     conn = db()
     cur = conn.cursor()
 
-    cur.execute("SELECT * FROM issue_docs ORDER BY date DESC, id DESC")
+    cur.execute("SELECT * FROM issue_docs ORDER BY id DESC")
     docs = cur.fetchall()
-
     conn.close()
 
     days = {}
@@ -417,67 +269,6 @@ def historia():
         days.setdefault(d[1], []).append(d)
 
     return render_template("historia.html", days=days)
-
-
-# 👥 USERS
-@app.route('/users')
-@admin_required
-def users():
-    conn = db()
-    cur = conn.cursor()
-
-    cur.execute("SELECT id, username, role FROM users")
-    users = cur.fetchall()
-
-    conn.close()
-
-    return render_template("users.html", users=users)
-
-
-# ➕ ADD USER
-@app.route('/add_user', methods=['POST'])
-@admin_required
-def add_user():
-    conn = db()
-    cur = conn.cursor()
-
-    username = request.form['username']
-    password = generate_password_hash(request.form['password'])
-    role = request.form['role']
-
-    cur.execute(
-        "INSERT INTO users(username, password, role) VALUES (%s,%s,%s)",
-        (username, password, role)
-    )
-
-    conn.commit()
-    conn.close()
-
-    return redirect('/users')
-
-
-# 🗑 DELETE USER
-@app.route('/delete_user/<int:id>', methods=['POST'])
-@admin_required
-def delete_user(id):
-    conn = db()
-    cur = conn.cursor()
-
-    if id == 1:
-        return "Nie można usunąć admina"
-
-    cur.execute("SELECT username FROM users WHERE id=%s", (id,))
-    user = cur.fetchone()
-
-    if user and user[0] == session.get('user'):
-        return "Nie możesz usunąć siebie"
-
-    cur.execute("DELETE FROM users WHERE id=%s", (id,))
-
-    conn.commit()
-    conn.close()
-
-    return redirect('/users')
 
 
 # 🚀 START
