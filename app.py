@@ -179,6 +179,30 @@ def delete_product(id):
 
     return redirect(request.referrer)
 
+# 🟢 PRZYJĘCIE
+@app.route('/przyjecie')
+@login_required
+def przyjecie():
+    return render_template("przyjecie.html")
+
+
+# 🟢 WYDANIE
+@app.route('/wydanie')
+@login_required
+def wydanie():
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute("SELECT * FROM products")
+    products = cur.fetchall()
+
+    cur.execute("SELECT * FROM packages")
+    packages = cur.fetchall()
+
+    conn.close()
+
+    return render_template("wydanie.html", products=products, packages=packages)
+
 
 # 👥 USERS PANEL
 @app.route('/users')
