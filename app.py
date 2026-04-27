@@ -3,37 +3,10 @@ from flask import Flask, render_template, request, redirect, session
 from functools import wraps
 import psycopg2
 from werkzeug.security import generate_password_hash, check_password_hash
+from datetime import datetime
 
 app = Flask(__name__)
 app.secret_key = "supersecretkey"
-
-from datetime import datetime
-
-@app.route('/doc/<int:id>')
-@login_required
-def doc_detail(id):
-    conn = db()
-    cur = conn.cursor()
-
-    # dokument
-    cur.execute("SELECT * FROM issue_docs WHERE id=%s", (id,))
-    doc = cur.fetchone()
-
-    if not doc:
-        return "Brak dokumentu"
-
-    # produkty (jeśli masz tabelę issue_items)
-    cur.execute("""
-        SELECT p.name, i.qty
-        FROM issue_items i
-        JOIN products p ON p.id = i.product_id
-        WHERE i.doc_id=%s
-    """, (id,))
-    items = cur.fetchall()
-
-    conn.close()
-
-    return render_template("doc_detail.html", doc=doc, items=items)
 
 
 # 🔥 DB
@@ -207,6 +180,7 @@ def delete_product(id):
 
     return redirect(request.referrer)
 
+
 # 🟢 PRZYJĘCIE
 @app.route('/przyjecie')
 @login_required
@@ -231,6 +205,8 @@ def wydanie():
 
     return render_template("wydanie.html", products=products, packages=packages)
 
+
+# 📤 ZAPIS DOKUMENTU
 @app.route('/issue_doc', methods=['POST'])
 @login_required
 def issue_doc():
@@ -253,6 +229,37 @@ def issue_doc():
 
     return redirect('/historia')
 
+
+# 📄 SZCZEGÓŁ DOKUMENTU
+@app.route('/doc/<int:id>')
+@login_required
+def doc_detail(id):
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute("SELECT * FROM issue_docs WHERE id=%s", (id,))
+    doc = cur.fetchone()
+
+    if not doc:
+        return "Brak dokumentu"
+
+    items = []
+    try:
+        cur.execute("""
+            SELECT p.name, i.qty
+            FROM issue_items i
+            JOIN products p ON p.id = i.product_id
+            WHERE i.doc_id=%s
+        """, (id,))
+        items = cur.fetchall()
+    except:
+        pass
+
+    conn.close()
+
+    return render_template("doc_detail.html", doc=doc, items=items)
+
+
 # 📊 HISTORIA
 @app.route('/historia')
 @login_required
@@ -260,19 +267,20 @@ def historia():
     conn = db()
     cur = conn.cursor()
 
-    cur.execute("SELECT * FROM issue_docs ORDER BY id DESC")
+    cur.execute("SELECT * FROM issue_docs ORDER BY date DESC, id DESC")
     docs = cur.fetchall()
 
     conn.close()
 
     days = {}
     for d in docs:
-        days.setdefault(d[1], []).append(d)
+        day = d[1] or "Brak daty"
+        days.setdefault(day, []).append(d)
 
     return render_template("historia.html", days=days)
 
 
-# 👥 USERS PANEL
+# 👥 USERS
 @app.route('/users')
 @admin_required
 def users():
@@ -316,16 +324,14 @@ def delete_user(id):
     conn = db()
     cur = conn.cursor()
 
-    # 🔒 nie pozwól usunąć admina
     if id == 1:
         return "Nie można usunąć admina"
 
-    # 🔒 nie pozwól usunąć siebie
     cur.execute("SELECT username FROM users WHERE id=%s", (id,))
     user = cur.fetchone()
 
     if user and user[0] == session.get('user'):
-        return "Nie możesz usunąć samego siebie"
+        return "Nie możesz usunąć siebie"
 
     cur.execute("DELETE FROM users WHERE id=%s", (id,))
 
@@ -333,6 +339,7 @@ def delete_user(id):
     conn.close()
 
     return redirect('/users')
+
 
 # 🚀 START
 if __name__ == '__main__':
