@@ -223,10 +223,17 @@ def przyjecie():
     cur.execute("SELECT * FROM products")
     products = cur.fetchall()
 
+    # 🔥 DODAJ TO
+    cur.execute("SELECT * FROM packages")
+    packages = cur.fetchall()
+
     conn.close()
 
-    return render_template("przyjecie.html", products=products)
-
+    return render_template(
+        "przyjecie.html",
+        products=products,
+        packages=packages
+    )
 # 🟢 WYDANIE
 @app.route('/wydanie')
 @login_required
