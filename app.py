@@ -9,6 +9,32 @@ app.secret_key = "supersecretkey"
 
 from datetime import datetime
 
+@app.route('/doc/<int:id>')
+@login_required
+def doc_detail(id):
+    conn = db()
+    cur = conn.cursor()
+
+    # dokument
+    cur.execute("SELECT * FROM issue_docs WHERE id=%s", (id,))
+    doc = cur.fetchone()
+
+    if not doc:
+        return "Brak dokumentu"
+
+    # produkty (jeśli masz tabelę issue_items)
+    cur.execute("""
+        SELECT p.name, i.qty
+        FROM issue_items i
+        JOIN products p ON p.id = i.product_id
+        WHERE i.doc_id=%s
+    """, (id,))
+    items = cur.fetchall()
+
+    conn.close()
+
+    return render_template("doc_detail.html", doc=doc, items=items)
+
 
 # 🔥 DB
 def db():
