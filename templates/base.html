@@ -22,15 +22,13 @@ body {
 
 /* 🔝 TOPBAR */
 .topbar {
-    background: white;
+    background: rgba(17, 24, 39, 0.8);
+    backdrop-filter: blur(8px);
     padding: 16px 30px;
     display: flex;
     justify-content: space-between;
     align-items: center;
-    border-bottom: 1px solid #e5e7eb;
-    position: sticky;
-    top: 0;
-    z-index: 10;
+    border-bottom: 1px solid #1f2937;
 }
 
 .logo {
@@ -42,13 +40,13 @@ body {
 .menu a {
     margin-left: 20px;
     text-decoration: none;
-    color: #6b7280;
+    color: #9ca3af;
     font-size: 14px;
     transition: 0.2s;
 }
 
 .menu a:hover {
-    color: #111827;
+    color: #ffffff;
 }
 
 /* CONTENT */
@@ -64,29 +62,27 @@ body {
 }
 
 .tile {
-    background: white;
+    background: rgba(31, 41, 55, 0.7);
+    backdrop-filter: blur(8px);
     border-radius: 16px;
     padding: 30px;
-    border: 1px solid #e5e7eb;
+    border: 1px solid #374151;
     text-decoration: none;
-    color: #111827;
-    font-size: 16px;
-    font-weight: 500;
-    transition: 0.2s;
+    color: #f9fafb;
+    transition: 0.25s;
 }
 
 .tile:hover {
-    transform: translateY(-5px);
-    box-shadow: 0 10px 25px rgba(0,0,0,0.05);
+    transform: translateY(-6px) scale(1.01);
+    box-shadow: 0 15px 35px rgba(0,0,0,0.4);
 }
 
 /* KARTY */
 .card {
-    background: white;
+    background: rgba(31, 41, 55, 0.8);
     border-radius: 14px;
     padding: 20px;
-    border: 1px solid #e5e7eb;
-    transition: 0.2s;
+    border: 1px solid #374151;
 }
 
 .card:hover {
@@ -94,8 +90,8 @@ body {
 }
 
 /* BUTTON */
-button, .btn {
-    background: #111827;
+button {
+    background: #6c5ce7;
     color: white;
     border: none;
     padding: 10px 14px;
@@ -105,7 +101,9 @@ button, .btn {
 }
 
 button:hover {
-    background: #000;
+    background: #5a4bd6;
+}
+
 }
 
 /* DELETE */
@@ -117,12 +115,14 @@ button:hover {
 input, select {
     padding: 10px;
     border-radius: 10px;
-    border: 1px solid #e5e7eb;
+    border: 1px solid #374151;
     font-size: 14px;
+    background: #111827;
+    color: #e5e7eb;
 }
 
 input:focus {
-    border-color: #111827;
+    border-color: #6c5ce7;
     outline: none;
 }
 </style>
