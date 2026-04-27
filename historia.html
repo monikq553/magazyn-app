@@ -2,159 +2,51 @@
 
 {% block content %}
 
-<style>
-.container { max-width:900px; margin:auto; }
+<h2 style="margin-bottom:20px;">📄 Dokumenty</h2>
 
-.box {
+<style>
+.card {
     background:white;
-    padding:20px;
+    border:1px solid #e5e7eb;
     border-radius:12px;
-    box-shadow:0 4px 10px rgba(0,0,0,0.05);
-    margin-bottom:15px;
+    margin-bottom:20px;
+    overflow:hidden;
 }
 
-.day {
-    cursor:pointer;
-    padding:15px;
+.header {
+    background:#f9fafb;
+    padding:10px 15px;
+    font-weight:600;
     border-bottom:1px solid #eee;
 }
 
-.day:hover { background:#f9f9f9; }
-
-.docs { display:none; padding:10px; }
-
-.doc {
+.row {
     display:flex;
     justify-content:space-between;
-    align-items:center;
-    padding:10px;
-    border-bottom:1px solid #eee;
+    padding:12px 15px;
+    border-top:1px solid #eee;
 }
 
-.btn {
-    background:#6c5ce7;
-    color:white;
-    padding:5px 10px;
-    border-radius:6px;
-    border:none;
-    cursor:pointer;
-    font-size:13px;
-}
-
-.btn.delete {
-    background:red;
-}
-
-.filters input {
-    padding:8px;
-    margin-right:5px;
+.row:hover {
+    background:#fafafa;
 }
 </style>
 
-<div class="container">
-
-<h2>📊 Historia</h2>
-
-<!-- 🔍 FILTRY -->
-<form method="GET" class="filters">
-<input type="date" name="date">
-<input name="kontrahent" placeholder="Kontrahent">
-<input name="produkt" placeholder="Produkt">
-<button class="btn">Filtruj</button>
-</form>
-
-<!-- 📁 DNI -->
 {% for day, docs in days.items() %}
+<div class="card">
 
-<div class="box">
-
-<div class="day" onclick="toggleDay('{{loop.index}}')">
-📁 {{day}} ({{docs|length}} dokumentów)
+<div class="header">
+    {{ day }}
 </div>
-
-<div id="day{{loop.index}}" class="docs">
 
 {% for d in docs %}
-<div class="doc">
-
-<div>
-<b>{{d[5]}}</b> | {{d[2]}}
-</div>
-
-<div style="display:flex; gap:10px;">
-
-<!-- 👁 podgląd -->
-<button class="btn" onclick="openDoc(event, {{d[0]}})">👁</button>
-
-<!-- 🗑 USUWANIE -->
-<form method="POST" action="/delete_doc/{{d[0]}}" onsubmit="return confirm('Usunąć dokument?')">
-<button class="btn delete">🗑</button>
-</form>
-
-</div>
-
+<div class="row">
+    <span>{{ d[5] }}</span> <!-- numer -->
+    <span>{{ d[2] }}</span> <!-- kontrahent -->
 </div>
 {% endfor %}
 
 </div>
-
-</div>
-
 {% endfor %}
-
-</div>
-
-
-<!-- 📄 MODAL -->
-<div id="docModal" style="
-display:none;
-position:fixed;
-top:0;
-left:0;
-width:100%;
-height:100%;
-background:rgba(0,0,0,0.6);
-z-index:1000;
-justify-content:center;
-align-items:center;
-" onclick="closeDoc()">
-
-<div onclick="event.stopPropagation()" style="
-background:white;
-width:90%;
-max-width:900px;
-max-height:90%;
-overflow:auto;
-border-radius:12px;
-padding:20px;
-">
-
-<div id="docContent">Ładowanie...</div>
-
-</div>
-</div>
-
-
-<script>
-function toggleDay(id) {
-    let el = document.getElementById("day" + id);
-    el.style.display = (el.style.display === "block") ? "none" : "block";
-}
-
-function openDoc(e, id) {
-    e.stopPropagation();
-
-    fetch('/doc/' + id)
-    .then(res => res.text())
-    .then(html => {
-        document.getElementById("docContent").innerHTML = html;
-        document.getElementById("docModal").style.display = "flex";
-    });
-}
-
-function closeDoc() {
-    document.getElementById("docModal").style.display = "none";
-}
-</script>
 
 {% endblock %}
