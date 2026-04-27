@@ -2,50 +2,17 @@
 
 {% block content %}
 
-<h2 style="margin-bottom:20px;">📄 Dokumenty</h2>
-
-<style>
-.card {
-    background:white;
-    border:1px solid #e5e7eb;
-    border-radius:12px;
-    margin-bottom:20px;
-    overflow:hidden;
-}
-
-.header {
-    background:#f9fafb;
-    padding:10px 15px;
-    font-weight:600;
-    border-bottom:1px solid #eee;
-}
-
-.row {
-    display:flex;
-    justify-content:space-between;
-    padding:12px 15px;
-    border-top:1px solid #eee;
-}
-
-.row:hover {
-    background:#fafafa;
-}
-</style>
+<h2>Historia</h2>
 
 {% for day, docs in days.items() %}
-<div class="card">
+<div style="background:white;padding:15px;margin-bottom:15px;border-radius:10px;">
+    <b>{{ day }}</b>
 
-<div class="header">
-    {{ day }}
-</div>
-
-{% for d in docs %}
-<div class="row">
-    <span>{{ d[5] }}</span>
-    <span>{{ d[2] }}</span>
-</div>
-{% endfor %}
-
+    {% for d in docs %}
+    <div style="margin-top:5px;">
+        {{ d[5] }} — {{ d[2] }}
+    </div>
+    {% endfor %}
 </div>
 {% endfor %}
 
