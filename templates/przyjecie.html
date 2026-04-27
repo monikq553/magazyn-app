@@ -40,6 +40,7 @@ button {
 .info {
     font-size:13px;
     color:#666;
+    margin-bottom:5px;
 }
 
 .suggestions div {
@@ -71,7 +72,8 @@ button {
 <!-- 🔍 PRODUKT -->
 <div style="position:relative;">
     <input type="text" placeholder="Produkt..."
-    onkeyup="searchProduct(this)">
+    onkeyup="searchProduct(this)"
+    class="product-input">
 
     <input type="hidden" name="product_id">
 
@@ -89,6 +91,22 @@ button {
 </div>
 
 <div class="info"></div>
+
+<!-- 🔥 PACZKI -->
+<select name="package_id" onchange="showPackageInfo(this)">
+<option value="">-- wybierz paczkę --</option>
+
+{% for pkg in packages %}
+<option value="{{pkg[0]}}"
+        data-product="{{pkg[1]}}"
+        data-qty="{{pkg[3]}}">
+Paczka {{pkg[2]}} ({{pkg[3]}})
+</option>
+{% endfor %}
+
+</select>
+
+<div class="info package-info"></div>
 
 <!-- 🔥 MAGAZYN -->
 <select name="warehouse">
@@ -124,6 +142,7 @@ const PRODUCTS = [
 {% endfor %}
 ];
 
+// 🔍 SZUKANIE PRODUKTU + FILTROWANIE PACZEK
 function searchProduct(input) {
     let value = input.value.toLowerCase();
     let box = input.parentElement.querySelector(".suggestions");
@@ -134,6 +153,7 @@ function searchProduct(input) {
 
     if (!value) {
         box.style.display = "none";
+        hidden.value = "";
         return;
     }
 
@@ -147,9 +167,18 @@ function searchProduct(input) {
             input.value = p.name;
             hidden.value = p.id;
 
-            info.innerHTML = "📦 Aktualnie: " + p.qty + " " + p.unit;
+            info.innerHTML = "📦 Stan: " + p.qty + " " + p.unit;
 
-            input.closest(".item").querySelector("select[name='warehouse']").value = p.warehouse;
+            // 🔥 ustaw magazyn automatycznie
+            input.closest(".item")
+                .querySelector("select[name='warehouse']").value = p.warehouse;
+
+            // 🔥 FILTR PACZEK
+            let pkgSelect = input.closest(".item").querySelector("select[name='package_id']");
+            Array.from(pkgSelect.options).forEach(opt => {
+                if (!opt.value) return;
+                opt.style.display = (opt.dataset.product == p.id) ? "block" : "none";
+            });
 
             box.style.display = "none";
         };
@@ -160,6 +189,16 @@ function searchProduct(input) {
     box.style.display = "block";
 }
 
+// 📦 INFO O PACZCE
+function showPackageInfo(select) {
+    let option = select.options[select.selectedIndex];
+    let qty = option.dataset.qty || "";
+
+    let info = select.parentElement.querySelector(".package-info");
+    info.innerHTML = qty ? "📦 W paczce: " + qty : "";
+}
+
+// ➕ DODAJ ITEM
 function addItem() {
     let div = document.createElement("div");
     div.classList.add("item");
@@ -167,6 +206,7 @@ function addItem() {
     document.getElementById("items").appendChild(div);
 }
 
+// ❌ USUŃ ITEM
 function removeItem(btn) {
     btn.parentElement.remove();
 }
