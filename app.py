@@ -245,11 +245,19 @@ def add_user():
 @app.route('/delete_user/<int:id>', methods=['POST'])
 @admin_required
 def delete_user(id):
+    conn = db()
+    cur = conn.cursor()
+
+    # 🔒 nie pozwól usunąć admina
     if id == 1:
         return "Nie można usunąć admina"
 
-    conn = db()
-    cur = conn.cursor()
+    # 🔒 nie pozwól usunąć siebie
+    cur.execute("SELECT username FROM users WHERE id=%s", (id,))
+    user = cur.fetchone()
+
+    if user and user[0] == session.get('user'):
+        return "Nie możesz usunąć samego siebie"
 
     cur.execute("DELETE FROM users WHERE id=%s", (id,))
 
@@ -257,7 +265,6 @@ def delete_user(id):
     conn.close()
 
     return redirect('/users')
-
 
 # 🚀 START
 if __name__ == '__main__':
