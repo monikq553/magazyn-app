@@ -2,18 +2,74 @@
 
 {% block content %}
 
-<h2>Historia</h2>
+<h2 style="margin-bottom:20px;">📄 Historia dokumentów</h2>
+
+<style>
+.day {
+    margin-bottom:25px;
+}
+
+.day-title {
+    font-weight:600;
+    margin-bottom:10px;
+    color:#6b7280;
+}
+
+.doc {
+    background:white;
+    border-radius:12px;
+    padding:15px;
+    margin-bottom:10px;
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    cursor:pointer;
+    border:1px solid #e5e7eb;
+    transition:0.2s;
+}
+
+.doc:hover {
+    box-shadow:0 5px 15px rgba(0,0,0,0.05);
+}
+
+.left {
+    display:flex;
+    flex-direction:column;
+}
+
+.nr {
+    font-weight:600;
+}
+
+.kontrahent {
+    font-size:13px;
+    color:#6b7280;
+}
+</style>
 
 {% for day, docs in days.items() %}
-<div style="background:white;padding:15px;margin-bottom:15px;border-radius:10px;">
-    <b>{{ day }}</b>
+<div class="day">
 
-    {% for d in docs %}
-    <div style="margin-top:5px;">
-        {{ d[5] }} — {{ d[2] }}
+<div class="day-title">{{ day }}</div>
+
+{% for d in docs %}
+<div class="doc" onclick="go('/doc/{{d[0]}}')">
+    <div class="left">
+        <div class="nr">{{ d[5] }}</div>
+        <div class="kontrahent">{{ d[2] }}</div>
     </div>
-    {% endfor %}
+
+    <div>→</div>
 </div>
 {% endfor %}
+
+</div>
+{% endfor %}
+
+<script>
+function go(url){
+    window.location.href = url;
+}
+</script>
 
 {% endblock %}
