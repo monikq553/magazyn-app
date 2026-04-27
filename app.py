@@ -203,6 +203,24 @@ def wydanie():
 
     return render_template("wydanie.html", products=products, packages=packages)
 
+# 📊 HISTORIA
+@app.route('/historia')
+@login_required
+def historia():
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute("SELECT * FROM issue_docs ORDER BY id DESC")
+    docs = cur.fetchall()
+
+    conn.close()
+
+    days = {}
+    for d in docs:
+        days.setdefault(d[1], []).append(d)
+
+    return render_template("historia.html", days=days)
+
 
 # 👥 USERS PANEL
 @app.route('/users')
