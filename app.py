@@ -213,6 +213,19 @@ def delete_product(id):
 
     return redirect(request.referrer)
 
+# 🟢 PRZYJĘCIE
+@app.route('/przyjecie')
+@login_required
+def przyjecie():
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute("SELECT * FROM products")
+    products = cur.fetchall()
+
+    conn.close()
+
+    return render_template("przyjecie.html", products=products)
 
 # 🟢 WYDANIE
 @app.route('/wydanie')
