@@ -1,17 +1,11 @@
 import os
-from werkzeug.utils import secure_filename
 from flask import Flask, render_template, request, redirect, session
 from functools import wraps
-from datetime import datetime
-import pandas as pd
 import psycopg2
 from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
 app.secret_key = "supersecretkey"
-
-UPLOAD_FOLDER = "static/uploads"
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 
 # 🔥 DB
@@ -33,13 +27,12 @@ def init_db():
     );
     """)
 
-    # 🔥 jeśli tabela była stara → dodaj kolumnę
     cur.execute("""
     ALTER TABLE users
     ADD COLUMN IF NOT EXISTS role TEXT;
     """)
 
-    # 🔥 reset admina (MUSI BYĆ NA TYM SAMYM POZIOMIE WCIĘCIA)
+    # 🔥 admin
     cur.execute("DELETE FROM users WHERE username='admin'")
     cur.execute(
         "INSERT INTO users(username, password, role) VALUES (%s,%s,%s)",
@@ -49,7 +42,7 @@ def init_db():
     conn.commit()
     conn.close()
 
-# 🔥 start DB
+
 init_db()
 
 
@@ -67,8 +60,12 @@ def login_required(f):
 def admin_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
+        if 'user' not in session:
+            return redirect('/login')
+
         if session.get('role') != 'admin':
             return "Brak dostępu"
+
         return f(*args, **kwargs)
     return decorated
 
@@ -85,6 +82,7 @@ def login():
 
         cur.execute("SELECT * FROM users WHERE username=%s", (username,))
         user = cur.fetchone()
+
         conn.close()
 
         if user and check_password_hash(user[2], password):
@@ -109,6 +107,36 @@ def logout():
 @login_required
 def home():
     return render_template("home.html")
+
+
+# 📊 DASHBOARD
+@app.route('/dashboard')
+@login_required
+def dashboard():
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute("SELECT COUNT(*) FROM products")
+    total_products = cur.fetchone()[0]
+
+    cur.execute("SELECT SUM(qty) FROM products")
+    total_qty = cur.fetchone()[0] or 0
+
+    cur.execute("SELECT name, qty FROM products ORDER BY qty DESC LIMIT 5")
+    top = cur.fetchall()
+
+    conn.close()
+
+    names = [t[0] for t in top]
+    qtys = [float(t[1]) for t in top]
+
+    return render_template(
+        "dashboard.html",
+        total_products=total_products,
+        total_qty=total_qty,
+        names=names,
+        qtys=qtys
+    )
 
 
 # 🟢 MAGAZYNY
@@ -136,31 +164,6 @@ def magazyn(name):
     return render_template("index.html", products=products, warehouse=name)
 
 
-# 🟢 PRZYJĘCIE
-@app.route('/przyjecie')
-@login_required
-def przyjecie():
-    return render_template("przyjecie.html")
-
-
-# 🟢 WYDANIE
-@app.route('/wydanie')
-@login_required
-def wydanie():
-    conn = db()
-    cur = conn.cursor()
-
-    cur.execute("SELECT * FROM products")
-    products = cur.fetchall()
-
-    cur.execute("SELECT * FROM packages")
-    packages = cur.fetchall()
-
-    conn.close()
-
-    return render_template("wydanie.html", products=products, packages=packages)
-
-
 # ❌ USUŃ PRODUKT
 @app.route('/delete_product/<int:id>', methods=['POST'])
 @login_required
@@ -174,74 +177,10 @@ def delete_product(id):
     conn.commit()
     conn.close()
 
-    return "OK"
+    return redirect(request.referrer)
 
 
-# 📥 PRZYJĘCIE
-@app.route('/receive_full', methods=['POST'])
-@login_required
-def receive_full():
-    conn = db()
-    cur = conn.cursor()
-
-    warehouse = request.form['warehouse']
-    names = request.form.getlist('name')
-    qtys = request.form.getlist('qty')
-    units = request.form.getlist('unit')
-
-    for i in range(len(names)):
-        name = names[i].strip()
-
-        try:
-            qty = float(qtys[i].replace(",", "."))
-        except:
-            qty = 0
-
-        if not name or qty <= 0:
-            continue
-
-        cur.execute(
-            "SELECT id FROM products WHERE name=%s AND warehouse=%s",
-            (name, warehouse)
-        )
-        product = cur.fetchone()
-
-        if product:
-            cur.execute(
-                "UPDATE products SET qty = qty + %s WHERE id=%s",
-                (qty, product[0])
-            )
-        else:
-            cur.execute(
-                "INSERT INTO products(name, qty, unit, warehouse, price_netto, vat) VALUES (%s,%s,%s,%s,0,0)",
-                (name, qty, units[i], warehouse)
-            )
-
-    conn.commit()
-    conn.close()
-
-    return redirect('/magazyn/' + warehouse)
-
-
-# 📊 HISTORIA
-@app.route('/historia')
-@login_required
-def historia():
-    conn = db()
-    cur = conn.cursor()
-
-    cur.execute("SELECT * FROM issue_docs ORDER BY id DESC")
-    docs = cur.fetchall()
-    conn.close()
-
-    days = {}
-    for d in docs:
-        days.setdefault(d[1], []).append(d)
-
-    return render_template("historia.html", days=days)
-
-
-# 👥 PANEL UŻYTKOWNIKÓW
+# 👥 USERS PANEL
 @app.route('/users')
 @admin_required
 def users():
@@ -256,7 +195,7 @@ def users():
     return render_template("users.html", users=users)
 
 
-# ➕ DODAJ UŻYTKOWNIKA
+# ➕ ADD USER
 @app.route('/add_user', methods=['POST'])
 @admin_required
 def add_user():
@@ -278,6 +217,24 @@ def add_user():
     return redirect('/users')
 
 
-# 🚀 LOCAL
+# 🗑 DELETE USER
+@app.route('/delete_user/<int:id>', methods=['POST'])
+@admin_required
+def delete_user(id):
+    if id == 1:
+        return "Nie można usunąć admina"
+
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute("DELETE FROM users WHERE id=%s", (id,))
+
+    conn.commit()
+    conn.close()
+
+    return redirect('/users')
+
+
+# 🚀 START
 if __name__ == '__main__':
     app.run()
