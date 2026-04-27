@@ -42,7 +42,7 @@ def init_db():
     );
     """)
 
-    # 🔥 PACKAGES (NOWE)
+    # 🔥 PACKAGES
     cur.execute("""
     CREATE TABLE IF NOT EXISTS packages(
         id SERIAL PRIMARY KEY,
@@ -52,7 +52,7 @@ def init_db():
     );
     """)
 
-    # ISSUE DOCS
+    # DOCUMENTY
     cur.execute("""
     CREATE TABLE IF NOT EXISTS issue_docs(
         id SERIAL PRIMARY KEY,
@@ -64,18 +64,19 @@ def init_db():
     );
     """)
 
-    # ISSUE ITEMS
+    # POZYCJE
     cur.execute("""
     CREATE TABLE IF NOT EXISTS issue_items(
         id SERIAL PRIMARY KEY,
         doc_id INTEGER,
         product_id INTEGER,
         qty REAL,
-        warehouse TEXT
+        warehouse TEXT,
+        package_id INTEGER
     );
     """)
 
-    # ADMIN RESET
+    # ADMIN
     cur.execute("DELETE FROM users WHERE username='admin'")
     cur.execute(
         "INSERT INTO users(username, password, role) VALUES (%s,%s,%s)",
@@ -89,7 +90,7 @@ def init_db():
 init_db()
 
 
-# 🔒 LOGIN REQUIRED
+# 🔒 LOGIN
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -158,7 +159,7 @@ def magazyn(name):
     return render_template("index.html", products=products, warehouse=name)
 
 
-# 📥 PRZYJĘCIE (VIEW)
+# 📥 PRZYJĘCIE
 @app.route('/przyjecie')
 @login_required
 def przyjecie():
@@ -176,7 +177,7 @@ def przyjecie():
     return render_template("przyjecie.html", products=products, packages=packages)
 
 
-# 📥 PRZYJĘCIE (LOGIKA)
+# 📥 ZAPIS PRZYJĘCIA
 @app.route('/receive_doc', methods=['POST'])
 @login_required
 def receive_doc():
@@ -207,29 +208,26 @@ def receive_doc():
         except:
             qty = 0
 
-        warehouse = warehouses[i]
-        package = package_numbers[i]
-
         if qty <= 0:
             continue
 
-        # 🔥 update produktu
+        # stan +
         cur.execute(
             "UPDATE products SET qty = qty + %s WHERE id=%s",
             (qty, pid)
         )
 
-        # 🔥 zapis pozycji
+        # zapis pozycji
         cur.execute(
             "INSERT INTO issue_items(doc_id, product_id, qty, warehouse) VALUES (%s,%s,%s,%s)",
-            (doc_id, pid, qty, warehouse)
+            (doc_id, pid, qty, warehouses[i])
         )
 
         # 🔥 PACZKA
-        if package:
+        if package_numbers[i]:
             cur.execute(
                 "INSERT INTO packages(product_id, number, qty) VALUES (%s,%s,%s)",
-                (pid, package, qty)
+                (pid, package_numbers[i], qty)
             )
 
     conn.commit()
@@ -248,9 +246,107 @@ def wydanie():
     cur.execute("SELECT * FROM products")
     products = cur.fetchall()
 
+    cur.execute("SELECT * FROM packages")
+    packages = cur.fetchall()
+
     conn.close()
 
-    return render_template("wydanie.html", products=products)
+    return render_template("wydanie.html", products=products, packages=packages)
+
+
+# 📤 ZAPIS WYDANIA (PRO)
+@app.route('/issue_doc', methods=['POST'])
+@login_required
+def issue_doc():
+    conn = db()
+    cur = conn.cursor()
+
+    date = datetime.now().strftime("%Y-%m-%d")
+    kontrahent = request.form.get('kontrahent')
+
+    cur.execute("SELECT COUNT(*) FROM issue_docs")
+    num = cur.fetchone()[0] + 1
+    doc_number = f"WZ/{num}/{datetime.now().year}"
+
+    cur.execute(
+        "INSERT INTO issue_docs(date, kontrahent, warehouse, image, doc_number) VALUES (%s,%s,%s,%s,%s) RETURNING id",
+        (date, kontrahent, "", "", doc_number)
+    )
+    doc_id = cur.fetchone()[0]
+
+    product_ids = request.form.getlist('product_id')
+    qtys = request.form.getlist('qty')
+    warehouses = request.form.getlist('warehouse')
+    package_ids = request.form.getlist('package_id')
+
+    for i in range(len(product_ids)):
+        if not product_ids[i]:
+            continue
+
+        pid = int(product_ids[i])
+        pkg = package_ids[i] if package_ids[i] else None
+
+        try:
+            qty = float(qtys[i].replace(",", "."))
+        except:
+            qty = 0
+
+        if qty <= 0:
+            continue
+
+        # 🔥 PACZKA
+        if pkg:
+            pkg = int(pkg)
+
+            cur.execute("SELECT qty FROM packages WHERE id=%s", (pkg,))
+            p = cur.fetchone()
+
+            if not p or p[0] < qty:
+                conn.close()
+                return "Brak w paczce"
+
+            cur.execute("UPDATE packages SET qty = qty - %s WHERE id=%s", (qty, pkg))
+
+        # stan -
+        cur.execute("UPDATE products SET qty = qty - %s WHERE id=%s", (qty, pid))
+
+        # zapis
+        cur.execute(
+            "INSERT INTO issue_items(doc_id, product_id, qty, warehouse, package_id) VALUES (%s,%s,%s,%s,%s)",
+            (doc_id, pid, qty, warehouses[i], pkg)
+        )
+
+    # 🔥 czyść puste paczki
+    cur.execute("DELETE FROM packages WHERE qty <= 0")
+
+    conn.commit()
+    conn.close()
+
+    return redirect(f"/doc/{doc_id}")
+
+
+# 📄 SZCZEGÓŁ
+@app.route('/doc/<int:id>')
+@login_required
+def doc_detail(id):
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute("SELECT * FROM issue_docs WHERE id=%s", (id,))
+    doc = cur.fetchone()
+
+    cur.execute("""
+        SELECT p.name, i.qty, i.warehouse, pk.number
+        FROM issue_items i
+        JOIN products p ON p.id = i.product_id
+        LEFT JOIN packages pk ON pk.id = i.package_id
+        WHERE i.doc_id=%s
+    """, (id,))
+    items = cur.fetchall()
+
+    conn.close()
+
+    return render_template("doc_detail.html", doc=doc, items=items)
 
 
 # 📊 HISTORIA
