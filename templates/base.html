@@ -26,12 +26,14 @@ body {
     justify-content: space-between;
     align-items: center;
     border-bottom: 1px solid #e5e7eb;
+    position: sticky;
+    top: 0;
+    z-index: 10;
 }
 
 .logo {
     font-weight: 600;
     font-size: 18px;
-    letter-spacing: 0.3px;
 }
 
 /* MENU */
@@ -52,6 +54,30 @@ body {
     padding: 30px;
 }
 
+/* 🔥 KAFELKI (NOWE) */
+.tiles {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 20px;
+}
+
+.tile {
+    background: white;
+    border-radius: 16px;
+    padding: 30px;
+    border: 1px solid #e5e7eb;
+    text-decoration: none;
+    color: #111827;
+    font-size: 16px;
+    font-weight: 500;
+    transition: 0.2s;
+}
+
+.tile:hover {
+    transform: translateY(-5px);
+    box-shadow: 0 10px 25px rgba(0,0,0,0.05);
+}
+
 /* KARTY */
 .card {
     background: white;
@@ -62,7 +88,6 @@ body {
 }
 
 .card:hover {
-    border-color: #d1d5db;
     box-shadow: 0 6px 20px rgba(0,0,0,0.04);
 }
 
@@ -98,12 +123,6 @@ input:focus {
     border-color: #111827;
     outline: none;
 }
-
-/* GRID */
-.grid {
-    display: grid;
-    gap: 20px;
-}
 </style>
 
 </head>
@@ -111,7 +130,7 @@ input:focus {
 <body>
 
 <div class="topbar">
-    <div class="logo">MAGAZYN</div>
+    <div class="logo">📦 MAGAZYN</div>
 
     <div class="menu">
         <a href="/">Start</a>
@@ -119,6 +138,8 @@ input:focus {
         <a href="/przyjecie">Przyjęcie</a>
         <a href="/wydanie">Wydanie</a>
         <a href="/historia">Historia</a>
+        <a href="/users">Użytkownicy</a>
+        <a href="/logout">Wyloguj</a>
     </div>
 </div>
 
@@ -135,13 +156,16 @@ input:focus {
         ← Wróć
     </button>
 </div>
+
 {% block content %}{% endblock %}
+
 </div>
 
-</body>
-</html>
 <script>
 function goBack() {
     window.history.back();
 }
 </script>
+
+</body>
+</html>
