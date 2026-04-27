@@ -53,6 +53,46 @@
 
 <div class="container">
 
+    {% extends "base.html" %}
+
+{% block content %}
+
+<h2 style="margin-bottom:20px;">📄 Historia</h2>
+
+<style>
+.card {
+    background:white;
+    padding:20px;
+    border-radius:16px;
+    border:1px solid #eef0f4;
+    margin-bottom:20px;
+}
+
+.item {
+    display:flex;
+    justify-content:space-between;
+    padding:8px 0;
+    border-bottom:1px solid #eee;
+}
+</style>
+
+{% for day, docs in days.items() %}
+<div class="card">
+
+<h3>{{day}}</h3>
+
+{% for d in docs %}
+<div class="item">
+    <span>{{d[5]}}</span> <!-- numer dokumentu -->
+    <span>{{d[2]}}</span> <!-- kontrahent -->
+</div>
+{% endfor %}
+
+</div>
+{% endfor %}
+
+{% endblock %}
+
 <h2>📊 Historia</h2>
 
 <!-- 🔍 FILTRY -->
