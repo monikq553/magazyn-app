@@ -228,6 +228,64 @@ def wydanie():
 
     return render_template("wydanie.html", products=products)
 
+# 📥 PRZYJĘCIE - zapis dokumentu
+@app.route('/receive_doc', methods=['POST'])
+@login_required
+def receive_doc():
+    conn = db()
+    cur = conn.cursor()
+
+    kontrahent = request.form.get('kontrahent')
+    date = datetime.now().strftime("%Y-%m-%d")
+
+    # zapis dokumentu (możesz zrobić osobną tabelę później)
+    cur.execute(
+        "INSERT INTO issue_docs(date, kontrahent, warehouse, image, doc_number) VALUES (%s,%s,%s,%s,%s) RETURNING id",
+        (date, kontrahent, "PRZYJĘCIE", "", "PZ")
+    )
+
+    doc_id = cur.fetchone()[0]
+
+    # 🔥 pobieranie list (wiele pozycji)
+    product_ids = request.form.getlist('product_id')
+    qtys = request.form.getlist('qty')
+    warehouses = request.form.getlist('warehouse')
+
+    for i in range(len(product_ids)):
+        pid = product_ids[i]
+        warehouse = warehouses[i]
+
+        try:
+            qty = float(qtys[i].replace(",", "."))
+        except:
+            qty = 0
+
+        if not pid or qty <= 0:
+            continue
+
+        # 🔥 aktualizacja magazynu
+        cur.execute(
+            "SELECT id FROM products WHERE id=%s AND warehouse=%s",
+            (pid, warehouse)
+        )
+        product = cur.fetchone()
+
+        if product:
+            cur.execute(
+                "UPDATE products SET qty = qty + %s WHERE id=%s",
+                (qty, pid)
+            )
+
+        # 🔥 zapis pozycji (historia)
+        cur.execute(
+            "INSERT INTO issue_items(doc_id, product_id, qty) VALUES (%s,%s,%s)",
+            (doc_id, pid, qty)
+        )
+
+    conn.commit()
+    conn.close()
+
+    return redirect('/historia')
 
 # 🔥 ISSUE DOC (MULTI MAGAZYN)
 @app.route('/issue_doc', methods=['POST'])
