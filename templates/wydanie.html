@@ -6,42 +6,42 @@
 .box {
     background:white;
     padding:25px;
-    border-radius:12px;
-    box-shadow:0 4px 10px rgba(0,0,0,0.05);
-    max-width:700px;
+    border-radius:14px;
+    box-shadow:0 10px 30px rgba(0,0,0,0.08);
+    max-width:900px;
 }
 
 input, select {
     padding:10px;
-    border-radius:8px;
+    border-radius:10px;
     border:1px solid #ddd;
     width:100%;
     margin-bottom:10px;
+    font-size:14px;
 }
 
 button {
     background:#111827;
     color:white;
     border:none;
-    padding:10px;
-    border-radius:8px;
-    margin-top:10px;
+    padding:10px 14px;
+    border-radius:10px;
     cursor:pointer;
 }
 
 .add { background:#00b894; }
 
 .item {
-    padding:12px;
-    background:#f9f9f9;
-    border-radius:8px;
-    margin-bottom:10px;
+    padding:15px;
+    background:#f8fafc;
+    border-radius:12px;
+    margin-bottom:12px;
+    border:1px solid #eee;
 }
 
 .info {
     font-size:13px;
-    color:#555;
-    margin-top:5px;
+    color:#666;
 }
 
 .suggestions div {
@@ -50,31 +50,17 @@ button {
 }
 
 .suggestions div:hover {
-    background:#f1f2f6;
+    background:#f1f5f9;
 }
 </style>
 
 <div class="box">
 
-<h2>📄 Dokument WZ (Wydanie)</h2>
+<h2>📄 Wydanie (WZ)</h2>
 
-<!-- 🔥 POPRAWIONY FORM -->
-<form method="POST" action="/issue_doc" enctype="multipart/form-data">
+<form method="POST" action="/issue_doc">
 
-<input name="doc_number" placeholder="Numer WZ / faktury">
 <input name="kontrahent" placeholder="Kontrahent">
-<input type="date" name="date">
-
-<select name="warehouse">
-<option>Drewno</option>
-<option>Farby</option>
-<option>Śruby i wkręty</option>
-<option>Pellet</option>
-<option>Inne</option>
-</select>
-
-<!-- 🔥 NOWE: ZDJĘCIE -->
-<input type="file" name="image">
 
 <hr>
 
@@ -84,8 +70,9 @@ button {
 
 <div class="item">
 
+<!-- 🔍 PRODUKT -->
 <div style="position:relative;">
-    <input type="text" placeholder="Wpisz produkt..."
+    <input type="text" placeholder="Produkt..."
     onkeyup="searchProduct(this)"
     class="product-input">
 
@@ -106,30 +93,19 @@ button {
 
 <div class="info"></div>
 
-<select name="package_id" onchange="showPackageInfo(this)">
-<option value="">-- wybierz paczkę --</option>
-{% for pkg in packages %}
-<option value="{{pkg[0]}}" data-product="{{pkg[1]}}" data-qty="{{pkg[3]}}">
-Paczka {{pkg[2]}} ({{pkg[3]}})
-</option>
-{% endfor %}
+<!-- 🔥 MAGAZYN NA POZYCJI -->
+<select name="warehouse">
+<option>Drewno</option>
+<option>Farby</option>
+<option>Śruby i wkręty</option>
+<option>Pellet</option>
+<option>Inne</option>
 </select>
 
-<div class="info package-info"></div>
+<!-- ILOŚĆ -->
+<input name="qty" placeholder="Ilość">
 
-<input name="qty" placeholder="Ilość" oninput="calculateTotal()">
-
-<select name="unit">
-<option>m2</option>
-<option>m3</option>
-<option>szt</option>
-<option>l</option>
-<option>opak</option>
-</select>
-
-<input name="price_netto" placeholder="Cena netto" oninput="nettoToBrutto(this); calculateTotal()">
-<input name="price_brutto" placeholder="Cena brutto" oninput="bruttoToNetto(this); calculateTotal()">
-
+<!-- USUŃ -->
 <button type="button" onclick="removeItem(this)" style="background:red;">❌</button>
 
 </div>
@@ -140,8 +116,6 @@ Paczka {{pkg[2]}} ({{pkg[3]}})
 
 <hr>
 
-<h3>💰 Suma: <span id="total">0.00</span> zł</h3>
-
 <button>Wydaj</button>
 
 </form>
@@ -149,12 +123,9 @@ Paczka {{pkg[2]}} ({{pkg[3]}})
 </div>
 
 <script>
-const VAT = 1.23;
-let isUpdating = false;
-
 const PRODUCTS = [
 {% for p in products %}
-{ id: {{p[0]}}, name: "{{p[1]}}", qty: "{{p[2]}}", unit: "{{p[3]}}" },
+{ id: {{p[0]}}, name: "{{p[1]}}", qty: "{{p[2]}}", unit: "{{p[3]}}", warehouse: "{{p[4]}}" },
 {% endfor %}
 ];
 
@@ -168,7 +139,6 @@ function searchProduct(input) {
 
     if (!value) {
         box.style.display = "none";
-        hidden.value = "";
         return;
     }
 
@@ -176,73 +146,24 @@ function searchProduct(input) {
 
     found.forEach(p => {
         let div = document.createElement("div");
-        div.innerText = p.name;
+        div.innerText = p.name + " (" + p.warehouse + ")";
 
         div.onclick = () => {
             input.value = p.name;
             hidden.value = p.id;
 
-            info.innerHTML = "📦 Stan: " + p.qty + " " + p.unit;
-            box.style.display = "none";
+            info.innerHTML = "📦 " + p.qty + " " + p.unit + " | " + p.warehouse;
 
-            let pkgSelect = input.closest(".item").querySelector("select[name='package_id']");
-            Array.from(pkgSelect.options).forEach(opt => {
-                if (!opt.value) return;
-                opt.style.display = (opt.dataset.product == p.id) ? "block" : "none";
-            });
+            // 🔥 automatycznie ustawia magazyn
+            input.closest(".item").querySelector("select[name='warehouse']").value = p.warehouse;
+
+            box.style.display = "none";
         };
 
         box.appendChild(div);
     });
 
     box.style.display = "block";
-}
-
-function showPackageInfo(select) {
-    let option = select.options[select.selectedIndex];
-    let qty = option.dataset.qty || "";
-
-    let info = select.parentElement.querySelector(".package-info");
-    info.innerHTML = qty ? "📦 W paczce: " + qty : "";
-}
-
-function nettoToBrutto(input) {
-    if (isUpdating) return;
-    isUpdating = true;
-
-    let netto = parseFloat(input.value.replace(",", "."));
-    if (!isNaN(netto)) {
-        let brutto = netto * VAT;
-        input.parentElement.querySelector("input[name='price_brutto']").value = brutto.toFixed(2);
-    }
-
-    isUpdating = false;
-}
-
-function bruttoToNetto(input) {
-    if (isUpdating) return;
-    isUpdating = true;
-
-    let brutto = parseFloat(input.value.replace(",", "."));
-    if (!isNaN(brutto)) {
-        let netto = brutto / VAT;
-        input.parentElement.querySelector("input[name='price_netto']").value = netto.toFixed(2);
-    }
-
-    isUpdating = false;
-}
-
-function calculateTotal() {
-    let total = 0;
-
-    document.querySelectorAll(".item").forEach(item => {
-        let qty = parseFloat(item.querySelector("input[name='qty']").value?.replace(",", ".")) || 0;
-        let brutto = parseFloat(item.querySelector("input[name='price_brutto']").value?.replace(",", ".")) || 0;
-
-        total += qty * brutto;
-    });
-
-    document.getElementById("total").innerText = total.toFixed(2);
 }
 
 function addItem() {
@@ -254,7 +175,6 @@ function addItem() {
 
 function removeItem(btn) {
     btn.parentElement.remove();
-    calculateTotal();
 }
 </script>
 
