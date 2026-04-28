@@ -21,15 +21,15 @@ input, select {
 }
 
 button {
-    background:#FFC067;
-    color:#422d00;
+    background:#2563eb;
+    color:white;
     border:none;
     padding:10px 14px;
     border-radius:10px;
     cursor:pointer;
 }
 
-.add { background:#FFC067; }
+.add { background:#0ea5e9; }
 
 .item {
     padding:15px;
@@ -57,7 +57,7 @@ button {
 
 <div class="box">
 
-<h2>{{ page_title or "Przyjęcie (PZ)" }}</h2>
+<h2>{{ page_title or "📥 Przyjęcie (PZ)" }}</h2>
 
 <form method="POST" action="{{ form_action or '/receive_doc' }}">
 
