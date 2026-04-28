@@ -42,17 +42,18 @@ def init_db():
     );
     """)
 
-    # 🔥 PACKAGES
+    # PACKAGES
     cur.execute("""
     CREATE TABLE IF NOT EXISTS packages(
         id SERIAL PRIMARY KEY,
         product_id INTEGER,
         number TEXT,
-        qty REAL
+        qty REAL,
+        warehouse TEXT
     );
     """)
 
-    # DOCUMENTY
+    # DOCS
     cur.execute("""
     CREATE TABLE IF NOT EXISTS issue_docs(
         id SERIAL PRIMARY KEY,
@@ -64,7 +65,7 @@ def init_db():
     );
     """)
 
-    # POZYCJE
+    # ITEMS
     cur.execute("""
     CREATE TABLE IF NOT EXISTS issue_items(
         id SERIAL PRIMARY KEY,
@@ -76,7 +77,7 @@ def init_db():
     );
     """)
 
-    # ADMIN
+    # ADMIN RESET
     cur.execute("DELETE FROM users WHERE username='admin'")
     cur.execute(
         "INSERT INTO users(username, password, role) VALUES (%s,%s,%s)",
@@ -90,7 +91,7 @@ def init_db():
 init_db()
 
 
-# 🔒 LOGIN
+# 🔒 LOGIN REQUIRED
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -120,28 +121,24 @@ def login():
     return render_template("login.html")
 
 
-# 🔓 LOGOUT
 @app.route('/logout')
 def logout():
     session.clear()
     return redirect('/login')
 
 
-# 🟢 HOME
 @app.route('/')
 @login_required
 def home():
     return render_template("home.html")
 
 
-# 🟢 MAGAZYNY
 @app.route('/magazyny')
 @login_required
 def magazyny():
     return render_template("magazyny.html")
 
 
-# 🟢 MAGAZYN
 @app.route('/magazyn/<name>')
 @login_required
 def magazyn(name):
@@ -186,10 +183,11 @@ def receive_doc():
 
     date = datetime.now().strftime("%Y-%m-%d")
 
-    cur.execute(
-        "INSERT INTO issue_docs(date, kontrahent, warehouse, image, doc_number) VALUES (%s,%s,%s,%s,%s) RETURNING id",
-        (date, request.form.get('kontrahent'), "PZ", "", "PZ")
-    )
+    cur.execute("""
+        INSERT INTO issue_docs(date, kontrahent, warehouse, image, doc_number)
+        VALUES (%s,%s,%s,%s,%s) RETURNING id
+    """, (date, request.form.get('kontrahent'), "PZ", "", "PZ"))
+
     doc_id = cur.fetchone()[0]
 
     product_ids = request.form.getlist('product_id')
@@ -202,6 +200,7 @@ def receive_doc():
             continue
 
         pid = int(product_ids[i])
+        wh = warehouses[i]
 
         try:
             qty = float(qtys[i].replace(",", "."))
@@ -211,24 +210,25 @@ def receive_doc():
         if qty <= 0:
             continue
 
-        # stan +
-        cur.execute(
-            "UPDATE products SET qty = qty + %s WHERE id=%s",
-            (qty, pid)
-        )
+        # ✅ stan +
+        cur.execute("""
+            UPDATE products 
+            SET qty = qty + %s 
+            WHERE id=%s AND warehouse=%s
+        """, (qty, pid, wh))
 
         # zapis pozycji
-        cur.execute(
-            "INSERT INTO issue_items(doc_id, product_id, qty, warehouse) VALUES (%s,%s,%s,%s)",
-            (doc_id, pid, qty, warehouses[i])
-        )
+        cur.execute("""
+            INSERT INTO issue_items(doc_id, product_id, qty, warehouse)
+            VALUES (%s,%s,%s,%s)
+        """, (doc_id, pid, qty, wh))
 
-        # 🔥 PACZKA
+        # pakiet
         if package_numbers[i]:
-            cur.execute(
-                "INSERT INTO packages(product_id, number, qty) VALUES (%s,%s,%s)",
-                (pid, package_numbers[i], qty)
-            )
+            cur.execute("""
+                INSERT INTO packages(product_id, number, qty, warehouse)
+                VALUES (%s,%s,%s,%s)
+            """, (pid, package_numbers[i], qty, wh))
 
     conn.commit()
     conn.close()
@@ -268,10 +268,11 @@ def issue_doc():
     num = cur.fetchone()[0] + 1
     doc_number = f"WZ/{num}/{datetime.now().year}"
 
-    cur.execute(
-        "INSERT INTO issue_docs(date, kontrahent, warehouse, image, doc_number) VALUES (%s,%s,%s,%s,%s) RETURNING id",
-        (date, kontrahent, "", "", doc_number)
-    )
+    cur.execute("""
+        INSERT INTO issue_docs(date, kontrahent, warehouse, image, doc_number)
+        VALUES (%s,%s,%s,%s,%s) RETURNING id
+    """, (date, kontrahent, "", "", doc_number))
+
     doc_id = cur.fetchone()[0]
 
     product_ids = request.form.getlist('product_id')
@@ -284,7 +285,7 @@ def issue_doc():
             continue
 
         pid = int(product_ids[i])
-        pkg = package_ids[i] if package_ids[i] else None
+        wh = warehouses[i]
 
         try:
             qty = float(qtys[i].replace(",", "."))
@@ -294,29 +295,48 @@ def issue_doc():
         if qty <= 0:
             continue
 
-        # 🔥 PACZKA
+        # 🔥 SPRAWDŹ STAN
+        cur.execute("""
+            SELECT qty FROM products WHERE id=%s AND warehouse=%s
+        """, (pid, wh))
+        current = cur.fetchone()
+
+        if not current or current[0] < qty:
+            conn.close()
+            return f"Brak stanu w magazynie {wh}"
+
+        pkg = package_ids[i] if package_ids[i] else None
+
+        # pakiet
         if pkg:
             pkg = int(pkg)
 
-            cur.execute("SELECT qty FROM packages WHERE id=%s", (pkg,))
+            cur.execute("""
+                SELECT qty FROM packages WHERE id=%s AND warehouse=%s
+            """, (pkg, wh))
             p = cur.fetchone()
 
             if not p or p[0] < qty:
                 conn.close()
                 return "Brak w paczce"
 
-            cur.execute("UPDATE packages SET qty = qty - %s WHERE id=%s", (qty, pkg))
+            cur.execute("""
+                UPDATE packages SET qty = qty - %s WHERE id=%s
+            """, (qty, pkg))
 
-        # stan -
-        cur.execute("UPDATE products SET qty = qty - %s WHERE id=%s", (qty, pid))
+        # ✅ stan -
+        cur.execute("""
+            UPDATE products 
+            SET qty = qty - %s 
+            WHERE id=%s AND warehouse=%s
+        """, (qty, pid, wh))
 
-        # zapis
-        cur.execute(
-            "INSERT INTO issue_items(doc_id, product_id, qty, warehouse, package_id) VALUES (%s,%s,%s,%s,%s)",
-            (doc_id, pid, qty, warehouses[i], pkg)
-        )
+        cur.execute("""
+            INSERT INTO issue_items(doc_id, product_id, qty, warehouse, package_id)
+            VALUES (%s,%s,%s,%s,%s)
+        """, (doc_id, pid, qty, wh, pkg))
 
-    # 🔥 czyść puste paczki
+    # czyść puste paczki
     cur.execute("DELETE FROM packages WHERE qty <= 0")
 
     conn.commit()
@@ -367,6 +387,5 @@ def historia():
     return render_template("historia.html", days=days)
 
 
-# 🚀 START
 if __name__ == '__main__':
     app.run()
