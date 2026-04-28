@@ -533,6 +533,633 @@ def inwestycja_suwaj_issue_doc():
     return redirect(f"/doc/{doc_id}")
 
 
+@app.route('/inwestycja-suwaj')
+@login_required
+def inwestycja_suwaj():
+    return render_template("inwestycja_suwaj.html", warehouse=INVESTMENT_WAREHOUSE)
+
+
+@app.route('/inwestycja-suwaj/magazyn')
+@login_required
+def inwestycja_suwaj_magazyn():
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM products WHERE warehouse=%s", (INVESTMENT_WAREHOUSE,))
+    products = cur.fetchall()
+    conn.close()
+    return render_template("index.html", products=products, warehouse=INVESTMENT_WAREHOUSE)
+
+
+@app.route('/inwestycja-suwaj/przyjecie')
+@login_required
+def inwestycja_suwaj_przyjecie():
+    conn = db()
+    cur = conn.cursor()
+
+    # pokazujemy wszystkie produkty, żeby można było dodać nowy asortyment do magazynu inwestycji
+    cur.execute("SELECT * FROM products")
+    products = cur.fetchall()
+
+    cur.execute("SELECT * FROM packages WHERE warehouse=%s OR warehouse IS NULL", (INVESTMENT_WAREHOUSE,))
+    packages = cur.fetchall()
+
+    conn.close()
+
+    return render_template(
+        "przyjecie.html",
+        products=products,
+        packages=packages,
+        forced_warehouse=INVESTMENT_WAREHOUSE,
+        form_action="/inwestycja-suwaj/receive_doc",
+        page_title="📥 Przyjęcie (PZ) – Inwestycja Suwaj"
+    )
+
+
+@app.route('/inwestycja-suwaj/receive_doc', methods=['POST'])
+@login_required
+def inwestycja_suwaj_receive_doc():
+    conn = db()
+    cur = conn.cursor()
+
+    date = datetime.now().strftime("%Y-%m-%d")
+    kontrahent = request.form.get('kontrahent')
+
+    cur.execute("SELECT COUNT(*) FROM issue_docs WHERE warehouse=%s", (INVESTMENT_WAREHOUSE,))
+    num = cur.fetchone()[0] + 1
+    doc_number = f"PZ-IS/{num}/{datetime.now().year}"
+
+    cur.execute("""
+        INSERT INTO issue_docs(date, kontrahent, warehouse, image, doc_number)
+        VALUES (%s,%s,%s,%s,%s) RETURNING id
+    """, (date, kontrahent, INVESTMENT_WAREHOUSE, "", doc_number))
+    doc_id = cur.fetchone()[0]
+
+    product_ids = request.form.getlist('product_id')
+    qtys = request.form.getlist('qty')
+    package_numbers = request.form.getlist('package_number')
+
+    for i in range(len(product_ids)):
+        if not product_ids[i]:
+            continue
+        pid = int(product_ids[i])
+        try:
+            qty = float(qtys[i].replace(",", "."))
+        except:
+            qty = 0
+        if qty <= 0:
+            continue
+
+        cur.execute("""
+            UPDATE products
+            SET qty = qty + %s
+            WHERE id=%s AND warehouse=%s
+        """, (qty, pid, INVESTMENT_WAREHOUSE))
+        updated = cur.rowcount
+
+        # jeśli produktu nie ma jeszcze w magazynie inwestycji, sklonuj kartotekę i dodaj stan
+        if updated == 0:
+            cur.execute("""
+                SELECT name, unit, price_netto, vat
+                FROM products
+                WHERE id=%s
+            """, (pid,))
+            source = cur.fetchone()
+
+            if source:
+                cur.execute("""
+                    INSERT INTO products(name, qty, unit, warehouse, price_netto, vat)
+                    VALUES (%s,%s,%s,%s,%s,%s)
+                    RETURNING id
+                """, (source[0], qty, source[1], INVESTMENT_WAREHOUSE, source[2], source[3]))
+                pid = cur.fetchone()[0]
+            else:
+                continue
+
+        cur.execute("""
+            INSERT INTO issue_items(doc_id, product_id, qty, warehouse)
+            VALUES (%s,%s,%s,%s)
+        """, (doc_id, pid, qty, INVESTMENT_WAREHOUSE))
+
+        if i < len(package_numbers) and package_numbers[i]:
+            cur.execute("""
+                INSERT INTO packages(product_id, number, qty, warehouse)
+                VALUES (%s,%s,%s,%s)
+            """, (pid, package_numbers[i], qty, INVESTMENT_WAREHOUSE))
+
+    conn.commit()
+    conn.close()
+
+    return redirect('/inwestycja-suwaj/magazyn')
+
+
+@app.route('/inwestycja-suwaj/wydanie')
+@login_required
+def inwestycja_suwaj_wydanie():
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute("SELECT * FROM products WHERE warehouse=%s", (INVESTMENT_WAREHOUSE,))
+    products = cur.fetchall()
+
+    cur.execute("SELECT * FROM packages WHERE warehouse=%s OR warehouse IS NULL", (INVESTMENT_WAREHOUSE,))
+    packages = cur.fetchall()
+    conn.close()
+
+    return render_template(
+        "wydanie.html",
+        products=products,
+        packages=packages,
+        forced_warehouse=INVESTMENT_WAREHOUSE,
+        form_action="/inwestycja-suwaj/issue_doc",
+        page_title="📄 Wydanie (WZ) – Inwestycja Suwaj"
+    )
+
+
+@app.route('/inwestycja-suwaj/issue_doc', methods=['POST'])
+@login_required
+def inwestycja_suwaj_issue_doc():
+    conn = db()
+    cur = conn.cursor()
+
+    date = datetime.now().strftime("%Y-%m-%d")
+    kontrahent = request.form.get('kontrahent')
+
+    cur.execute("SELECT COUNT(*) FROM issue_docs WHERE warehouse=%s", (INVESTMENT_WAREHOUSE,))
+    num = cur.fetchone()[0] + 1
+    doc_number = f"WZ-IS/{num}/{datetime.now().year}"
+
+    cur.execute("""
+        INSERT INTO issue_docs(date, kontrahent, warehouse, image, doc_number)
+        VALUES (%s,%s,%s,%s,%s) RETURNING id
+    """, (date, kontrahent, INVESTMENT_WAREHOUSE, "", doc_number))
+    doc_id = cur.fetchone()[0]
+
+    product_ids = request.form.getlist('product_id')
+    qtys = request.form.getlist('qty')
+    package_ids = request.form.getlist('package_id')
+
+    for i in range(len(product_ids)):
+        if not product_ids[i]:
+            continue
+
+        pid = int(product_ids[i])
+        try:
+            qty = float(qtys[i].replace(",", "."))
+        except:
+            qty = 0
+        if qty <= 0:
+            continue
+
+        cur.execute("""
+            SELECT qty FROM products WHERE id=%s AND warehouse=%s
+        """, (pid, INVESTMENT_WAREHOUSE))
+        current = cur.fetchone()
+
+        if not current or current[0] < qty:
+            conn.close()
+            return f"Brak stanu w magazynie {INVESTMENT_WAREHOUSE}"
+
+        pkg = package_ids[i] if package_ids[i] else None
+        if pkg:
+            pkg = int(pkg)
+            cur.execute("""
+                SELECT qty FROM packages WHERE id=%s
+            """, (pkg,))
+            p = cur.fetchone()
+            if not p or p[0] < qty:
+                conn.close()
+                return "Brak w paczce"
+            cur.execute("UPDATE packages SET qty = qty - %s WHERE id=%s", (qty, pkg))
+
+        cur.execute("""
+            UPDATE products
+            SET qty = qty - %s
+            WHERE id=%s AND warehouse=%s
+        """, (qty, pid, INVESTMENT_WAREHOUSE))
+
+        cur.execute("""
+            INSERT INTO issue_items(doc_id, product_id, qty, warehouse, package_id)
+            VALUES (%s,%s,%s,%s,%s)
+        """, (doc_id, pid, qty, INVESTMENT_WAREHOUSE, pkg))
+
+    cur.execute("DELETE FROM packages WHERE qty <= 0")
+    conn.commit()
+    conn.close()
+
+    return redirect(f"/doc/{doc_id}")
+
+
+@app.route('/inwestycja-suwaj')
+@login_required
+def inwestycja_suwaj():
+    return render_template("inwestycja_suwaj.html", warehouse=INVESTMENT_WAREHOUSE)
+
+
+@app.route('/inwestycja-suwaj/magazyn')
+@login_required
+def inwestycja_suwaj_magazyn():
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM products WHERE warehouse=%s", (INVESTMENT_WAREHOUSE,))
+    products = cur.fetchall()
+    conn.close()
+    return render_template("index.html", products=products, warehouse=INVESTMENT_WAREHOUSE)
+
+
+@app.route('/inwestycja-suwaj/przyjecie')
+@login_required
+def inwestycja_suwaj_przyjecie():
+    conn = db()
+    cur = conn.cursor()
+
+    # pokazujemy wszystkie produkty, żeby można było dodać nowy asortyment do magazynu inwestycji
+    cur.execute("SELECT * FROM products")
+    products = cur.fetchall()
+
+    cur.execute("SELECT * FROM packages WHERE warehouse=%s OR warehouse IS NULL", (INVESTMENT_WAREHOUSE,))
+    packages = cur.fetchall()
+
+    conn.close()
+
+    return render_template(
+        "przyjecie.html",
+        products=products,
+        packages=packages,
+        forced_warehouse=INVESTMENT_WAREHOUSE,
+        form_action="/inwestycja-suwaj/receive_doc",
+        page_title="📥 Przyjęcie (PZ) – Inwestycja Suwaj"
+    )
+
+
+@app.route('/inwestycja-suwaj/receive_doc', methods=['POST'])
+@login_required
+def inwestycja_suwaj_receive_doc():
+    conn = db()
+    cur = conn.cursor()
+
+    date = datetime.now().strftime("%Y-%m-%d")
+    kontrahent = request.form.get('kontrahent')
+
+    cur.execute("SELECT COUNT(*) FROM issue_docs WHERE warehouse=%s", (INVESTMENT_WAREHOUSE,))
+    num = cur.fetchone()[0] + 1
+    doc_number = f"PZ-IS/{num}/{datetime.now().year}"
+
+    cur.execute("""
+        INSERT INTO issue_docs(date, kontrahent, warehouse, image, doc_number)
+        VALUES (%s,%s,%s,%s,%s) RETURNING id
+    """, (date, kontrahent, INVESTMENT_WAREHOUSE, "", doc_number))
+    doc_id = cur.fetchone()[0]
+
+    product_ids = request.form.getlist('product_id')
+    qtys = request.form.getlist('qty')
+    package_numbers = request.form.getlist('package_number')
+
+    for i in range(len(product_ids)):
+        if not product_ids[i]:
+            continue
+        pid = int(product_ids[i])
+        try:
+            qty = float(qtys[i].replace(",", "."))
+        except:
+            qty = 0
+        if qty <= 0:
+            continue
+
+        cur.execute("""
+            UPDATE products
+            SET qty = qty + %s
+            WHERE id=%s AND warehouse=%s
+        """, (qty, pid, INVESTMENT_WAREHOUSE))
+        updated = cur.rowcount
+
+        # jeśli produktu nie ma jeszcze w magazynie inwestycji, sklonuj kartotekę i dodaj stan
+        if updated == 0:
+            cur.execute("""
+                SELECT name, unit, price_netto, vat
+                FROM products
+                WHERE id=%s
+            """, (pid,))
+            source = cur.fetchone()
+
+            if source:
+                cur.execute("""
+                    INSERT INTO products(name, qty, unit, warehouse, price_netto, vat)
+                    VALUES (%s,%s,%s,%s,%s,%s)
+                    RETURNING id
+                """, (source[0], qty, source[1], INVESTMENT_WAREHOUSE, source[2], source[3]))
+                pid = cur.fetchone()[0]
+            else:
+                continue
+
+        cur.execute("""
+            INSERT INTO issue_items(doc_id, product_id, qty, warehouse)
+            VALUES (%s,%s,%s,%s)
+        """, (doc_id, pid, qty, INVESTMENT_WAREHOUSE))
+
+        if i < len(package_numbers) and package_numbers[i]:
+            cur.execute("""
+                INSERT INTO packages(product_id, number, qty, warehouse)
+                VALUES (%s,%s,%s,%s)
+            """, (pid, package_numbers[i], qty, INVESTMENT_WAREHOUSE))
+
+    conn.commit()
+    conn.close()
+
+    return redirect('/inwestycja-suwaj/magazyn')
+
+
+@app.route('/inwestycja-suwaj/wydanie')
+@login_required
+def inwestycja_suwaj_wydanie():
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute("SELECT * FROM products WHERE warehouse=%s", (INVESTMENT_WAREHOUSE,))
+    products = cur.fetchall()
+
+    cur.execute("SELECT * FROM packages WHERE warehouse=%s OR warehouse IS NULL", (INVESTMENT_WAREHOUSE,))
+    packages = cur.fetchall()
+    conn.close()
+
+    return render_template(
+        "wydanie.html",
+        products=products,
+        packages=packages,
+        forced_warehouse=INVESTMENT_WAREHOUSE,
+        form_action="/inwestycja-suwaj/issue_doc",
+        page_title="📄 Wydanie (WZ) – Inwestycja Suwaj"
+    )
+
+
+@app.route('/inwestycja-suwaj/issue_doc', methods=['POST'])
+@login_required
+def inwestycja_suwaj_issue_doc():
+    conn = db()
+    cur = conn.cursor()
+
+    date = datetime.now().strftime("%Y-%m-%d")
+    kontrahent = request.form.get('kontrahent')
+
+    cur.execute("SELECT COUNT(*) FROM issue_docs WHERE warehouse=%s", (INVESTMENT_WAREHOUSE,))
+    num = cur.fetchone()[0] + 1
+    doc_number = f"WZ-IS/{num}/{datetime.now().year}"
+
+    cur.execute("""
+        INSERT INTO issue_docs(date, kontrahent, warehouse, image, doc_number)
+        VALUES (%s,%s,%s,%s,%s) RETURNING id
+    """, (date, kontrahent, INVESTMENT_WAREHOUSE, "", doc_number))
+    doc_id = cur.fetchone()[0]
+
+    product_ids = request.form.getlist('product_id')
+    qtys = request.form.getlist('qty')
+    package_ids = request.form.getlist('package_id')
+
+    for i in range(len(product_ids)):
+        if not product_ids[i]:
+            continue
+
+        pid = int(product_ids[i])
+        try:
+            qty = float(qtys[i].replace(",", "."))
+        except:
+            qty = 0
+        if qty <= 0:
+            continue
+
+        cur.execute("""
+            SELECT qty FROM products WHERE id=%s AND warehouse=%s
+        """, (pid, INVESTMENT_WAREHOUSE))
+        current = cur.fetchone()
+
+        if not current or current[0] < qty:
+            conn.close()
+            return f"Brak stanu w magazynie {INVESTMENT_WAREHOUSE}"
+
+        pkg = package_ids[i] if package_ids[i] else None
+        if pkg:
+            pkg = int(pkg)
+            cur.execute("""
+                SELECT qty FROM packages WHERE id=%s
+            """, (pkg,))
+            p = cur.fetchone()
+            if not p or p[0] < qty:
+                conn.close()
+                return "Brak w paczce"
+            cur.execute("UPDATE packages SET qty = qty - %s WHERE id=%s", (qty, pkg))
+
+        cur.execute("""
+            UPDATE products
+            SET qty = qty - %s
+            WHERE id=%s AND warehouse=%s
+        """, (qty, pid, INVESTMENT_WAREHOUSE))
+
+        cur.execute("""
+            INSERT INTO issue_items(doc_id, product_id, qty, warehouse, package_id)
+            VALUES (%s,%s,%s,%s,%s)
+        """, (doc_id, pid, qty, INVESTMENT_WAREHOUSE, pkg))
+
+    cur.execute("DELETE FROM packages WHERE qty <= 0")
+    conn.commit()
+    conn.close()
+
+    return redirect(f"/doc/{doc_id}")
+
+
+@app.route('/inwestycja-suwaj')
+@login_required
+def inwestycja_suwaj():
+    return render_template("inwestycja_suwaj.html", warehouse=INVESTMENT_WAREHOUSE)
+
+
+@app.route('/inwestycja-suwaj/magazyn')
+@login_required
+def inwestycja_suwaj_magazyn():
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM products WHERE warehouse=%s", (INVESTMENT_WAREHOUSE,))
+    products = cur.fetchall()
+    conn.close()
+    return render_template("index.html", products=products, warehouse=INVESTMENT_WAREHOUSE)
+
+
+@app.route('/inwestycja-suwaj/przyjecie')
+@login_required
+def inwestycja_suwaj_przyjecie():
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute("SELECT * FROM products WHERE warehouse=%s", (INVESTMENT_WAREHOUSE,))
+    products = cur.fetchall()
+
+    cur.execute("SELECT * FROM packages WHERE warehouse=%s OR warehouse IS NULL", (INVESTMENT_WAREHOUSE,))
+    packages = cur.fetchall()
+
+    conn.close()
+
+    return render_template(
+        "przyjecie.html",
+        products=products,
+        packages=packages,
+        forced_warehouse=INVESTMENT_WAREHOUSE,
+        form_action="/inwestycja-suwaj/receive_doc",
+        page_title="📥 Przyjęcie (PZ) – Inwestycja Suwaj"
+    )
+
+
+@app.route('/inwestycja-suwaj/receive_doc', methods=['POST'])
+@login_required
+def inwestycja_suwaj_receive_doc():
+    conn = db()
+    cur = conn.cursor()
+
+    date = datetime.now().strftime("%Y-%m-%d")
+    kontrahent = request.form.get('kontrahent')
+
+    cur.execute("SELECT COUNT(*) FROM issue_docs WHERE warehouse=%s", (INVESTMENT_WAREHOUSE,))
+    num = cur.fetchone()[0] + 1
+    doc_number = f"PZ-IS/{num}/{datetime.now().year}"
+
+    cur.execute("""
+        INSERT INTO issue_docs(date, kontrahent, warehouse, image, doc_number)
+        VALUES (%s,%s,%s,%s,%s) RETURNING id
+    """, (date, kontrahent, INVESTMENT_WAREHOUSE, "", doc_number))
+    doc_id = cur.fetchone()[0]
+
+    product_ids = request.form.getlist('product_id')
+    qtys = request.form.getlist('qty')
+    package_numbers = request.form.getlist('package_number')
+
+    for i in range(len(product_ids)):
+        if not product_ids[i]:
+            continue
+        pid = int(product_ids[i])
+        try:
+            qty = float(qtys[i].replace(",", "."))
+        except:
+            qty = 0
+        if qty <= 0:
+            continue
+
+        cur.execute("""
+            UPDATE products
+            SET qty = qty + %s
+            WHERE id=%s AND warehouse=%s
+        """, (qty, pid, INVESTMENT_WAREHOUSE))
+
+        cur.execute("""
+            INSERT INTO issue_items(doc_id, product_id, qty, warehouse)
+            VALUES (%s,%s,%s,%s)
+        """, (doc_id, pid, qty, INVESTMENT_WAREHOUSE))
+
+        if i < len(package_numbers) and package_numbers[i]:
+            cur.execute("""
+                INSERT INTO packages(product_id, number, qty, warehouse)
+                VALUES (%s,%s,%s,%s)
+            """, (pid, package_numbers[i], qty, INVESTMENT_WAREHOUSE))
+
+    conn.commit()
+    conn.close()
+
+    return redirect('/inwestycja-suwaj/magazyn')
+
+
+@app.route('/inwestycja-suwaj/wydanie')
+@login_required
+def inwestycja_suwaj_wydanie():
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute("SELECT * FROM products WHERE warehouse=%s", (INVESTMENT_WAREHOUSE,))
+    products = cur.fetchall()
+
+    cur.execute("SELECT * FROM packages WHERE warehouse=%s OR warehouse IS NULL", (INVESTMENT_WAREHOUSE,))
+    packages = cur.fetchall()
+    conn.close()
+
+    return render_template(
+        "wydanie.html",
+        products=products,
+        packages=packages,
+        forced_warehouse=INVESTMENT_WAREHOUSE,
+        form_action="/inwestycja-suwaj/issue_doc",
+        page_title="📄 Wydanie (WZ) – Inwestycja Suwaj"
+    )
+
+
+@app.route('/inwestycja-suwaj/issue_doc', methods=['POST'])
+@login_required
+def inwestycja_suwaj_issue_doc():
+    conn = db()
+    cur = conn.cursor()
+
+    date = datetime.now().strftime("%Y-%m-%d")
+    kontrahent = request.form.get('kontrahent')
+
+    cur.execute("SELECT COUNT(*) FROM issue_docs WHERE warehouse=%s", (INVESTMENT_WAREHOUSE,))
+    num = cur.fetchone()[0] + 1
+    doc_number = f"WZ-IS/{num}/{datetime.now().year}"
+
+    cur.execute("""
+        INSERT INTO issue_docs(date, kontrahent, warehouse, image, doc_number)
+        VALUES (%s,%s,%s,%s,%s) RETURNING id
+    """, (date, kontrahent, INVESTMENT_WAREHOUSE, "", doc_number))
+    doc_id = cur.fetchone()[0]
+
+    product_ids = request.form.getlist('product_id')
+    qtys = request.form.getlist('qty')
+    package_ids = request.form.getlist('package_id')
+
+    for i in range(len(product_ids)):
+        if not product_ids[i]:
+            continue
+
+        pid = int(product_ids[i])
+        try:
+            qty = float(qtys[i].replace(",", "."))
+        except:
+            qty = 0
+        if qty <= 0:
+            continue
+
+        cur.execute("""
+            SELECT qty FROM products WHERE id=%s AND warehouse=%s
+        """, (pid, INVESTMENT_WAREHOUSE))
+        current = cur.fetchone()
+
+        if not current or current[0] < qty:
+            conn.close()
+            return f"Brak stanu w magazynie {INVESTMENT_WAREHOUSE}"
+
+        pkg = package_ids[i] if package_ids[i] else None
+        if pkg:
+            pkg = int(pkg)
+            cur.execute("""
+                SELECT qty FROM packages WHERE id=%s
+            """, (pkg,))
+            p = cur.fetchone()
+            if not p or p[0] < qty:
+                conn.close()
+                return "Brak w paczce"
+            cur.execute("UPDATE packages SET qty = qty - %s WHERE id=%s", (qty, pkg))
+
+        cur.execute("""
+            UPDATE products
+            SET qty = qty - %s
+            WHERE id=%s AND warehouse=%s
+        """, (qty, pid, INVESTMENT_WAREHOUSE))
+
+        cur.execute("""
+            INSERT INTO issue_items(doc_id, product_id, qty, warehouse, package_id)
+            VALUES (%s,%s,%s,%s,%s)
+        """, (doc_id, pid, qty, INVESTMENT_WAREHOUSE, pkg))
+
+    cur.execute("DELETE FROM packages WHERE qty <= 0")
+    conn.commit()
+    conn.close()
+
+    return redirect(f"/doc/{doc_id}")
+
+
 # 📤 ZAPIS WYDANIA (PRO)
 @app.route('/issue_doc', methods=['POST'])
 @login_required
