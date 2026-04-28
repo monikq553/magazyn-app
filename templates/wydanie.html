@@ -93,7 +93,7 @@ button {
 
 <div class="info"></div>
 
-<!-- 🔥 MAGAZYN NA POZYCJI -->
+<!-- 🔥 MAGAZYN -->
 <select name="warehouse">
 <option>Drewno</option>
 <option>Farby</option>
@@ -101,6 +101,21 @@ button {
 <option>Pellet</option>
 <option>Inne</option>
 </select>
+
+<!-- 🔥 PACZKI -->
+<select name="package_id" onchange="showPackageInfo(this)">
+<option value="">-- wybierz paczkę --</option>
+
+{% for pkg in packages %}
+<option value="{{pkg[0]}}"
+        data-product="{{pkg[1]}}"
+        data-qty="{{pkg[3]}}">
+Paczka {{pkg[2]}} ({{pkg[3]}})
+</option>
+{% endfor %}
+</select>
+
+<div class="info package-info"></div>
 
 <!-- ILOŚĆ -->
 <input name="qty" placeholder="Ilość">
@@ -152,10 +167,18 @@ function searchProduct(input) {
             input.value = p.name;
             hidden.value = p.id;
 
-            info.innerHTML = "📦 " + p.qty + " " + p.unit + " | " + p.warehouse;
+            info.innerHTML = "📦 " + p.qty + " " + p.unit;
 
-            // 🔥 automatycznie ustawia magazyn
+            // 🔥 ustaw magazyn
             input.closest(".item").querySelector("select[name='warehouse']").value = p.warehouse;
+
+            // 🔥 filtr paczek
+            let pkgSelect = input.closest(".item").querySelector("select[name='package_id']");
+
+            Array.from(pkgSelect.options).forEach(opt => {
+                if (!opt.value) return;
+                opt.style.display = (opt.dataset.product == p.id) ? "block" : "none";
+            });
 
             box.style.display = "none";
         };
@@ -164,6 +187,14 @@ function searchProduct(input) {
     });
 
     box.style.display = "block";
+}
+
+function showPackageInfo(select) {
+    let option = select.options[select.selectedIndex];
+    let qty = option.dataset.qty || "";
+
+    let info = select.parentElement.querySelector(".package-info");
+    info.innerHTML = qty ? "📦 W paczce: " + qty : "";
 }
 
 function addItem() {
