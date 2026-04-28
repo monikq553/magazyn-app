@@ -74,6 +74,11 @@ def init_db():
         qty REAL,
         warehouse TEXT,
         package_id INTEGER
+
+        cur.execute("""
+ALTER TABLE issue_items
+ADD COLUMN IF NOT EXISTS package_id INTEGER;
+""")
     );
     """)
 
