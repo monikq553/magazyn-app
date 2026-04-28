@@ -65,7 +65,7 @@ def init_db():
     );
     """)
 
-    # ITEMS
+    # ITEMS (bez kombinowania w środku)
     cur.execute("""
     CREATE TABLE IF NOT EXISTS issue_items(
         id SERIAL PRIMARY KEY,
@@ -74,12 +74,13 @@ def init_db():
         qty REAL,
         warehouse TEXT,
         package_id INTEGER
-
-        cur.execute("""
-ALTER TABLE issue_items
-ADD COLUMN IF NOT EXISTS package_id INTEGER;
-""")
     );
+    """)
+
+    # 🔥 KLUCZOWE — aktualizacja starej bazy
+    cur.execute("""
+    ALTER TABLE issue_items
+    ADD COLUMN IF NOT EXISTS package_id INTEGER;
     """)
 
     # ADMIN RESET
@@ -94,7 +95,6 @@ ADD COLUMN IF NOT EXISTS package_id INTEGER;
 
 
 init_db()
-
 
 # 🔒 LOGIN REQUIRED
 def login_required(f):
