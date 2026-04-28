@@ -394,3 +394,20 @@ def historia():
 
 if __name__ == '__main__':
     app.run()
+@app.route('/fix_db')
+def fix_db():
+    conn = db()
+    cur = conn.cursor()
+
+    try:
+        cur.execute("""
+        ALTER TABLE issue_items
+        ADD COLUMN package_id INTEGER;
+        """)
+    except Exception as e:
+        pass
+
+    conn.commit()
+    conn.close()
+
+    return "DB FIXED"
