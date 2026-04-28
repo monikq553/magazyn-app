@@ -59,6 +59,9 @@ button {
 
 <form method="POST" action="/receive_doc">
 
+<!-- 🔥 DOKUMENT -->
+<input name="doc_number" placeholder="Numer dokumentu (np. PZ/01)">
+<input type="date" name="date">
 <input name="kontrahent" placeholder="Dostawca">
 
 <hr>
@@ -92,22 +95,6 @@ button {
 
 <div class="info"></div>
 
-<!-- 🔥 PACZKI -->
-<input name="package_number" placeholder="Numer paczki (np. PZ-001)">
-<option value="">-- wybierz paczkę --</option>
-
-{% for pkg in packages %}
-<option value="{{pkg[0]}}"
-        data-product="{{pkg[1]}}"
-        data-qty="{{pkg[3]}}">
-Paczka {{pkg[2]}} ({{pkg[3]}})
-</option>
-{% endfor %}
-
-</select>
-
-<div class="info package-info"></div>
-
 <!-- 🔥 MAGAZYN -->
 <select name="warehouse">
 <option>Drewno</option>
@@ -117,7 +104,20 @@ Paczka {{pkg[2]}} ({{pkg[3]}})
 <option>Inne</option>
 </select>
 
+<!-- 🔥 NUMER PACZKI -->
+<input name="package_number" placeholder="Numer paczki (np. PZ-001)">
+
+<!-- 🔥 ILOŚĆ -->
 <input name="qty" placeholder="Ilość">
+
+<!-- 🔥 JEDNOSTKA -->
+<select name="unit">
+<option>m2</option>
+<option>m3</option>
+<option>szt</option>
+<option>l</option>
+<option>opak</option>
+</select>
 
 <button type="button" onclick="removeItem(this)" style="background:red;">❌</button>
 
@@ -142,7 +142,7 @@ const PRODUCTS = [
 {% endfor %}
 ];
 
-// 🔍 SZUKANIE PRODUKTU + FILTROWANIE PACZEK
+// 🔍 SZUKANIE PRODUKTU
 function searchProduct(input) {
     let value = input.value.toLowerCase();
     let box = input.parentElement.querySelector(".suggestions");
@@ -169,16 +169,9 @@ function searchProduct(input) {
 
             info.innerHTML = "📦 Stan: " + p.qty + " " + p.unit;
 
-            // 🔥 ustaw magazyn automatycznie
+            // 🔥 ustaw magazyn
             input.closest(".item")
                 .querySelector("select[name='warehouse']").value = p.warehouse;
-
-            // 🔥 FILTR PACZEK
-            let pkgSelect = input.closest(".item").querySelector("select[name='package_id']");
-            Array.from(pkgSelect.options).forEach(opt => {
-                if (!opt.value) return;
-                opt.style.display = (opt.dataset.product == p.id) ? "block" : "none";
-            });
 
             box.style.display = "none";
         };
@@ -187,15 +180,6 @@ function searchProduct(input) {
     });
 
     box.style.display = "block";
-}
-
-// 📦 INFO O PACZCE
-function showPackageInfo(select) {
-    let option = select.options[select.selectedIndex];
-    let qty = option.dataset.qty || "";
-
-    let info = select.parentElement.querySelector(".package-info");
-    info.innerHTML = qty ? "📦 W paczce: " + qty : "";
 }
 
 // ➕ DODAJ ITEM
