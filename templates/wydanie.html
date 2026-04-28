@@ -60,6 +60,9 @@ button {
 
 <form method="POST" action="/issue_doc">
 
+<!-- 🔥 DOKUMENT -->
+<input name="doc_number" placeholder="Numer dokumentu (np. WZ/01)">
+<input type="date" name="date">
 <input name="kontrahent" placeholder="Kontrahent">
 
 <hr>
@@ -117,8 +120,17 @@ Paczka {{pkg[2]}} ({{pkg[3]}})
 
 <div class="info package-info"></div>
 
-<!-- ILOŚĆ -->
+<!-- 🔥 ILOŚĆ -->
 <input name="qty" placeholder="Ilość">
+
+<!-- 🔥 JEDNOSTKA -->
+<select name="unit">
+<option>m2</option>
+<option>m3</option>
+<option>szt</option>
+<option>l</option>
+<option>opak</option>
+</select>
 
 <!-- USUŃ -->
 <button type="button" onclick="removeItem(this)" style="background:red;">❌</button>
@@ -144,6 +156,7 @@ const PRODUCTS = [
 {% endfor %}
 ];
 
+// 🔍 SZUKANIE PRODUKTU
 function searchProduct(input) {
     let value = input.value.toLowerCase();
     let box = input.parentElement.querySelector(".suggestions");
@@ -154,6 +167,7 @@ function searchProduct(input) {
 
     if (!value) {
         box.style.display = "none";
+        hidden.value = "";
         return;
     }
 
@@ -167,14 +181,14 @@ function searchProduct(input) {
             input.value = p.name;
             hidden.value = p.id;
 
-            info.innerHTML = "📦 " + p.qty + " " + p.unit;
+            info.innerHTML = "📦 Stan: " + p.qty + " " + p.unit;
 
             // 🔥 ustaw magazyn
-            input.closest(".item").querySelector("select[name='warehouse']").value = p.warehouse;
+            input.closest(".item")
+                .querySelector("select[name='warehouse']").value = p.warehouse;
 
             // 🔥 filtr paczek
             let pkgSelect = input.closest(".item").querySelector("select[name='package_id']");
-
             Array.from(pkgSelect.options).forEach(opt => {
                 if (!opt.value) return;
                 opt.style.display = (opt.dataset.product == p.id) ? "block" : "none";
@@ -189,6 +203,7 @@ function searchProduct(input) {
     box.style.display = "block";
 }
 
+// 📦 INFO PACZKI
 function showPackageInfo(select) {
     let option = select.options[select.selectedIndex];
     let qty = option.dataset.qty || "";
@@ -197,6 +212,7 @@ function showPackageInfo(select) {
     info.innerHTML = qty ? "📦 W paczce: " + qty : "";
 }
 
+// ➕ DODAJ
 function addItem() {
     let div = document.createElement("div");
     div.classList.add("item");
@@ -204,6 +220,7 @@ function addItem() {
     document.getElementById("items").appendChild(div);
 }
 
+// ❌ USUŃ
 function removeItem(btn) {
     btn.parentElement.remove();
 }
