@@ -22,15 +22,15 @@ input, select {
 }
 
 button {
-    background:#2563eb;
-    color:white;
+    background:#FFC067;
+    color:#422d00;
     border:none;
     padding:10px 14px;
     border-radius:10px;
     cursor:pointer;
 }
 
-.add { background:#0ea5e9; }
+.add { background:#FFC067; }
 
 .item {
     padding:15px;
@@ -57,7 +57,7 @@ button {
 
 <div class="box">
 
-<h2>{{ page_title or "📄 Wydanie (WZ)" }}</h2>
+<h2>{{ page_title or "Wydanie (WZ)" }}</h2>
 
 <form method="POST" action="{{ form_action or '/issue_doc' }}">
 
