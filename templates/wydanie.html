@@ -6,22 +6,23 @@
 .box {
     background:white;
     padding:25px;
-    border-radius:14px;
-    box-shadow:0 10px 30px rgba(0,0,0,0.08);
+    border-radius:12px;
+    border:1px solid #e5e7eb;
+    box-shadow:0 12px 24px rgba(15,23,42,0.05);
     max-width:900px;
 }
 
 input, select {
     padding:10px;
-    border-radius:10px;
-    border:1px solid #ddd;
+    border-radius:8px;
+    border:1px solid #d1d5db;
     width:100%;
     margin-bottom:10px;
     font-size:14px;
 }
 
 button {
-    background:#111827;
+    background:#2563eb;
     color:white;
     border:none;
     padding:10px 14px;
@@ -29,14 +30,14 @@ button {
     cursor:pointer;
 }
 
-.add { background:#00b894; }
+.add { background:#0ea5e9; }
 
 .item {
     padding:15px;
-    background:#f8fafc;
-    border-radius:12px;
+    background:#f8fbff;
+    border-radius:10px;
     margin-bottom:12px;
-    border:1px solid #eee;
+    border:1px solid #e2e8f0;
 }
 
 .info {
@@ -56,9 +57,9 @@ button {
 
 <div class="box">
 
-<h2>📄 Wydanie (WZ)</h2>
+<h2>{{ page_title or "📄 Wydanie (WZ)" }}</h2>
 
-<form method="POST" action="/issue_doc">
+<form method="POST" action="{{ form_action or '/issue_doc' }}">
 
 <!-- 🔥 DOKUMENT -->
 <input name="doc_number" placeholder="Numer dokumentu (np. WZ/01)">
@@ -97,6 +98,10 @@ button {
 <div class="info"></div>
 
 <!-- 🔥 MAGAZYN -->
+{% if forced_warehouse %}
+<input type="hidden" name="warehouse" value="{{ forced_warehouse }}">
+<input value="{{ forced_warehouse }}" disabled>
+{% else %}
 <select name="warehouse">
 <option>Drewno</option>
 <option>Farby</option>
@@ -104,6 +109,7 @@ button {
 <option>Pellet</option>
 <option>Inne</option>
 </select>
+{% endif %}
 
 <!-- 🔥 PACZKI -->
 <select name="package_id" onchange="showPackageInfo(this)">
@@ -183,9 +189,11 @@ function searchProduct(input) {
 
             info.innerHTML = "📦 Stan: " + p.qty + " " + p.unit;
 
-            // 🔥 ustaw magazyn
-            input.closest(".item")
-                .querySelector("select[name='warehouse']").value = p.warehouse;
+            // 🔥 ustaw magazyn (gdy jest select)
+            let warehouseSelect = input.closest(".item").querySelector("select[name='warehouse']");
+            if (warehouseSelect) {
+                warehouseSelect.value = p.warehouse;
+            }
 
             // 🔥 filtr paczek
             let pkgSelect = input.closest(".item").querySelector("select[name='package_id']");
