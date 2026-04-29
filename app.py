@@ -656,6 +656,62 @@ def doc_detail(id):
     return render_template("doc_detail.html", doc=doc, items=items)
 
 
+@app.route('/doc/<int:id>/edit', methods=['POST'])
+@login_required
+def edit_doc(id):
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE issue_docs
+        SET kontrahent=%s, date=%s
+        WHERE id=%s
+    """, (request.form.get('kontrahent', ''), request.form.get('date', ''), id))
+    conn.commit()
+    conn.close()
+    return redirect(f"/doc/{id}")
+
+
+@app.route('/doc/<int:id>/delete', methods=['POST'])
+@login_required
+def delete_doc(id):
+    conn = db()
+    cur = conn.cursor()
+
+    cur.execute("SELECT id, date, kontrahent, warehouse, image, doc_number FROM issue_docs WHERE id=%s", (id,))
+    doc = cur.fetchone()
+    if not doc:
+        conn.close()
+        return redirect('/historia')
+
+    cur.execute("""
+        SELECT product_id, qty, warehouse, package_id
+        FROM issue_items
+        WHERE doc_id=%s
+    """, (id,))
+    items = cur.fetchall()
+
+    is_issue_doc = str(doc[5] or "").startswith("WZ")
+
+    for product_id, qty, warehouse, package_id in items:
+        wh = warehouse or ""
+        sign = 1 if is_issue_doc else -1
+        cur.execute("""
+            UPDATE products
+            SET qty = qty + %s
+            WHERE id=%s AND warehouse=%s
+        """, (sign * qty, product_id, wh))
+
+        if package_id and is_issue_doc:
+            cur.execute("UPDATE packages SET qty = qty + %s WHERE id=%s", (qty, package_id))
+
+    cur.execute("DELETE FROM issue_items WHERE doc_id=%s", (id,))
+    cur.execute("DELETE FROM issue_docs WHERE id=%s", (id,))
+    cur.execute("DELETE FROM packages WHERE qty <= 0")
+    conn.commit()
+    conn.close()
+    return redirect('/historia')
+
+
 # 📊 HISTORIA
 @app.route('/historia')
 @login_required

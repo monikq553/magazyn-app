@@ -48,22 +48,18 @@
 </style>
 
 {% for day, docs in days.items() %}
-<div class="day">
-
-<div class="day-title">{{ day }}</div>
-
-{% for d in docs %}
-<div class="doc" onclick="go('/doc/{{d[0]}}')">
-    <div class="left">
-        <div class="nr">{{ d[5] }}</div>
-        <div class="kontrahent">{{ d[2] }}</div>
+<details class="day" open>
+    <summary class="day-title">{{ day }} ({{ docs|length }})</summary>
+    {% for d in docs %}
+    <div class="doc" onclick="go('/doc/{{d[0]}}')">
+        <div class="left">
+            <div class="nr">{{ d[5] }}</div>
+            <div class="kontrahent">{{ d[2] }}</div>
+        </div>
+        <div>→</div>
     </div>
-
-    <div>→</div>
-</div>
-{% endfor %}
-
-</div>
+    {% endfor %}
+</details>
 {% endfor %}
 
 <script>
