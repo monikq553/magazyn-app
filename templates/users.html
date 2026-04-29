@@ -2,7 +2,7 @@
 
 {% block content %}
 
-<h2 style="margin-bottom:20px;">👥 Użytkownicy</h2>
+<h2 style="margin-bottom:20px;">Użytkownicy</h2>
 
 <style>
 .user {
@@ -33,8 +33,8 @@ input, select {
 }
 
 .btn {
-    background:#6c5ce7;
-    color:white;
+    background:#FFC067;
+    color:#422d00;
     border:none;
     padding:8px 12px;
     border-radius:10px;
@@ -75,7 +75,7 @@ input, select {
         {% if u[0] != 1 %}
         <form method="POST" action="/delete_user/{{u[0]}}">
             <button class="btn delete" onclick="return confirm('Usunąć użytkownika?')">
-                🗑
+                Usuń
             </button>
         </form>
         {% endif %}
