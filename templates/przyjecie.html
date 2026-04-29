@@ -6,34 +6,36 @@
 .box {
     background:white;
     padding:25px;
-    border-radius:14px;
-    box-shadow:0 10px 30px rgba(0,0,0,0.08);
+    border-radius:12px;
+    border:1px solid #e5e7eb;
+    box-shadow:0 12px 24px rgba(15,23,42,0.05);
     max-width:900px;
 }
 
 input, select {
     padding:10px;
-    border-radius:10px;
-    border:1px solid #ddd;
+    border-radius:8px;
+    border:1px solid #d1d5db;
     width:100%;
     margin-bottom:10px;
 }
 
 button {
-    background:#111827;
-    color:white;
+    background:#FFC067;
+    color:#422d00;
     border:none;
     padding:10px 14px;
     border-radius:10px;
     cursor:pointer;
 }
 
-.add { background:#00b894; }
+.add { background:#FFC067; }
 
 .item {
     padding:15px;
-    background:#f8fafc;
-    border-radius:12px;
+    background:#f8fbff;
+    border-radius:10px;
+    border:1px solid #e2e8f0;
     margin-bottom:12px;
 }
 
@@ -55,9 +57,9 @@ button {
 
 <div class="box">
 
-<h2>📥 Przyjęcie (PZ)</h2>
+<h2>{{ page_title or "Przyjęcie (PZ)" }}</h2>
 
-<form method="POST" action="/receive_doc">
+<form method="POST" action="{{ form_action or '/receive_doc' }}">
 
 <!-- 🔥 DOKUMENT -->
 <input name="doc_number" placeholder="Numer dokumentu (np. PZ/01)">
@@ -96,6 +98,10 @@ button {
 <div class="info"></div>
 
 <!-- 🔥 MAGAZYN -->
+{% if forced_warehouse %}
+<input type="hidden" name="warehouse" value="{{ forced_warehouse }}">
+<input value="{{ forced_warehouse }}" disabled>
+{% else %}
 <select name="warehouse">
 <option>Drewno</option>
 <option>Farby</option>
@@ -103,6 +109,7 @@ button {
 <option>Pellet</option>
 <option>Inne</option>
 </select>
+{% endif %}
 
 <!-- 🔥 NUMER PACZKI -->
 <input name="package_number" placeholder="Numer paczki (np. PZ-001)">
@@ -119,13 +126,13 @@ button {
 <option>opak</option>
 </select>
 
-<button type="button" onclick="removeItem(this)" style="background:red;">❌</button>
+<button type="button" onclick="removeItem(this)" style="background:red;">Usuń</button>
 
 </div>
 
 </div>
 
-<button type="button" class="add" onclick="addItem()">➕ Dodaj pozycję</button>
+<button type="button" class="add" onclick="addItem()">Dodaj pozycję</button>
 
 <hr>
 
@@ -167,11 +174,13 @@ function searchProduct(input) {
             input.value = p.name;
             hidden.value = p.id;
 
-            info.innerHTML = "📦 Stan: " + p.qty + " " + p.unit;
+            info.innerHTML = "Stan: " + p.qty + " " + p.unit;
 
-            // 🔥 ustaw magazyn
-            input.closest(".item")
-                .querySelector("select[name='warehouse']").value = p.warehouse;
+            // 🔥 ustaw magazyn (gdy jest select)
+            let warehouseSelect = input.closest(".item").querySelector("select[name='warehouse']");
+            if (warehouseSelect) {
+                warehouseSelect.value = p.warehouse;
+            }
 
             box.style.display = "none";
         };
