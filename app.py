@@ -514,32 +514,29 @@ def inwestycja_suwaj_issue_doc():
         if qty <= 0:
             continue
 
-        cur.execute("""
-            SELECT qty FROM products WHERE id=%s AND warehouse=%s
-        """, (pid, INVESTMENT_WAREHOUSE))
-        current = cur.fetchone()
-
-        if not current or current[0] < qty:
-            conn.close()
-            return f"Brak stanu w magazynie {INVESTMENT_WAREHOUSE}"
-
         pkg = package_ids[i] if package_ids[i] else None
         if pkg:
             pkg = int(pkg)
             cur.execute("""
-                SELECT qty FROM packages WHERE id=%s
-            """, (pkg,))
-            p = cur.fetchone()
-            if not p or p[0] < qty:
+                UPDATE packages
+                SET qty = qty - %s
+                WHERE id=%s AND (warehouse=%s OR warehouse IS NULL) AND qty >= %s
+            """, (qty, pkg, INVESTMENT_WAREHOUSE, qty))
+            if cur.rowcount == 0:
+                conn.rollback()
                 conn.close()
                 return "Brak w paczce"
-            cur.execute("UPDATE packages SET qty = qty - %s WHERE id=%s", (qty, pkg))
 
         cur.execute("""
             UPDATE products
             SET qty = qty - %s
-            WHERE id=%s AND warehouse=%s
-        """, (qty, pid, INVESTMENT_WAREHOUSE))
+            WHERE id=%s AND warehouse=%s AND qty >= %s
+        """, (qty, pid, INVESTMENT_WAREHOUSE, qty))
+
+        if cur.rowcount == 0:
+            conn.rollback()
+            conn.close()
+            return f"Brak stanu w magazynie {INVESTMENT_WAREHOUSE}"
 
         cur.execute("""
             INSERT INTO issue_items(doc_id, product_id, qty, warehouse, package_id)
@@ -594,16 +591,6 @@ def issue_doc():
         if qty <= 0:
             continue
 
-        # 🔥 SPRAWDŹ STAN
-        cur.execute("""
-            SELECT qty FROM products WHERE id=%s AND warehouse=%s
-        """, (pid, wh))
-        current = cur.fetchone()
-
-        if not current or current[0] < qty:
-            conn.close()
-            return f"Brak stanu w magazynie {wh}"
-
         pkg = package_ids[i] if package_ids[i] else None
 
         # pakiet
@@ -611,24 +598,25 @@ def issue_doc():
             pkg = int(pkg)
 
             cur.execute("""
-                SELECT qty FROM packages WHERE id=%s AND warehouse=%s
-            """, (pkg, wh))
-            p = cur.fetchone()
-
-            if not p or p[0] < qty:
+                UPDATE packages
+                SET qty = qty - %s
+                WHERE id=%s AND warehouse=%s AND qty >= %s
+            """, (qty, pkg, wh, qty))
+            if cur.rowcount == 0:
+                conn.rollback()
                 conn.close()
                 return "Brak w paczce"
-
-            cur.execute("""
-                UPDATE packages SET qty = qty - %s WHERE id=%s
-            """, (qty, pkg))
 
         # ✅ stan -
         cur.execute("""
             UPDATE products 
             SET qty = qty - %s 
-            WHERE id=%s AND warehouse=%s
-        """, (qty, pid, wh))
+            WHERE id=%s AND warehouse=%s AND qty >= %s
+        """, (qty, pid, wh, qty))
+        if cur.rowcount == 0:
+            conn.rollback()
+            conn.close()
+            return f"Brak stanu w magazynie {wh}"
 
         cur.execute("""
             INSERT INTO issue_items(doc_id, product_id, qty, warehouse, package_id)
