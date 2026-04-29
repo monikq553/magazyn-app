@@ -147,9 +147,9 @@ def home():
     return render_template("home.html")
 
 
-@app.route('/dashboard')
+@app.route('/dashboard', endpoint='dashboard_page_view')
 @login_required
-def dashboard():
+def dashboard_page():
     return render_template("home.html")
 
 

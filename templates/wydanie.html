@@ -22,15 +22,15 @@ input, select {
 }
 
 button {
-    background:#2563eb;
-    color:white;
+    background:#FFC067;
+    color:#422d00;
     border:none;
     padding:10px 14px;
     border-radius:10px;
     cursor:pointer;
 }
 
-.add { background:#0ea5e9; }
+.add { background:#FFC067; }
 
 .item {
     padding:15px;
@@ -57,7 +57,7 @@ button {
 
 <div class="box">
 
-<h2>{{ page_title or "📄 Wydanie (WZ)" }}</h2>
+<h2>{{ page_title or "Wydanie (WZ)" }}</h2>
 
 <form method="POST" action="{{ form_action or '/issue_doc' }}">
 
@@ -139,13 +139,13 @@ Paczka {{pkg[2]}} ({{pkg[3]}})
 </select>
 
 <!-- USUŃ -->
-<button type="button" onclick="removeItem(this)" style="background:red;">❌</button>
+<button type="button" onclick="removeItem(this)" style="background:red;">Usuń</button>
 
 </div>
 
 </div>
 
-<button type="button" class="add" onclick="addItem()">➕ Dodaj pozycję</button>
+<button type="button" class="add" onclick="addItem()">Dodaj pozycję</button>
 
 <hr>
 
@@ -187,7 +187,7 @@ function searchProduct(input) {
             input.value = p.name;
             hidden.value = p.id;
 
-            info.innerHTML = "📦 Stan: " + p.qty + " " + p.unit;
+            info.innerHTML = "Stan: " + p.qty + " " + p.unit;
 
             // 🔥 ustaw magazyn (gdy jest select)
             let warehouseSelect = input.closest(".item").querySelector("select[name='warehouse']");
@@ -217,7 +217,7 @@ function showPackageInfo(select) {
     let qty = option.dataset.qty || "";
 
     let info = select.parentElement.querySelector(".package-info");
-    info.innerHTML = qty ? "📦 W paczce: " + qty : "";
+    info.innerHTML = qty ? "W paczce: " + qty : "";
 }
 
 // ➕ DODAJ

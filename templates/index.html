@@ -34,8 +34,8 @@ td {
 tr:hover { background:#fafafa; }
 
 .btn {
-    background:#2563eb;
-    color:white;
+    background:#FFC067;
+    color:#422d00;
     padding:6px 10px;
     border-radius:8px;
     border:none;
@@ -65,11 +65,11 @@ input {
 </style>
 
 <div class="box">
-<h2>📦 Magazyn: {{warehouse}}</h2>
+<h2>Magazyn: {{warehouse}}</h2>
 
 <!-- 🔍 WYSZUKIWARKA -->
 <div style="position:relative;">
-    <input type="text" id="search" class="search" placeholder="🔍 Szukaj produktu..." onkeyup="showSuggestions()">
+    <input type="text" id="search" class="search" placeholder="Szukaj produktu..." onkeyup="showSuggestions()">
 
     <div id="suggestions" style="
         position:absolute;
@@ -116,7 +116,7 @@ input {
 <td>{{ (p[5]*(1+p[6]/100))|round(2) }} zł</td>
 
 <td style="display:flex; gap:5px;">
-    <button type="button" class="btn" style="background:red;" onclick="deleteOne({{p[0]}})">🗑</button>
+    <button type="button" class="btn" style="background:red;" onclick="deleteOne({{p[0]}})">Usuń</button>
 </td>
 
 </tr>
@@ -124,7 +124,7 @@ input {
 </table>
 
 <button class="btn" style="background:red; margin-top:10px;">
-🗑 Usuń zaznaczone
+Usuń zaznaczone
 </button>
 
 </form>
