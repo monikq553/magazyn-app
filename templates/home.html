@@ -46,6 +46,7 @@
     </div>
 </a>
 
+{% if session.get('role') == 'admin' %}
 <a href="/users" class="tile">
     <div style="font-size:20px;">U</div>
     <div style="margin-top:10px; font-weight:600;">Użytkownicy</div>
@@ -53,6 +54,7 @@
         Zarządzanie kontami
     </div>
 </a>
+{% endif %}
 
 </div>
 

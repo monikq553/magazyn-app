@@ -175,7 +175,9 @@ input:focus {
             <a href="/wydanie">Wydanie</a>
             <a href="/inwestycja-suwaj">Inwestycja Suwaj</a>
             <a href="/historia">Historia</a>
+            {% if session.get('role') == 'admin' %}
             <a href="/users">Użytkownicy</a>
+            {% endif %}
             <a href="/logout">Wyloguj</a>
         </div>
     </div>

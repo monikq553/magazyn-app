@@ -1,13 +1,40 @@
 import os
-from flask import Flask, render_template, request, redirect, session
+from flask import Flask, render_template, request, redirect, session, jsonify
 from functools import wraps
 import psycopg2
-from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.security import generate_password_hash
 from datetime import datetime
+import json
+import firebase_admin
+from firebase_admin import credentials, auth
 
 app = Flask(__name__)
 app.secret_key = "supersecretkey"
 INVESTMENT_WAREHOUSE = "Inwestycja Suwaj"
+FIREBASE_CONFIG = {
+    "apiKey": os.environ.get("FIREBASE_API_KEY", "AIzaSyDeQD7CKOFY-GHbjz_Sn9WNgjnQQquBYAU"),
+    "authDomain": os.environ.get("FIREBASE_AUTH_DOMAIN", "magazyn-app-8cab2.firebaseapp.com"),
+    "projectId": os.environ.get("FIREBASE_PROJECT_ID", "magazyn-app-8cab2"),
+    "storageBucket": os.environ.get("FIREBASE_STORAGE_BUCKET", "magazyn-app-8cab2.firebasestorage.app"),
+    "messagingSenderId": os.environ.get("FIREBASE_MESSAGING_SENDER_ID", "808429208979"),
+    "appId": os.environ.get("FIREBASE_APP_ID", "1:808429208979:web:b64c24422cce1989051466"),
+    "measurementId": os.environ.get("FIREBASE_MEASUREMENT_ID", "G-SDGZD53J7L"),
+}
+ADMIN_EMAILS = {e.strip().lower() for e in os.environ.get("ADMIN_EMAILS", "").split(",") if e.strip()}
+ALLOWED_EMAILS = {e.strip().lower() for e in os.environ.get("ALLOWED_EMAILS", "").split(",") if e.strip()}
+
+
+def init_firebase_admin():
+    if firebase_admin._apps:
+        return
+    raw = os.environ.get("FIREBASE_SERVICE_ACCOUNT_JSON")
+    if not raw:
+        raise RuntimeError("Brak FIREBASE_SERVICE_ACCOUNT_JSON w zmiennych środowiskowych.")
+    cred = credentials.Certificate(json.loads(raw))
+    firebase_admin.initialize_app(cred)
+
+
+init_firebase_admin()
 
 
 # 🔥 DB
@@ -122,12 +149,13 @@ def init_db():
         WHERE number IS NULL
         """)
 
-    # ADMIN RESET
-    cur.execute("DELETE FROM users WHERE username='admin'")
-    cur.execute(
-        "INSERT INTO users(username, password, role) VALUES (%s,%s,%s)",
-        ("admin", generate_password_hash("1234"), "admin")
-    )
+    # aktualizacja ról adminów z env (bez kasowania użytkowników)
+    for admin_email in ADMIN_EMAILS:
+        cur.execute("""
+            INSERT INTO users(username, password, role)
+            VALUES (%s,%s,%s)
+            ON CONFLICT (username) DO UPDATE SET role='admin'
+        """, (admin_email, generate_password_hash("firebase-managed"), "admin"))
 
     conn.commit()
     conn.close()
@@ -145,30 +173,82 @@ def login_required(f):
     return decorated
 
 
+def admin_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if 'user' not in session:
+            return redirect('/login')
+        if session.get('role') != 'admin':
+            return "Brak uprawnień", 403
+        return f(*args, **kwargs)
+    return decorated
+
+
 # 🔐 LOGIN
-@app.route('/login', methods=['GET', 'POST'])
+@app.route('/login')
 def login():
-    if request.method == 'POST':
-        conn = db()
-        cur = conn.cursor()
+    if 'user' in session:
+        return redirect('/')
+    return render_template("login.html", firebase_config=FIREBASE_CONFIG)
 
-        cur.execute("SELECT * FROM users WHERE username=%s", (request.form['username'],))
-        user = cur.fetchone()
+
+@app.route('/register')
+def register():
+    return redirect('/login')
+
+
+@app.route('/auth/session', methods=['POST'])
+def create_session():
+    payload = request.get_json(silent=True) or {}
+    id_token = payload.get("idToken")
+    if not id_token:
+        return jsonify({"ok": False, "error": "Brak tokenu"}), 400
+
+    try:
+        decoded = auth.verify_id_token(id_token)
+    except Exception:
+        return jsonify({"ok": False, "error": "Nieprawidłowy token"}), 401
+
+    email = (decoded.get("email") or "").lower()
+    uid = decoded.get("uid")
+    if not email or not uid:
+        return jsonify({"ok": False, "error": "Brak danych użytkownika"}), 400
+
+    if ALLOWED_EMAILS and email not in ALLOWED_EMAILS:
+        return jsonify({"ok": False, "error": "E-mail poza listą dozwolonych użytkowników"}), 403
+
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT role FROM users WHERE username=%s", (email,))
+    row = cur.fetchone()
+    if not row:
         conn.close()
+        return jsonify({"ok": False, "error": "Brak konta. Skontaktuj się z administratorem."}), 403
+    role = row[0] or ("admin" if email in ADMIN_EMAILS else "employee")
+    cur.execute("UPDATE users SET password=%s WHERE username=%s", (generate_password_hash(uid), email))
+    conn.commit()
+    conn.close()
 
-        if user and check_password_hash(user[2], request.form['password']):
-            session['user'] = user[1]
-            session['role'] = user[3]
-            return redirect('/')
-        return "Błędne dane"
-
-    return render_template("login.html")
+    session['user'] = email
+    session['role'] = role
+    session['uid'] = uid
+    return jsonify({"ok": True, "role": role})
 
 
 @app.route('/logout')
 def logout():
     session.clear()
     return redirect('/login')
+
+
+@app.before_request
+def require_login_for_private_app():
+    allowed_routes = {"login", "create_session", "logout", "static"}
+    if request.endpoint in allowed_routes:
+        return None
+    if 'user' not in session:
+        return redirect('/login')
+    return None
 
 
 @app.route('/')
@@ -190,7 +270,7 @@ def magazyny():
 
 
 @app.route('/users')
-@login_required
+@admin_required
 def users():
     conn = db()
     cur = conn.cursor()
@@ -201,7 +281,7 @@ def users():
 
 
 @app.route('/add_user', methods=['POST'])
-@login_required
+@admin_required
 def add_user():
     conn = db()
     cur = conn.cursor()
@@ -219,7 +299,7 @@ def add_user():
 
 
 @app.route('/delete_user/<int:user_id>', methods=['POST'])
-@login_required
+@admin_required
 def delete_user(user_id):
     if user_id == 1:
         return redirect('/users')
@@ -783,6 +863,7 @@ def historia():
 if __name__ == '__main__':
     app.run()
 @app.route('/fix_db')
+@admin_required
 def fix_db():
     conn = db()
     cur = conn.cursor()
