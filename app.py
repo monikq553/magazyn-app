@@ -24,15 +24,6 @@ ADMIN_EMAILS = {e.strip().lower() for e in os.environ.get("ADMIN_EMAILS", "").sp
 ALLOWED_EMAILS = {e.strip().lower() for e in os.environ.get("ALLOWED_EMAILS", "").split(",") if e.strip()}
 FIREBASE_ADMIN_READY = False
 FIREBASE_ADMIN_ERROR = ""
-FIREBASE_WEB_ENV_KEYS = [
-    "FIREBASE_API_KEY",
-    "FIREBASE_AUTH_DOMAIN",
-    "FIREBASE_PROJECT_ID",
-    "FIREBASE_STORAGE_BUCKET",
-    "FIREBASE_MESSAGING_SENDER_ID",
-    "FIREBASE_APP_ID",
-    "FIREBASE_MEASUREMENT_ID",
-]
 
 
 def init_firebase_admin():
@@ -56,7 +47,16 @@ def init_firebase_admin():
 
 
 def get_missing_firebase_web_envs():
-    return [k for k in FIREBASE_WEB_ENV_KEYS if not os.environ.get(k)]
+    key_map = {
+        "FIREBASE_API_KEY": "apiKey",
+        "FIREBASE_AUTH_DOMAIN": "authDomain",
+        "FIREBASE_PROJECT_ID": "projectId",
+        "FIREBASE_STORAGE_BUCKET": "storageBucket",
+        "FIREBASE_MESSAGING_SENDER_ID": "messagingSenderId",
+        "FIREBASE_APP_ID": "appId",
+        "FIREBASE_MEASUREMENT_ID": "measurementId",
+    }
+    return [env_key for env_key, cfg_key in key_map.items() if not FIREBASE_CONFIG.get(cfg_key)]
 
 
 init_firebase_admin()
