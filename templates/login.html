@@ -21,6 +21,11 @@
         `FIREBASE_PROJECT_ID`, `FIREBASE_STORAGE_BUCKET`, `FIREBASE_MESSAGING_SENDER_ID`, `FIREBASE_APP_ID`,
         `FIREBASE_MEASUREMENT_ID` oraz `FIREBASE_SERVICE_ACCOUNT_JSON`.
     </p>
+    {% if missing_firebase_web_envs %}
+    <p style="font-size:12px;color:#b45309; margin-top:8px;">
+        Brakujące zmienne Web SDK: {{ missing_firebase_web_envs|join(', ') }}
+    </p>
+    {% endif %}
 </div>
 
 <script type="module">
