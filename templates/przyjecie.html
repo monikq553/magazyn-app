@@ -182,8 +182,7 @@ function searchProduct(input) {
             let bruttoInput = item.querySelector("input[name='price_brutto']");
             nettoInput.value = p.price_netto || "";
             let netto = parseFloat((p.price_netto || "0").toString().replace(",", "."));
-            let vat = parseFloat((p.vat || "0").toString().replace(",", "."));
-            bruttoInput.value = (netto * (1 + vat / 100)).toFixed(2);
+            bruttoInput.value = (netto * 1.23).toFixed(2);
 
             // 🔥 ustaw magazyn (gdy jest select)
             let warehouseSelect = input.closest(".item").querySelector("select[name='warehouse']");
@@ -214,12 +213,25 @@ function removeItem(btn) {
 }
 
 document.addEventListener("input", function(e){
-    if (e.target && e.target.name === "price_netto") {
-        const item = e.target.closest(".item");
-        const brutto = item.querySelector("input[name='price_brutto']");
-        const nettoVal = parseFloat((e.target.value || "0").replace(",", "."));
+    if (!e.target) return;
+    const item = e.target.closest(".item");
+    if (!item) return;
+
+    const nettoInput = item.querySelector("input[name='price_netto']");
+    const bruttoInput = item.querySelector("input[name='price_brutto']");
+    const VAT = 0.23;
+
+    if (e.target.name === "price_netto") {
+        const nettoVal = parseFloat((nettoInput.value || "0").replace(",", "."));
         if (!Number.isNaN(nettoVal)) {
-            brutto.value = nettoVal.toFixed(2);
+            bruttoInput.value = (nettoVal * (1 + VAT)).toFixed(2);
+        }
+    }
+
+    if (e.target.name === "price_brutto") {
+        const bruttoVal = parseFloat((bruttoInput.value || "0").replace(",", "."));
+        if (!Number.isNaN(bruttoVal)) {
+            nettoInput.value = (bruttoVal / (1 + VAT)).toFixed(2);
         }
     }
 });
