@@ -9,6 +9,11 @@
         Zaloguj
     </button>
     <p id="error" style="color:#dc2626; margin-top:10px;"></p>
+    {% if not firebase_admin_ready %}
+    <p style="color:#dc2626; margin-top:10px;">
+        Logowanie chwilowo niedostępne: {{ firebase_admin_error or "Brak konfiguracji Firebase Admin." }}
+    </p>
+    {% endif %}
     <p style="margin-top:14px; font-size:13px;">Konto zakłada administrator.</p>
     <hr style="margin:18px 0;">
     <p style="font-size:12px;color:#6b7280;">
@@ -26,7 +31,12 @@ const firebaseConfig = {{ firebase_config|tojson }};
 
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
+const firebaseAdminReady = {{ "true" if firebase_admin_ready else "false" }};
 document.getElementById("submitBtn").addEventListener("click", async () => {
+  if (!firebaseAdminReady) {
+    document.getElementById("error").textContent = "Logowanie jest wyłączone do czasu konfiguracji backendu Firebase.";
+    return;
+  }
   const email = document.getElementById("email").value.trim();
   const password = document.getElementById("password").value;
   const err = document.getElementById("error");
