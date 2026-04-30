@@ -22,16 +22,24 @@ FIREBASE_CONFIG = {
 }
 ADMIN_EMAILS = {e.strip().lower() for e in os.environ.get("ADMIN_EMAILS", "").split(",") if e.strip()}
 ALLOWED_EMAILS = {e.strip().lower() for e in os.environ.get("ALLOWED_EMAILS", "").split(",") if e.strip()}
+FIREBASE_ADMIN_READY = False
+FIREBASE_ADMIN_ERROR = ""
 
 
 def init_firebase_admin():
+    global FIREBASE_ADMIN_READY, FIREBASE_ADMIN_ERROR
     if firebase_admin._apps:
+        FIREBASE_ADMIN_READY = True
         return
     raw = os.environ.get("FIREBASE_SERVICE_ACCOUNT_JSON")
     if not raw:
-        raise RuntimeError("Brak FIREBASE_SERVICE_ACCOUNT_JSON w zmiennych środowiskowych.")
+        FIREBASE_ADMIN_READY = False
+        FIREBASE_ADMIN_ERROR = "Brak FIREBASE_SERVICE_ACCOUNT_JSON w zmiennych środowiskowych."
+        return
     cred = credentials.Certificate(json.loads(raw))
     firebase_admin.initialize_app(cred)
+    FIREBASE_ADMIN_READY = True
+    FIREBASE_ADMIN_ERROR = ""
 
 
 init_firebase_admin()
@@ -189,7 +197,12 @@ def admin_required(f):
 def login():
     if 'user' in session:
         return redirect('/')
-    return render_template("login.html", firebase_config=FIREBASE_CONFIG)
+    return render_template(
+        "login.html",
+        firebase_config=FIREBASE_CONFIG,
+        firebase_admin_ready=FIREBASE_ADMIN_READY,
+        firebase_admin_error=FIREBASE_ADMIN_ERROR
+    )
 
 
 @app.route('/register')
@@ -199,6 +212,8 @@ def register():
 
 @app.route('/auth/session', methods=['POST'])
 def create_session():
+    if not FIREBASE_ADMIN_READY:
+        return jsonify({"ok": False, "error": FIREBASE_ADMIN_ERROR or "Firebase auth backend is not configured."}), 503
     payload = request.get_json(silent=True) or {}
     id_token = payload.get("idToken")
     if not id_token:
