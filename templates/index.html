@@ -7,7 +7,8 @@
     background:white;
     padding:25px;
     border-radius:12px;
-    box-shadow:0 4px 10px rgba(0,0,0,0.05);
+    border:1px solid #e5e7eb;
+    box-shadow:0 12px 24px rgba(15,23,42,0.05);
     max-width:900px;
     margin:auto;
 }
@@ -20,7 +21,7 @@ table {
 }
 
 th {
-    background:#f1f2f6;
+    background:#eff6ff;
     padding:12px;
     text-align:left;
 }
@@ -33,10 +34,10 @@ td {
 tr:hover { background:#fafafa; }
 
 .btn {
-    background:#6c5ce7;
-    color:white;
+    background:#FFC067;
+    color:#422d00;
     padding:6px 10px;
-    border-radius:6px;
+    border-radius:8px;
     border:none;
     cursor:pointer;
     font-size:13px;
@@ -64,11 +65,11 @@ input {
 </style>
 
 <div class="box">
-<h2>📦 Magazyn: {{warehouse}}</h2>
+<h2>Magazyn: {{warehouse}}</h2>
 
 <!-- 🔍 WYSZUKIWARKA -->
 <div style="position:relative;">
-    <input type="text" id="search" class="search" placeholder="🔍 Szukaj produktu..." onkeyup="showSuggestions()">
+    <input type="text" id="search" class="search" placeholder="Szukaj produktu..." onkeyup="showSuggestions()">
 
     <div id="suggestions" style="
         position:absolute;
@@ -115,7 +116,7 @@ input {
 <td>{{ (p[5]*(1+p[6]/100))|round(2) }} zł</td>
 
 <td style="display:flex; gap:5px;">
-    <button type="button" class="btn" style="background:red;" onclick="deleteOne({{p[0]}})">🗑</button>
+    <button type="button" class="btn" style="background:red;" onclick="deleteOne({{p[0]}})">Usuń</button>
 </td>
 
 </tr>
@@ -123,7 +124,7 @@ input {
 </table>
 
 <button class="btn" style="background:red; margin-top:10px;">
-🗑 Usuń zaznaczone
+Usuń zaznaczone
 </button>
 
 </form>
