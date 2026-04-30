@@ -116,6 +116,8 @@ button {
 
 <!-- 🔥 ILOŚĆ -->
 <input name="qty" placeholder="Ilość">
+<input name="price_netto" placeholder="Cena netto">
+<input name="price_brutto" placeholder="Cena brutto">
 
 <!-- 🔥 JEDNOSTKA -->
 <select name="unit">
@@ -145,7 +147,7 @@ button {
 <script>
 const PRODUCTS = [
 {% for p in products %}
-{ id: {{p[0]}}, name: "{{p[1]}}", qty: "{{p[2]}}", unit: "{{p[3]}}", warehouse: "{{p[4]}}" },
+{ id: {{p[0]}}, name: "{{p[1]}}", qty: "{{p[2]}}", unit: "{{p[3]}}", warehouse: "{{p[4]}}", price_netto: "{{p[5]}}", vat: "{{p[6]}}" },
 {% endfor %}
 ];
 
@@ -175,6 +177,13 @@ function searchProduct(input) {
             hidden.value = p.id;
 
             info.innerHTML = "Stan: " + p.qty + " " + p.unit;
+            let item = input.closest(".item");
+            let nettoInput = item.querySelector("input[name='price_netto']");
+            let bruttoInput = item.querySelector("input[name='price_brutto']");
+            nettoInput.value = p.price_netto || "";
+            let netto = parseFloat((p.price_netto || "0").toString().replace(",", "."));
+            let vat = parseFloat((p.vat || "0").toString().replace(",", "."));
+            bruttoInput.value = (netto * (1 + vat / 100)).toFixed(2);
 
             // 🔥 ustaw magazyn (gdy jest select)
             let warehouseSelect = input.closest(".item").querySelector("select[name='warehouse']");
@@ -203,6 +212,17 @@ function addItem() {
 function removeItem(btn) {
     btn.parentElement.remove();
 }
+
+document.addEventListener("input", function(e){
+    if (e.target && e.target.name === "price_netto") {
+        const item = e.target.closest(".item");
+        const brutto = item.querySelector("input[name='price_brutto']");
+        const nettoVal = parseFloat((e.target.value || "0").replace(",", "."));
+        if (!Number.isNaN(nettoVal)) {
+            brutto.value = nettoVal.toFixed(2);
+        }
+    }
+});
 </script>
 
 {% endblock %}

@@ -74,7 +74,9 @@ def init_db():
         product_id INTEGER,
         qty REAL,
         warehouse TEXT,
-        package_id INTEGER
+        package_id INTEGER,
+        price_netto REAL DEFAULT 0,
+        price_brutto REAL DEFAULT 0
     );
     """)
 
@@ -86,6 +88,14 @@ def init_db():
     cur.execute("""
     ALTER TABLE issue_items
     ADD COLUMN IF NOT EXISTS warehouse TEXT;
+    """)
+    cur.execute("""
+    ALTER TABLE issue_items
+    ADD COLUMN IF NOT EXISTS price_netto REAL DEFAULT 0;
+    """)
+    cur.execute("""
+    ALTER TABLE issue_items
+    ADD COLUMN IF NOT EXISTS price_brutto REAL DEFAULT 0;
     """)
     cur.execute("""
     ALTER TABLE packages
@@ -277,6 +287,8 @@ def receive_doc():
     qtys = request.form.getlist('qty')
     warehouses = request.form.getlist('warehouse')
     package_numbers = request.form.getlist('package_number')
+    prices_netto = request.form.getlist('price_netto')
+    prices_brutto = request.form.getlist('price_brutto')
 
     for i in range(len(product_ids)):
         if not product_ids[i]:
@@ -292,6 +304,14 @@ def receive_doc():
 
         if qty <= 0:
             continue
+        try:
+            price_netto = float(prices_netto[i].replace(",", "."))
+        except:
+            price_netto = 0
+        try:
+            price_brutto = float(prices_brutto[i].replace(",", "."))
+        except:
+            price_brutto = 0
 
         # ✅ stan +
         cur.execute("""
@@ -302,9 +322,9 @@ def receive_doc():
 
         # zapis pozycji
         cur.execute("""
-            INSERT INTO issue_items(doc_id, product_id, qty, warehouse)
-            VALUES (%s,%s,%s,%s)
-        """, (doc_id, pid, qty, wh))
+            INSERT INTO issue_items(doc_id, product_id, qty, warehouse, price_netto, price_brutto)
+            VALUES (%s,%s,%s,%s,%s,%s)
+        """, (doc_id, pid, qty, wh, price_netto, price_brutto))
 
         # pakiet
         if package_numbers[i]:
@@ -401,6 +421,8 @@ def inwestycja_suwaj_receive_doc():
     product_ids = request.form.getlist('product_id')
     qtys = request.form.getlist('qty')
     package_numbers = request.form.getlist('package_number')
+    prices_netto = request.form.getlist('price_netto')
+    prices_brutto = request.form.getlist('price_brutto')
 
     for i in range(len(product_ids)):
         if not product_ids[i]:
@@ -412,6 +434,14 @@ def inwestycja_suwaj_receive_doc():
             qty = 0
         if qty <= 0:
             continue
+        try:
+            price_netto = float(prices_netto[i].replace(",", "."))
+        except:
+            price_netto = 0
+        try:
+            price_brutto = float(prices_brutto[i].replace(",", "."))
+        except:
+            price_brutto = 0
 
         cur.execute("""
             UPDATE products
@@ -440,9 +470,9 @@ def inwestycja_suwaj_receive_doc():
                 continue
 
         cur.execute("""
-            INSERT INTO issue_items(doc_id, product_id, qty, warehouse)
-            VALUES (%s,%s,%s,%s)
-        """, (doc_id, pid, qty, INVESTMENT_WAREHOUSE))
+            INSERT INTO issue_items(doc_id, product_id, qty, warehouse, price_netto, price_brutto)
+            VALUES (%s,%s,%s,%s,%s,%s)
+        """, (doc_id, pid, qty, INVESTMENT_WAREHOUSE, price_netto, price_brutto))
 
         if i < len(package_numbers) and package_numbers[i]:
             cur.execute("""
@@ -501,6 +531,8 @@ def inwestycja_suwaj_issue_doc():
     product_ids = request.form.getlist('product_id')
     qtys = request.form.getlist('qty')
     package_ids = request.form.getlist('package_id')
+    prices_netto = request.form.getlist('price_netto')
+    prices_brutto = request.form.getlist('price_brutto')
 
     for i in range(len(product_ids)):
         if not product_ids[i]:
@@ -513,6 +545,14 @@ def inwestycja_suwaj_issue_doc():
             qty = 0
         if qty <= 0:
             continue
+        try:
+            price_netto = float(prices_netto[i].replace(",", "."))
+        except:
+            price_netto = 0
+        try:
+            price_brutto = float(prices_brutto[i].replace(",", "."))
+        except:
+            price_brutto = 0
 
         pkg = package_ids[i] if package_ids[i] else None
         if pkg:
@@ -539,9 +579,9 @@ def inwestycja_suwaj_issue_doc():
             return f"Brak stanu w magazynie {INVESTMENT_WAREHOUSE}"
 
         cur.execute("""
-            INSERT INTO issue_items(doc_id, product_id, qty, warehouse, package_id)
-            VALUES (%s,%s,%s,%s,%s)
-        """, (doc_id, pid, qty, INVESTMENT_WAREHOUSE, pkg))
+            INSERT INTO issue_items(doc_id, product_id, qty, warehouse, package_id, price_netto, price_brutto)
+            VALUES (%s,%s,%s,%s,%s,%s,%s)
+        """, (doc_id, pid, qty, INVESTMENT_WAREHOUSE, pkg, price_netto, price_brutto))
 
     cur.execute("DELETE FROM packages WHERE qty <= 0")
     conn.commit()
@@ -575,6 +615,8 @@ def issue_doc():
     qtys = request.form.getlist('qty')
     warehouses = request.form.getlist('warehouse')
     package_ids = request.form.getlist('package_id')
+    prices_netto = request.form.getlist('price_netto')
+    prices_brutto = request.form.getlist('price_brutto')
 
     for i in range(len(product_ids)):
         if not product_ids[i]:
@@ -590,6 +632,14 @@ def issue_doc():
 
         if qty <= 0:
             continue
+        try:
+            price_netto = float(prices_netto[i].replace(",", "."))
+        except:
+            price_netto = 0
+        try:
+            price_brutto = float(prices_brutto[i].replace(",", "."))
+        except:
+            price_brutto = 0
 
         pkg = package_ids[i] if package_ids[i] else None
 
@@ -619,9 +669,9 @@ def issue_doc():
             return f"Brak stanu w magazynie {wh}"
 
         cur.execute("""
-            INSERT INTO issue_items(doc_id, product_id, qty, warehouse, package_id)
-            VALUES (%s,%s,%s,%s,%s)
-        """, (doc_id, pid, qty, wh, pkg))
+            INSERT INTO issue_items(doc_id, product_id, qty, warehouse, package_id, price_netto, price_brutto)
+            VALUES (%s,%s,%s,%s,%s,%s,%s)
+        """, (doc_id, pid, qty, wh, pkg, price_netto, price_brutto))
 
     # czyść puste paczki
     cur.execute("DELETE FROM packages WHERE qty <= 0")
