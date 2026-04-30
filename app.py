@@ -24,6 +24,15 @@ ADMIN_EMAILS = {e.strip().lower() for e in os.environ.get("ADMIN_EMAILS", "").sp
 ALLOWED_EMAILS = {e.strip().lower() for e in os.environ.get("ALLOWED_EMAILS", "").split(",") if e.strip()}
 FIREBASE_ADMIN_READY = False
 FIREBASE_ADMIN_ERROR = ""
+FIREBASE_WEB_ENV_KEYS = [
+    "FIREBASE_API_KEY",
+    "FIREBASE_AUTH_DOMAIN",
+    "FIREBASE_PROJECT_ID",
+    "FIREBASE_STORAGE_BUCKET",
+    "FIREBASE_MESSAGING_SENDER_ID",
+    "FIREBASE_APP_ID",
+    "FIREBASE_MEASUREMENT_ID",
+]
 
 
 def init_firebase_admin():
@@ -44,6 +53,10 @@ def init_firebase_admin():
     except Exception:
         FIREBASE_ADMIN_READY = False
         FIREBASE_ADMIN_ERROR = "Nieprawidłowy FIREBASE_SERVICE_ACCOUNT_JSON."
+
+
+def get_missing_firebase_web_envs():
+    return [k for k in FIREBASE_WEB_ENV_KEYS if not os.environ.get(k)]
 
 
 init_firebase_admin()
@@ -205,7 +218,8 @@ def login():
         "login.html",
         firebase_config=FIREBASE_CONFIG,
         firebase_admin_ready=FIREBASE_ADMIN_READY,
-        firebase_admin_error=FIREBASE_ADMIN_ERROR
+        firebase_admin_error=FIREBASE_ADMIN_ERROR,
+        missing_firebase_web_envs=get_missing_firebase_web_envs()
     )
 
 
