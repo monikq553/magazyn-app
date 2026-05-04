@@ -1,4 +1,6 @@
 import os
+import base64
+import logging
 from flask import Flask, render_template, request, redirect, session, jsonify
 from functools import wraps
 import psycopg2
@@ -9,6 +11,8 @@ from urllib import request as urlrequest
 from urllib import error as urlerror
 import firebase_admin
 from firebase_admin import credentials, auth
+
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 app.secret_key = "supersecretkey"
@@ -37,15 +41,30 @@ def init_firebase_admin():
     if not raw:
         FIREBASE_ADMIN_READY = False
         FIREBASE_ADMIN_ERROR = "Brak FIREBASE_SERVICE_ACCOUNT_JSON w zmiennych środowiskowych."
+        logger.error("Firebase Admin init failed: FIREBASE_SERVICE_ACCOUNT_JSON is missing.")
         return
     try:
-        cred = credentials.Certificate(json.loads(raw))
+        # Render envs are often pasted as plain JSON, but we also support base64 payloads.
+        if raw.strip().startswith("{"):
+            service_account = json.loads(raw)
+        else:
+            decoded = base64.b64decode(raw).decode("utf-8")
+            service_account = json.loads(decoded)
+
+        # If private_key is escaped (\\n), normalize to real newlines.
+        private_key = service_account.get("private_key")
+        if isinstance(private_key, str):
+            service_account["private_key"] = private_key.replace("\\n", "\n")
+
+        cred = credentials.Certificate(service_account)
         firebase_admin.initialize_app(cred)
         FIREBASE_ADMIN_READY = True
         FIREBASE_ADMIN_ERROR = ""
+        logger.info("Firebase Admin initialized successfully.")
     except Exception:
         FIREBASE_ADMIN_READY = False
         FIREBASE_ADMIN_ERROR = "Nieprawidłowy FIREBASE_SERVICE_ACCOUNT_JSON."
+        logger.exception("Firebase Admin init failed: invalid FIREBASE_SERVICE_ACCOUNT_JSON.")
 
 
 def get_missing_firebase_web_envs():
