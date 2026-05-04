@@ -290,9 +290,24 @@ def create_session():
     cur.execute("SELECT role FROM users WHERE username=%s", (email,))
     row = cur.fetchone()
     if not row:
-        conn.close()
-        return jsonify({"ok": False, "error": "Brak konta. Skontaktuj się z administratorem."}), 403
-    role = row[0] or ("admin" if email in ADMIN_EMAILS else "employee")
+        cur.execute("SELECT COUNT(*) FROM users")
+        users_count = cur.fetchone()[0]
+        can_autoprovision = (
+            users_count == 0
+            or email in ADMIN_EMAILS
+            or email in ALLOWED_EMAILS
+        )
+        if not can_autoprovision:
+            conn.close()
+            return jsonify({"ok": False, "error": "Brak konta. Skontaktuj się z administratorem."}), 403
+
+        role = "admin" if (users_count == 0 or email in ADMIN_EMAILS) else "employee"
+        cur.execute(
+            "INSERT INTO users(username, password, role) VALUES (%s,%s,%s)",
+            (email, generate_password_hash(uid), role)
+        )
+    else:
+        role = row[0] or ("admin" if email in ADMIN_EMAILS else "employee")
     cur.execute("UPDATE users SET password=%s WHERE username=%s", (generate_password_hash(uid), email))
     conn.commit()
     conn.close()
