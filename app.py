@@ -14,6 +14,8 @@ from firebase_admin import credentials, auth
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+app.config["SESSION_COOKIE_SECURE"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "None"
 app.secret_key = os.environ.get("SECRET_KEY", "fallback-secret")
 
 INVESTMENT_WAREHOUSE = "Inwestycja Suwaj"
