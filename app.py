@@ -1,5 +1,4 @@
 import os
-import base64
 import logging
 from flask import Flask, render_template, request, redirect, session, jsonify
 from functools import wraps
@@ -44,12 +43,18 @@ def init_firebase_admin():
         logger.error("Firebase Admin init failed: FIREBASE_SERVICE_ACCOUNT_JSON is missing.")
         return
     try:
-        # Render envs are often pasted as plain JSON, but we also support base64 payloads.
-        if raw.strip().startswith("{"):
-            service_account = json.loads(raw)
-        else:
-            decoded = base64.b64decode(raw).decode("utf-8")
-            service_account = json.loads(decoded)
+        # Read strictly from env and parse JSON payload (Render-compatible).
+        normalized_raw = raw.strip()
+        if (normalized_raw.startswith("'") and normalized_raw.endswith("'")) or (
+            normalized_raw.startswith('"') and normalized_raw.endswith('"')
+        ):
+            normalized_raw = normalized_raw[1:-1]
+
+        try:
+            service_account = json.loads(normalized_raw)
+        except json.JSONDecodeError:
+            # Some dashboards escape JSON one level too deep; unescape and try again.
+            service_account = json.loads(bytes(normalized_raw, "utf-8").decode("unicode_escape"))
 
         # If private_key is escaped (\\n), normalize to real newlines.
         private_key = service_account.get("private_key")
