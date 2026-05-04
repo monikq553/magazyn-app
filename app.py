@@ -5,6 +5,8 @@ import psycopg2
 from werkzeug.security import generate_password_hash
 from datetime import datetime
 import json
+from urllib import request as urlrequest
+from urllib import error as urlerror
 import firebase_admin
 from firebase_admin import credentials, auth
 
@@ -57,6 +59,33 @@ def get_missing_firebase_web_envs():
         "FIREBASE_MEASUREMENT_ID": "measurementId",
     }
     return [env_key for env_key, cfg_key in key_map.items() if not FIREBASE_CONFIG.get(cfg_key)]
+
+
+def verify_id_token_with_firebase_rest(id_token):
+    api_key = FIREBASE_CONFIG.get("apiKey")
+    if not api_key:
+        raise ValueError("Brak FIREBASE_API_KEY do fallback verify.")
+    endpoint = f"https://identitytoolkit.googleapis.com/v1/accounts:lookup?key={api_key}"
+    payload = json.dumps({"idToken": id_token}).encode("utf-8")
+    req = urlrequest.Request(
+        endpoint,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST"
+    )
+    try:
+        with urlrequest.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urlerror.HTTPError:
+        raise ValueError("Nieprawidłowy token")
+    users = data.get("users") or []
+    if not users:
+        raise ValueError("Brak użytkownika w tokenie")
+    user = users[0]
+    return {
+        "email": (user.get("email") or "").lower(),
+        "uid": user.get("localId") or ""
+    }
 
 
 init_firebase_admin()
@@ -219,7 +248,8 @@ def login():
         firebase_config=FIREBASE_CONFIG,
         firebase_admin_ready=FIREBASE_ADMIN_READY,
         firebase_admin_error=FIREBASE_ADMIN_ERROR,
-        missing_firebase_web_envs=get_missing_firebase_web_envs()
+        missing_firebase_web_envs=get_missing_firebase_web_envs(),
+        firebase_rest_fallback=not FIREBASE_ADMIN_READY and bool(FIREBASE_CONFIG.get("apiKey"))
     )
 
 
@@ -230,20 +260,25 @@ def register():
 
 @app.route('/auth/session', methods=['POST'])
 def create_session():
-    if not FIREBASE_ADMIN_READY:
-        return jsonify({"ok": False, "error": FIREBASE_ADMIN_ERROR or "Firebase auth backend is not configured."}), 503
     payload = request.get_json(silent=True) or {}
     id_token = payload.get("idToken")
     if not id_token:
         return jsonify({"ok": False, "error": "Brak tokenu"}), 400
 
-    try:
-        decoded = auth.verify_id_token(id_token)
-    except Exception:
-        return jsonify({"ok": False, "error": "Nieprawidłowy token"}), 401
-
-    email = (decoded.get("email") or "").lower()
-    uid = decoded.get("uid")
+    if FIREBASE_ADMIN_READY:
+        try:
+            decoded = auth.verify_id_token(id_token)
+            email = (decoded.get("email") or "").lower()
+            uid = decoded.get("uid")
+        except Exception:
+            return jsonify({"ok": False, "error": "Nieprawidłowy token"}), 401
+    else:
+        try:
+            decoded = verify_id_token_with_firebase_rest(id_token)
+            email = decoded.get("email")
+            uid = decoded.get("uid")
+        except Exception:
+            return jsonify({"ok": False, "error": FIREBASE_ADMIN_ERROR or "Nie udało się zweryfikować tokenu."}), 503
     if not email or not uid:
         return jsonify({"ok": False, "error": "Brak danych użytkownika"}), 400
 
@@ -255,9 +290,24 @@ def create_session():
     cur.execute("SELECT role FROM users WHERE username=%s", (email,))
     row = cur.fetchone()
     if not row:
-        conn.close()
-        return jsonify({"ok": False, "error": "Brak konta. Skontaktuj się z administratorem."}), 403
-    role = row[0] or ("admin" if email in ADMIN_EMAILS else "employee")
+        cur.execute("SELECT COUNT(*) FROM users")
+        users_count = cur.fetchone()[0]
+        can_autoprovision = (
+            users_count == 0
+            or email in ADMIN_EMAILS
+            or email in ALLOWED_EMAILS
+        )
+        if not can_autoprovision:
+            conn.close()
+            return jsonify({"ok": False, "error": "Brak konta. Skontaktuj się z administratorem."}), 403
+
+        role = "admin" if (users_count == 0 or email in ADMIN_EMAILS) else "employee"
+        cur.execute(
+            "INSERT INTO users(username, password, role) VALUES (%s,%s,%s)",
+            (email, generate_password_hash(uid), role)
+        )
+    else:
+        role = row[0] or ("admin" if email in ADMIN_EMAILS else "employee")
     cur.execute("UPDATE users SET password=%s WHERE username=%s", (generate_password_hash(uid), email))
     conn.commit()
     conn.close()

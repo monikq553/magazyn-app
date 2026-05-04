@@ -9,12 +9,17 @@
         Zaloguj
     </button>
     <p id="error" style="color:#dc2626; margin-top:10px;"></p>
-    {% if not firebase_admin_ready %}
+    {% if not firebase_admin_ready and not firebase_rest_fallback %}
     <p style="color:#dc2626; margin-top:10px;">
         Logowanie chwilowo niedostępne: {{ firebase_admin_error or "Brak konfiguracji Firebase Admin." }}
     </p>
     {% endif %}
-    <p style="margin-top:14px; font-size:13px;">Konto zakłada administrator.</p>
+    {% if firebase_rest_fallback %}
+    <p style="color:#b45309; margin-top:10px;">
+        Uwaga: używany tryb awaryjny logowania (skonfiguruj `FIREBASE_SERVICE_ACCOUNT_JSON` dla pełnej walidacji backendowej).
+    </p>
+    {% endif %}
+    <p style="margin-top:14px; font-size:13px;">Konto zakłada administrator (pierwszy użytkownik tworzy się automatycznie jako admin).</p>
     <hr style="margin:18px 0;">
     <p style="font-size:12px;color:#6b7280;">
         Firebase config: ustaw w Render zmienne środowiskowe `FIREBASE_API_KEY`, `FIREBASE_AUTH_DOMAIN`,
@@ -37,8 +42,9 @@ const firebaseConfig = {{ firebase_config|tojson }};
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const firebaseAdminReady = {{ "true" if firebase_admin_ready else "false" }};
+const firebaseRestFallback = {{ "true" if firebase_rest_fallback else "false" }};
 document.getElementById("submitBtn").addEventListener("click", async () => {
-  if (!firebaseAdminReady) {
+  if (!firebaseAdminReady && !firebaseRestFallback) {
     document.getElementById("error").textContent = "Logowanie jest wyłączone do czasu konfiguracji backendu Firebase.";
     return;
   }
