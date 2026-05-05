@@ -53,7 +53,7 @@ input, select {
         <input name="password" placeholder="Hasło" required>
         
         <select name="role">
-            <option value="user">User</option>
+            <option value="employee">Employee</option>
             <option value="admin">Admin</option>
         </select>
 
@@ -71,6 +71,13 @@ input, select {
     </div>
 
     <div class="actions">
+        <form method="POST" action="/update_user_role/{{u[0]}}" style="display:flex; gap:8px; align-items:center;">
+            <select name="role">
+                <option value="employee" {% if u[2] != 'admin' %}selected{% endif %}>Employee</option>
+                <option value="admin" {% if u[2] == 'admin' %}selected{% endif %}>Admin</option>
+            </select>
+            <button class="btn">Zmień rolę</button>
+        </form>
 
         {% if u[0] != 1 %}
         <form method="POST" action="/delete_user/{{u[0]}}">

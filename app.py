@@ -435,6 +435,35 @@ def delete_user(user_id):
     return redirect('/users')
 
 
+@app.route('/update_user_role/<int:user_id>', methods=['POST'])
+@admin_required
+def update_user_role(user_id):
+    new_role = request.form.get('role', 'employee')
+    if new_role not in ('admin', 'employee'):
+        return redirect('/users')
+
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT role FROM users WHERE id=%s", (user_id,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        return redirect('/users')
+
+    old_role = row[0] or 'employee'
+    if old_role == 'admin' and new_role != 'admin':
+        cur.execute("SELECT COUNT(*) FROM users WHERE role='admin'")
+        admins_count = cur.fetchone()[0]
+        if admins_count <= 1:
+            conn.close()
+            return redirect('/users')
+
+    cur.execute("UPDATE users SET role=%s WHERE id=%s", (new_role, user_id))
+    conn.commit()
+    conn.close()
+    return redirect('/users')
+
+
 @app.route('/magazyn/<name>')
 @login_required
 def magazyn(name):
