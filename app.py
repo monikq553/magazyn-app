@@ -10,6 +10,10 @@ import io
 import pandas as pd
 from urllib import request as urlrequest
 from urllib import error as urlerror
+from reportlab.lib.pagesizes import A4
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+from reportlab.lib import colors
+from reportlab.lib.styles import getSampleStyleSheet
 import firebase_admin
 from firebase_admin import credentials, auth
 
@@ -1075,6 +1079,81 @@ def historia():
         days.setdefault(d[1], []).append(d)
 
     return render_template("historia.html", days=days)
+
+
+@app.route('/report')
+@login_required
+def report():
+    selected_date = request.args.get("date") or datetime.now().strftime("%Y-%m-%d")
+    conn = db()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT d.date, COALESCE(d.kontrahent, ''), COALESCE(p.name, ''), i.qty, COALESCE(i.warehouse, p.warehouse, '')
+        FROM issue_docs d
+        JOIN issue_items i ON i.doc_id = d.id
+        LEFT JOIN products p ON p.id = i.product_id
+        WHERE d.date = %s
+        ORDER BY d.id DESC, i.id ASC
+        """,
+        (selected_date,)
+    )
+    operations = cur.fetchall()
+    conn.close()
+    return render_template("report.html", selected_date=selected_date, operations=operations)
+
+
+@app.route('/report/pdf')
+@login_required
+def report_pdf():
+    selected_date = request.args.get("date") or datetime.now().strftime("%Y-%m-%d")
+    conn = db()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT d.date, COALESCE(d.kontrahent, ''), COALESCE(p.name, ''), i.qty, COALESCE(i.warehouse, p.warehouse, '')
+        FROM issue_docs d
+        JOIN issue_items i ON i.doc_id = d.id
+        LEFT JOIN products p ON p.id = i.product_id
+        WHERE d.date = %s
+        ORDER BY d.id DESC, i.id ASC
+        """,
+        (selected_date,)
+    )
+    operations = cur.fetchall()
+    conn.close()
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4)
+    styles = getSampleStyleSheet()
+    elements = [
+        Paragraph("Raport dzienny magazynu", styles["Title"]),
+        Spacer(1, 8),
+        Paragraph(f"Data: {selected_date}", styles["Normal"]),
+        Spacer(1, 12),
+    ]
+
+    data = [["Data", "Kontrahent", "Produkt", "Ilość", "Magazyn"]]
+    for row in operations:
+        data.append([str(row[0]), str(row[1]), str(row[2]), str(row[3]), str(row[4])])
+
+    table = Table(data, repeatRows=1)
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#FFC067")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("ALIGN", (3, 1), (3, -1), "RIGHT"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+    ]))
+    elements.append(table)
+    doc.build(elements)
+    buffer.seek(0)
+    return Response(
+        buffer.getvalue(),
+        mimetype="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename=raport-{selected_date}.pdf"}
+    )
 
 
 if __name__ == '__main__':

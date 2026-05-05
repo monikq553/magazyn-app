@@ -1,20 +1,39 @@
-<!DOCTYPE html>
-<html>
-<body>
+{% extends "base.html" %}
 
-<h2>Raport {{date}}</h2>
+{% block content %}
+<div class="card">
+    <h2>Raport dzienny</h2>
+    <form method="GET" action="/report" style="display:flex; gap:10px; align-items:center; margin:12px 0 16px;">
+        <input type="date" name="date" value="{{ selected_date }}" required>
+        <button type="submit">Pokaż</button>
+        <a href="/report/pdf?date={{ selected_date }}" style="text-decoration:none;">
+            <button type="button">Download PDF</button>
+        </a>
+    </form>
 
-<a href="/report_pdf/{{date}}">PDF</a>
-
-<h3>Wydania</h3>
-{% for i in issues %}
-<p>{{i[0]}} - {{i[1]}}</p>
-{% endfor %}
-
-<h3>Przyjęcia</h3>
-{% for r in receipts %}
-<p>{{r[0]}} - {{r[1]}}</p>
-{% endfor %}
-
-</body>
-</html>
+    <table style="width:100%; border-collapse:collapse;">
+        <thead>
+            <tr style="background:#fff5e5;">
+                <th style="text-align:left; padding:8px; border:1px solid #e5e7eb;">Data</th>
+                <th style="text-align:left; padding:8px; border:1px solid #e5e7eb;">Kontrahent</th>
+                <th style="text-align:left; padding:8px; border:1px solid #e5e7eb;">Produkt</th>
+                <th style="text-align:right; padding:8px; border:1px solid #e5e7eb;">Ilość</th>
+                <th style="text-align:left; padding:8px; border:1px solid #e5e7eb;">Magazyn</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for op in operations %}
+            <tr>
+                <td style="padding:8px; border:1px solid #e5e7eb;">{{ op[0] }}</td>
+                <td style="padding:8px; border:1px solid #e5e7eb;">{{ op[1] }}</td>
+                <td style="padding:8px; border:1px solid #e5e7eb;">{{ op[2] }}</td>
+                <td style="padding:8px; border:1px solid #e5e7eb; text-align:right;">{{ op[3] }}</td>
+                <td style="padding:8px; border:1px solid #e5e7eb;">{{ op[4] }}</td>
+            </tr>
+        {% else %}
+            <tr><td colspan="5" style="padding:10px; border:1px solid #e5e7eb;">Brak operacji dla wybranej daty.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}
