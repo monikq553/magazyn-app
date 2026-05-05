@@ -3,6 +3,7 @@ import logging
 from flask import Flask, render_template, request, redirect, session, jsonify, Response
 from functools import wraps
 import psycopg2
+from psycopg2.pool import ThreadedConnectionPool
 from werkzeug.security import generate_password_hash
 from datetime import datetime
 import json
@@ -16,8 +17,12 @@ from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet
 import firebase_admin
 from firebase_admin import credentials, auth
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+from flask_caching import Cache
 
 logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
 app = Flask(__name__)
 app.secret_key = "supersecretkey"
@@ -36,6 +41,35 @@ ADMIN_EMAILS = {e.strip().lower() for e in os.environ.get("ADMIN_EMAILS", "").sp
 ALLOWED_EMAILS = {e.strip().lower() for e in os.environ.get("ALLOWED_EMAILS", "").split(",") if e.strip()}
 FIREBASE_ADMIN_READY = False
 FIREBASE_ADMIN_ERROR = ""
+DB_POOL = None
+cache = Cache(config={"CACHE_TYPE": "SimpleCache", "CACHE_DEFAULT_TIMEOUT": 60})
+cache.init_app(app)
+limiter = Limiter(key_func=get_remote_address, default_limits=["200 per minute"])
+limiter.init_app(app)
+
+
+class PooledConn:
+    def __init__(self, raw_conn):
+        self._raw = raw_conn
+
+    def __getattr__(self, item):
+        return getattr(self._raw, item)
+
+    def close(self):
+        global DB_POOL
+        if DB_POOL:
+            DB_POOL.putconn(self._raw)
+        else:
+            self._raw.close()
+
+
+def init_db_pool():
+    global DB_POOL
+    if DB_POOL:
+        return
+    dsn = os.environ.get("DATABASE_URL")
+    DB_POOL = ThreadedConnectionPool(minconn=1, maxconn=20, dsn=dsn)
+    logger.info("DB pool initialized.")
 
 
 def init_firebase_admin():
@@ -124,7 +158,12 @@ init_firebase_admin()
 
 # 🔥 DB
 def db():
-    return psycopg2.connect(os.environ.get("DATABASE_URL"))
+    init_db_pool()
+    raw = DB_POOL.getconn()
+    raw.autocommit = False
+    with raw.cursor() as cur:
+        cur.execute("SET statement_timeout = 15000")
+    return PooledConn(raw)
 
 
 # 🔥 INIT DB
@@ -302,6 +341,7 @@ def register():
 
 
 @app.route('/auth/session', methods=['POST'])
+@limiter.limit("20 per minute")
 def create_session():
     payload = request.get_json(silent=True) or {}
     id_token = payload.get("idToken")
@@ -405,6 +445,7 @@ def dashboard_page():
 
 @app.route('/magazyny')
 @login_required
+@cache.cached(timeout=30)
 def magazyny():
     return render_template("magazyny.html")
 
@@ -578,7 +619,7 @@ def add_cost():
     try:
         if warehouse_source:
             cur.execute(
-                "SELECT id, qty FROM products WHERE name=%s AND warehouse=%s ORDER BY id LIMIT 1",
+                "SELECT id, qty FROM products WHERE name=%s AND warehouse=%s ORDER BY id LIMIT 1 FOR UPDATE",
                 (name, MAIN_WAREHOUSE)
             )
             product = cur.fetchone()
@@ -1189,6 +1230,7 @@ def delete_doc(id):
 # 📊 HISTORIA
 @app.route('/historia')
 @login_required
+@cache.cached(timeout=30, query_string=True)
 def historia():
     conn = db()
     cur = conn.cursor()
@@ -1206,6 +1248,7 @@ def historia():
 
 @app.route('/report')
 @login_required
+@cache.cached(timeout=30, query_string=True)
 def report():
     selected_date = request.args.get("date") or datetime.now().strftime("%Y-%m-%d")
     conn = db()
