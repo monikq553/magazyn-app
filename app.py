@@ -6,6 +6,8 @@ import psycopg2
 from werkzeug.security import generate_password_hash
 from datetime import datetime
 import json
+import io
+import pandas as pd
 from urllib import request as urlrequest
 from urllib import error as urlerror
 import firebase_admin
@@ -538,6 +540,71 @@ def receive_doc():
     conn.close()
 
     return redirect('/historia')
+
+
+@app.route('/import_excel', methods=['POST'])
+@login_required
+def import_excel():
+    file = request.files.get("excel_file")
+    if not file or not file.filename:
+        return "Brak pliku do importu.", 400
+    if not file.filename.lower().endswith(".xlsx"):
+        return "Dozwolony jest tylko plik .xlsx", 400
+
+    try:
+        file_bytes = file.read()
+        df = pd.read_excel(io.BytesIO(file_bytes), engine="openpyxl")
+    except Exception:
+        return "Nie udało się odczytać pliku Excel.", 400
+
+    required_columns = ["name", "qty", "unit", "warehouse"]
+    if not all(col in df.columns for col in required_columns):
+        return f"Brak wymaganych kolumn: {', '.join(required_columns)}", 400
+
+    conn = db()
+    cur = conn.cursor()
+    try:
+        for _, row in df.iterrows():
+            name = str(row.get("name", "")).strip()
+            unit = str(row.get("unit", "")).strip()
+            warehouse = str(row.get("warehouse", "")).strip()
+            if not name or not unit or not warehouse:
+                continue
+
+            try:
+                qty = float(str(row.get("qty", "0")).replace(",", "."))
+            except Exception:
+                continue
+            if qty <= 0:
+                continue
+
+            cur.execute(
+                "SELECT id FROM products WHERE name=%s AND warehouse=%s LIMIT 1",
+                (name, warehouse)
+            )
+            existing = cur.fetchone()
+            if existing:
+                cur.execute(
+                    "UPDATE products SET qty = qty + %s, unit=%s WHERE id=%s",
+                    (qty, unit, existing[0])
+                )
+            else:
+                cur.execute(
+                    """
+                    INSERT INTO products(name, qty, unit, warehouse, price_netto, vat)
+                    VALUES (%s,%s,%s,%s,%s,%s)
+                    """,
+                    (name, qty, unit, warehouse, 0, 23)
+                )
+
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        return "Błąd importu. Sprawdź dane w pliku.", 400
+    finally:
+        conn.close()
+
+    return redirect('/magazyny')
 
 
 # 📤 WYDANIE

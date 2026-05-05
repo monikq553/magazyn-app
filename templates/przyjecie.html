@@ -59,6 +59,11 @@ button {
 
 <h2>{{ page_title or "Przyjęcie (PZ)" }}</h2>
 
+<form method="POST" action="/import_excel" enctype="multipart/form-data" style="margin-bottom:16px;">
+    <input type="file" name="excel_file" accept=".xlsx" required>
+    <button type="submit">Importuj Excel (.xlsx)</button>
+</form>
+
 <form method="POST" action="{{ form_action or '/receive_doc' }}">
 
 <!-- 🔥 DOKUMENT -->
