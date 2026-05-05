@@ -2,12 +2,28 @@
 
 {% block content %}
 
-<h2>📄 Dokument {{ doc[5] }}</h2>
+<h2>Dokument {{ doc[5] }}</h2>
 
 <div style="margin-bottom:20px;color:#6b7280;">
     Kontrahent: {{ doc[2] }}<br>
     Data: {{ doc[1] }}
 </div>
+
+<form method="post" action="/doc/{{ doc[0] }}/edit" style="display:flex;gap:10px;align-items:end;margin-bottom:18px;flex-wrap:wrap;">
+    <div>
+        <label>Kontrahent</label><br>
+        <input type="text" name="kontrahent" value="{{ doc[2] }}" required>
+    </div>
+    <div>
+        <label>Data</label><br>
+        <input type="date" name="date" value="{{ doc[1] }}" required>
+    </div>
+    <button type="submit">Zapisz zmiany</button>
+</form>
+
+<form method="post" action="/doc/{{ doc[0] }}/delete" onsubmit="return confirm('Usunąć dokument i jego pozycje z historii?');" style="margin-bottom:18px;">
+    <button type="submit" style="background:#ef4444;color:white;">Usuń dokument</button>
+</form>
 
 <style>
 .box {
