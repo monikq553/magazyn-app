@@ -320,6 +320,7 @@ def create_session():
             users_count == 0
             or email in ADMIN_EMAILS
             or email in ALLOWED_EMAILS
+            or not ALLOWED_EMAILS
         )
         if not can_autoprovision:
             conn.close()

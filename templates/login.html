@@ -39,10 +39,17 @@ document.getElementById("submitBtn").addEventListener("click", async () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ idToken: token })
     });
-    if (!res.ok) throw new Error("Nie udało się utworzyć sesji.");
+    if (!res.ok) {
+      let msg = "Nie udało się utworzyć sesji.";
+      try {
+        const payload = await res.json();
+        if (payload && payload.error) msg = payload.error;
+      } catch (_) {}
+      throw new Error(msg);
+    }
     window.location.href = "/";
   } catch (e) {
-    err.textContent = "Błąd logowania.";
+    err.textContent = e?.message || "Błąd logowania.";
   }
 });
 </script>
