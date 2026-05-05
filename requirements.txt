@@ -3,3 +3,4 @@ pandas
 openpyxl
 psycopg2-binary
 gunicorn
+firebase-admin
