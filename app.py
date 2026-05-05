@@ -485,6 +485,52 @@ def magazyn(name):
     return render_template("index.html", products=products, warehouse=name)
 
 
+@app.route('/delete_product/<int:product_id>', methods=['POST'])
+@login_required
+def delete_product(product_id):
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM issue_items WHERE product_id=%s", (product_id,))
+    linked = cur.fetchone()[0]
+    if linked > 0:
+        conn.close()
+        return "Nie można usunąć produktu użytego w dokumentach.", 400
+
+    cur.execute("DELETE FROM packages WHERE product_id=%s", (product_id,))
+    cur.execute("DELETE FROM products WHERE id=%s", (product_id,))
+    conn.commit()
+    conn.close()
+    return ("", 204)
+
+
+@app.route('/delete_selected', methods=['POST'])
+@login_required
+def delete_selected():
+    selected = request.form.getlist("selected")
+    if not selected:
+        return redirect(request.referrer or '/magazyny')
+
+    conn = db()
+    cur = conn.cursor()
+    for pid_raw in selected:
+        try:
+            pid = int(pid_raw)
+        except ValueError:
+            continue
+
+        cur.execute("SELECT COUNT(*) FROM issue_items WHERE product_id=%s", (pid,))
+        linked = cur.fetchone()[0]
+        if linked > 0:
+            continue
+
+        cur.execute("DELETE FROM packages WHERE product_id=%s", (pid,))
+        cur.execute("DELETE FROM products WHERE id=%s", (pid,))
+
+    conn.commit()
+    conn.close()
+    return redirect(request.referrer or '/magazyny')
+
+
 # 📥 PRZYJĘCIE
 @app.route('/przyjecie')
 @login_required
