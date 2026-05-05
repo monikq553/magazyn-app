@@ -49,8 +49,7 @@ input, select {
 <!-- ➕ DODAWANIE -->
 <div class="card" style="margin-bottom:20px;">
     <form method="POST" action="/add_user" style="display:flex; gap:10px; flex-wrap:wrap;">
-        <input name="username" placeholder="Login" required>
-        <input name="password" placeholder="Hasło" required>
+        <input name="username" type="email" placeholder="Email" required>
         
         <select name="role">
             <option value="employee">Employee</option>

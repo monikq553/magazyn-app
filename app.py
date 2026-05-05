@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 app.secret_key = "supersecretkey"
 INVESTMENT_WAREHOUSE = "Inwestycja Suwaj"
+MAIN_WAREHOUSE = "Drewno"
 FIREBASE_CONFIG = {
     "apiKey": os.environ.get("FIREBASE_API_KEY", "AIzaSyDeQD7CKOFY-GHbjz_Sn9WNgjnQQquBYAU"),
     "authDomain": os.environ.get("FIREBASE_AUTH_DOMAIN", "magazyn-app-8cab2.firebaseapp.com"),
@@ -174,6 +175,18 @@ def init_db():
         warehouse TEXT,
         image TEXT,
         doc_number TEXT
+    );
+    """)
+
+    # COSTS
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS costs(
+        id SERIAL PRIMARY KEY,
+        name TEXT,
+        amount REAL,
+        date TEXT,
+        warehouse_source BOOLEAN DEFAULT FALSE,
+        description TEXT
     );
     """)
 
@@ -412,12 +425,15 @@ def users():
 def add_user():
     conn = db()
     cur = conn.cursor()
+    role = request.form.get('role', 'employee')
+    if role not in ('admin', 'employee'):
+        role = 'employee'
     cur.execute(
         "INSERT INTO users(username, password, role) VALUES (%s,%s,%s) ON CONFLICT (username) DO NOTHING",
         (
             request.form.get('username'),
-            generate_password_hash(request.form.get('password')),
-            request.form.get('role', 'user')
+            generate_password_hash("firebase-managed"),
+            role
         )
     )
     conn.commit()
@@ -529,6 +545,67 @@ def delete_selected():
     conn.commit()
     conn.close()
     return redirect(request.referrer or '/magazyny')
+
+
+@app.route('/costs')
+@login_required
+def costs():
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT id, name, amount, date, warehouse_source, description FROM costs ORDER BY date DESC, id DESC")
+    costs_rows = cur.fetchall()
+    conn.close()
+    return render_template("costs.html", costs=costs_rows)
+
+
+@app.route('/add_cost', methods=['POST'])
+@login_required
+def add_cost():
+    name = (request.form.get('name') or '').strip()
+    description = (request.form.get('description') or '').strip()
+    date = request.form.get('date') or datetime.now().strftime("%Y-%m-%d")
+    warehouse_source = request.form.get('warehouse_source') == 'on'
+    try:
+        amount = float((request.form.get('amount') or '0').replace(",", "."))
+    except Exception:
+        return "Nieprawidłowa kwota/ilość.", 400
+
+    if not name or amount <= 0:
+        return "Nazwa i kwota/ilość są wymagane.", 400
+
+    conn = db()
+    cur = conn.cursor()
+    try:
+        if warehouse_source:
+            cur.execute(
+                "SELECT id, qty FROM products WHERE name=%s AND warehouse=%s ORDER BY id LIMIT 1",
+                (name, MAIN_WAREHOUSE)
+            )
+            product = cur.fetchone()
+            if not product:
+                conn.close()
+                return f"Brak produktu '{name}' w magazynie głównym ({MAIN_WAREHOUSE}).", 400
+            if product[1] < amount:
+                conn.close()
+                return "Brak wystarczającej ilości w magazynie głównym.", 400
+
+            cur.execute("UPDATE products SET qty = qty - %s WHERE id=%s", (amount, product[0]))
+
+        cur.execute(
+            """
+            INSERT INTO costs(name, amount, date, warehouse_source, description)
+            VALUES (%s,%s,%s,%s,%s)
+            """,
+            (name, amount, date, warehouse_source, description)
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        return "Błąd podczas zapisu kosztu.", 400
+    finally:
+        conn.close()
+
+    return redirect('/costs')
 
 
 # 📥 PRZYJĘCIE
