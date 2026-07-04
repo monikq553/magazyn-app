@@ -19,10 +19,17 @@ from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, 
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet
 import firebase_admin
-from firebase_admin import credentials, auth
+from firebase_admin import credentials, auth, storage
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from flask_caching import Cache
+from backup_service import (
+    decrypt_backup,
+    encrypt_backup,
+    export_database,
+    parse_backup,
+    restore_database,
+)
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -68,6 +75,7 @@ FIREBASE_ADMIN_ERROR = ""
 DB_POOL = None
 DB_INIT_LOCK = threading.Lock()
 DB_INITIALIZED = False
+DAILY_BACKUP_LOCK = threading.Lock()
 cache = Cache(config={"CACHE_TYPE": "SimpleCache", "CACHE_DEFAULT_TIMEOUT": 60})
 cache.init_app(app)
 limiter = Limiter(
@@ -475,6 +483,26 @@ def run_db_migrations():
         END $$;
     """)
 
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS backup_runs(
+        id SERIAL PRIMARY KEY,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        created_by TEXT NOT NULL,
+        status TEXT NOT NULL,
+        object_name TEXT,
+        size_bytes BIGINT,
+        checksum TEXT,
+        error TEXT
+    );
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS system_settings(
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    """)
+
     conn.commit()
     conn.close()
 
@@ -751,10 +779,44 @@ def health():
         cur.execute("SELECT 1")
         cur.fetchone()
         conn.close()
+        maybe_start_daily_backup()
         return jsonify({"status": "ok"})
     except Exception:
         logger.exception("Health check failed.")
         return jsonify({"status": "error", "database": "unavailable"}), 503
+
+
+def maybe_start_daily_backup():
+    if not os.environ.get("BACKUP_ENCRYPTION_KEY") or not FIREBASE_ADMIN_READY:
+        return
+    conn = db()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT 1 FROM backup_runs
+        WHERE status='completed' AND created_at::date=(NOW() AT TIME ZONE 'UTC')::date
+        LIMIT 1
+        """
+    )
+    already_completed = bool(cur.fetchone())
+    conn.close()
+    if already_completed or not DAILY_BACKUP_LOCK.acquire(blocking=False):
+        return
+
+    def run_backup():
+        try:
+            with app.app_context():
+                perform_database_backup("automatic-fallback")
+        except Exception:
+            logger.exception("Automatic fallback backup failed.")
+        finally:
+            DAILY_BACKUP_LOCK.release()
+
+    threading.Thread(
+        target=run_backup,
+        name="daily-database-backup",
+        daemon=True,
+    ).start()
 
 
 @app.after_request
@@ -2493,6 +2555,193 @@ def delete_doc(id):
     conn.commit()
     conn.close()
     return redirect('/historia')
+
+
+def backup_bucket():
+    bucket_name = FIREBASE_CONFIG.get("storageBucket")
+    if not bucket_name:
+        raise RuntimeError("Brak FIREBASE_STORAGE_BUCKET.")
+    return storage.bucket(bucket_name)
+
+
+def perform_database_backup(created_by):
+    guard_conn = db()
+    guard_cur = guard_conn.cursor()
+    guard_cur.execute("SELECT pg_try_advisory_lock(67431031)")
+    if not guard_cur.fetchone()[0]:
+        guard_conn.close()
+        raise RuntimeError("Inna kopia zapasowa jest już wykonywana.")
+    try:
+        return _perform_database_backup(created_by)
+    finally:
+        try:
+            guard_cur.execute("SELECT pg_advisory_unlock(67431031)")
+            guard_conn.commit()
+        finally:
+            guard_conn.close()
+
+
+def _perform_database_backup(created_by):
+    ensure_db_initialized()
+    log_conn = db()
+    log_cur = log_conn.cursor()
+    log_cur.execute(
+        """
+        INSERT INTO backup_runs(created_by, status)
+        VALUES (%s, 'running') RETURNING id
+        """,
+        (created_by,),
+    )
+    run_id = log_cur.fetchone()[0]
+    log_conn.commit()
+    log_conn.close()
+    try:
+        export_conn = db()
+        try:
+            compressed, checksum, _ = export_database(export_conn)
+        finally:
+            export_conn.close()
+        encrypted = encrypt_backup(
+            compressed,
+            os.environ.get("BACKUP_ENCRYPTION_KEY", ""),
+        )
+        timestamp = datetime.utcnow().strftime("%Y/%m/%Y-%m-%dT%H-%M-%SZ")
+        object_name = f"database-backups/{timestamp}-{run_id}.json.gz.enc"
+        blob = backup_bucket().blob(object_name)
+        blob.metadata = {
+            "sha256": checksum,
+            "format": "magazyn-app-backup-v1",
+            "created-by": created_by[:100],
+        }
+        blob.upload_from_string(
+            encrypted,
+            content_type="application/octet-stream",
+        )
+        update_conn = db()
+        update_cur = update_conn.cursor()
+        update_cur.execute(
+            """
+            UPDATE backup_runs
+            SET status='completed', object_name=%s, size_bytes=%s, checksum=%s
+            WHERE id=%s
+            """,
+            (object_name, len(encrypted), checksum, run_id),
+        )
+        update_conn.commit()
+        update_conn.close()
+        return {
+            "id": run_id,
+            "object_name": object_name,
+            "size_bytes": len(encrypted),
+            "checksum": checksum,
+        }
+    except Exception as exc:
+        logger.exception("Database backup failed.")
+        try:
+            error_conn = db()
+            error_cur = error_conn.cursor()
+            error_cur.execute(
+                "UPDATE backup_runs SET status='failed', error=%s WHERE id=%s",
+                (str(exc)[:1000], run_id),
+            )
+            error_conn.commit()
+            error_conn.close()
+        except Exception:
+            logger.exception("Backup failure logging failed.")
+        raise
+
+
+def valid_backup_object_name(object_name):
+    return (
+        object_name.startswith("database-backups/")
+        and object_name.endswith(".json.gz.enc")
+        and ".." not in object_name
+        and "\\" not in object_name
+    )
+
+
+@app.route('/admin/backups')
+@admin_required
+def backups_page():
+    conn = db()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, created_at, created_by, status, object_name, size_bytes, checksum, error
+        FROM backup_runs ORDER BY id DESC LIMIT 100
+        """
+    )
+    runs = cur.fetchall()
+    conn.close()
+    return render_template(
+        "backups.html",
+        runs=runs,
+        restore_enabled=os.environ.get("ALLOW_BACKUP_RESTORE", "").lower() == "true",
+    )
+
+
+@app.route('/admin/backups/create', methods=['POST'])
+@admin_required
+@limiter.limit("2 per hour")
+def create_manual_backup():
+    try:
+        perform_database_backup(session.get("user") or "administrator")
+    except Exception:
+        return "Nie udało się utworzyć kopii zapasowej.", 500
+    return redirect("/admin/backups?created=1")
+
+
+@app.route('/admin/backups/download')
+@admin_required
+@limiter.limit("20 per hour")
+def download_backup():
+    object_name = (request.args.get("name") or "").strip()
+    if not valid_backup_object_name(object_name):
+        return "Nieprawidłowa nazwa kopii.", 400
+    try:
+        encrypted = backup_bucket().blob(object_name).download_as_bytes()
+    except Exception:
+        logger.exception("Backup download failed.")
+        return "Nie udało się pobrać kopii.", 502
+    filename = object_name.rsplit("/", 1)[-1]
+    return Response(
+        encrypted,
+        mimetype="application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.route('/admin/backups/restore', methods=['POST'])
+@admin_required
+@limiter.limit("1 per hour")
+def restore_backup():
+    if os.environ.get("ALLOW_BACKUP_RESTORE", "").lower() != "true":
+        return "Przywracanie jest wyłączone. Włącz je czasowo w Renderze.", 403
+    if request.form.get("confirmation") != "PRZYWRÓĆ":
+        return "Wpisz PRZYWRÓĆ, aby potwierdzić.", 400
+    object_name = (request.form.get("object_name") or "").strip()
+    if not valid_backup_object_name(object_name):
+        return "Nieprawidłowa nazwa kopii.", 400
+    try:
+        encrypted = backup_bucket().blob(object_name).download_as_bytes()
+        compressed = decrypt_backup(
+            encrypted,
+            os.environ.get("BACKUP_ENCRYPTION_KEY", ""),
+        )
+        payload = parse_backup(compressed)
+        restore_conn = db()
+        try:
+            restore_database(restore_conn, payload)
+        except Exception:
+            restore_conn.rollback()
+            raise
+        finally:
+            restore_conn.close()
+        cache.clear()
+    except Exception:
+        logger.exception("Database restore failed.")
+        return "Nie udało się przywrócić kopii. Baza nie została zmieniona.", 500
+    return redirect("/admin/backups?restored=1")
 
 
 # 📊 HISTORIA
