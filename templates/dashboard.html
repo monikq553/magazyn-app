@@ -36,6 +36,24 @@
     border-radius:16px;
     border:1px solid #eef0f4;
 }
+.stock-row {
+    display:grid;
+    grid-template-columns:minmax(130px, 1fr) 3fr 90px;
+    gap:12px;
+    align-items:center;
+    margin:10px 0;
+}
+.stock-track {
+    height:14px;
+    background:#f1f5f9;
+    border-radius:999px;
+    overflow:hidden;
+}
+.stock-bar {
+    height:100%;
+    background:#FFC067;
+    border-radius:999px;
+}
 </style>
 
 <div class="stats">
@@ -53,22 +71,18 @@
 </div>
 
 <div class="card">
-    <canvas id="chart" height="100"></canvas>
+    <h3>Największe stany</h3>
+    {% for product in top_products %}
+    <div class="stock-row">
+        <div>{{ product[0] }}</div>
+        <div class="stock-track">
+            <div class="stock-bar" style="width:{{ ((product[1] or 0) / max_top_qty * 100) if max_top_qty else 0 }}%"></div>
+        </div>
+        <div style="text-align:right;">{{ product[1] }}</div>
+    </div>
+    {% else %}
+    <p>Brak produktów.</p>
+    {% endfor %}
 </div>
-
-<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-
-<script>
-new Chart(document.getElementById('chart'), {
-    type: 'bar',
-    data: {
-        labels: {{ names | safe }},
-        datasets: [{
-            label: 'Największe stany',
-            data: {{ qtys | safe }}
-        }]
-    }
-});
-</script>
 
 {% endblock %}
