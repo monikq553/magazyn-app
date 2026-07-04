@@ -1,26 +1,21 @@
 <div style="padding:10px;">
-
 <h3>Paczki</h3>
-
 {% if packages %}
 <table style="width:100%; border-collapse:collapse;">
-
-<tr style="background:#f1f2f6;">
-<th>Numer paczki</th>
-<th>Ilość</th>
-</tr>
-
-{% for p in packages %}
-<tr>
-<td style="padding:8px; border-bottom:1px solid #eee;">{{p[0]}}</td>
-<td>{{p[1]}}</td>
-</tr>
-{% endfor %}
-
+    <tr style="background:#f1f2f6;">
+        <th>Numer paczki</th>
+        <th>Ilość</th>
+        <th>Status</th>
+    </tr>
+    {% for p in packages %}
+    <tr>
+        <td style="padding:8px; border-bottom:1px solid #eee;">{{ p[0] }}</td>
+        <td>{{ p[1] }}</td>
+        <td>{{ 'aktywna' if p[2] == 'active' else 'wydana' if p[2] == 'issued' else 'anulowana' }}</td>
+    </tr>
+    {% endfor %}
 </table>
-
 {% else %}
-<p>Brak paczek</p>
+<p>Brak paczek.</p>
 {% endif %}
-
 </div>

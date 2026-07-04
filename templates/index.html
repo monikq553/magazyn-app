@@ -88,7 +88,7 @@ input {
 
 <table id="productsTable">
 <tr>
-<th><input type="checkbox" onclick="toggleAll(this)"></th>
+<th>{% if session.get('role') == 'admin' %}<input type="checkbox" onclick="toggleAll(this)">{% endif %}</th>
 <th>Nazwa</th>
 <th>Ilość</th>
 <th>Jedn.</th>
@@ -100,12 +100,12 @@ input {
 <tr>
 
 <td>
-    <input type="checkbox" name="selected" value="{{p[0]}}">
+    {% if session.get('role') == 'admin' %}<input type="checkbox" name="selected" value="{{p[0]}}">{% endif %}
 </td>
 
 <td>
     <span class="product-name"
-    onclick="showPackages(event, {{p[0]}}, '{{warehouse}}')"
+    onclick='showPackages(event, {{ p[0]|tojson }}, {{ warehouse|tojson }})'
     style="cursor:pointer;">
     {{p[1]}}
     </span>
@@ -116,16 +116,20 @@ input {
 <td>{{ (p[5]*(1+p[6]/100))|round(2) }} zł</td>
 
 <td style="display:flex; gap:5px;">
+    {% if session.get('role') == 'admin' %}
     <button type="button" class="btn" style="background:red;" onclick="deleteOne({{p[0]}})">Usuń</button>
+    {% endif %}
 </td>
 
 </tr>
 {% endfor %}
 </table>
 
+{% if session.get('role') == 'admin' %}
 <button class="btn" style="background:red; margin-top:10px;">
 Usuń zaznaczone
 </button>
+{% endif %}
 
 </form>
 </div>
@@ -162,8 +166,13 @@ padding:20px;
 function deleteOne(id) {
     if (!confirm("Usunąć produkt?")) return;
 
-    fetch("/delete_product/" + id, {method: "POST"})
-    .then(() => location.reload());
+    fetch("/delete_product/" + id, {
+        method: "POST",
+        headers: {"X-CSRF-Token": document.querySelector('meta[name="csrf-token"]').content}
+    }).then(async response => {
+        if (!response.ok) throw new Error(await response.text());
+        location.reload();
+    }).catch(error => alert(error.message));
 }
 
 function toggleAll(source) {
@@ -221,14 +230,15 @@ function filterTable() {
 function showPackages(e, productId, warehouse) {
     e.stopPropagation();
 
-    if (warehouse !== "Drewno") return;
-
     fetch('/packages/' + productId)
-    .then(res => res.text())
+    .then(async res => {
+        if (!res.ok) throw new Error(await res.text());
+        return res.text();
+    })
     .then(html => {
         document.getElementById("packagesContent").innerHTML = html;
         document.getElementById("packagesModal").style.display = "flex";
-    });
+    }).catch(error => alert(error.message));
 }
 
 function closePackages() {
