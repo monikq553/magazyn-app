@@ -1,10 +1,14 @@
 import copy
+import gzip
+import json
 import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import app as warehouse_app
+from backup_service import BACKUP_FORMAT, decrypt_backup, encrypt_backup, parse_backup
+from cryptography.fernet import Fernet
 
 
 class FakeStore:
@@ -301,6 +305,24 @@ class InventoryFlowTests(unittest.TestCase):
             self.assertEqual(warehouse_app.FIREBASE_CONFIG["apiKey"], "")
         if not os.environ.get("FIREBASE_PROJECT_ID"):
             self.assertEqual(warehouse_app.FIREBASE_CONFIG["projectId"], "")
+
+    def test_encrypted_backup_round_trip_and_validation(self):
+        tables = {
+            name: {"columns": ["id"], "rows": []}
+            for name in ("users", "products", "packages", "issue_docs", "issue_items")
+        }
+        raw = json.dumps(
+            {"format": BACKUP_FORMAT, "created_at": "2026-07-04T00:00:00Z", "tables": tables}
+        ).encode("utf-8")
+        compressed = gzip.compress(raw)
+        key = Fernet.generate_key().decode("ascii")
+        encrypted = encrypt_backup(compressed, key)
+        self.assertNotIn(b"products", encrypted)
+        decrypted = decrypt_backup(encrypted, key)
+        parsed = parse_backup(decrypted)
+        self.assertEqual(parsed["format"], BACKUP_FORMAT)
+        with self.assertRaises(ValueError):
+            decrypt_backup(encrypted, Fernet.generate_key().decode("ascii"))
 
     def test_firebase_login_sets_verified_cookie_without_storing_password(self):
         client = warehouse_app.app.test_client()

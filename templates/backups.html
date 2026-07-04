@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h2>Kopie zapasowe</h2>
+
+{% if request.args.get('created') %}
+<div class="card" style="margin-bottom:14px;color:#166534;">Kopia została zaszyfrowana i zapisana w prywatnym Firebase Storage.</div>
+{% endif %}
+{% if request.args.get('restored') %}
+<div class="card" style="margin-bottom:14px;color:#166534;">Baza została przywrócona z kopii.</div>
+{% endif %}
+
+<div class="card" style="margin-bottom:16px;">
+    <p>Automatyczna kopia jest wykonywana codziennie przez Render Cron. Pliki są szyfrowane przed wysłaniem i nie są publiczne.</p>
+    <form method="POST" action="/admin/backups/create">
+        <button type="submit">Wykonaj kopię teraz</button>
+    </form>
+</div>
+
+<div class="card">
+    <table style="width:100%;border-collapse:collapse;">
+        <thead>
+            <tr>
+                <th>Data</th><th>Uruchomił</th><th>Status</th><th>Rozmiar</th><th>Akcje</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for run in runs %}
+            <tr>
+                <td>{{ run[1] }}</td>
+                <td>{{ run[2] }}</td>
+                <td>{{ run[3] }}</td>
+                <td>{{ ((run[5] or 0) / 1024)|round(1) }} KB</td>
+                <td>
+                {% if run[3] == 'completed' and run[4] %}
+                    <a href="/admin/backups/download?name={{ run[4]|urlencode }}">Pobierz zaszyfrowaną kopię</a>
+                    {% if restore_enabled %}
+                    <form method="POST" action="/admin/backups/restore" style="margin-top:8px;">
+                        <input type="hidden" name="object_name" value="{{ run[4] }}">
+                        <input name="confirmation" placeholder="Wpisz PRZYWRÓĆ" required>
+                        <button type="submit" onclick="return confirm('Przywrócenie zastąpi wszystkie bieżące dane. Kontynuować?');">Przywróć</button>
+                    </form>
+                    {% endif %}
+                {% elif run[7] %}
+                    {{ run[7] }}
+                {% endif %}
+                </td>
+            </tr>
+        {% else %}
+            <tr><td colspan="5">Nie wykonano jeszcze żadnej kopii.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}
