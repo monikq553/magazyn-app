@@ -1,14 +1,20 @@
 {% extends "base.html" %}
 
 {% block content %}
-
 <h2>Dokument {{ doc[5] }}</h2>
+
+{% if doc[8] %}
+<div style="padding:12px; margin-bottom:16px; border-radius:8px; background:#fee2e2; color:#991b1b;">
+    Dokument anulowany {{ doc[8] }}. Historia została zachowana, a stany odwrócone.
+</div>
+{% endif %}
 
 <div style="margin-bottom:20px;color:#6b7280;">
     Kontrahent: {{ doc[2] }}<br>
     Data: {{ doc[1] }}
 </div>
 
+{% if not doc[8] %}
 <form method="post" action="/doc/{{ doc[0] }}/edit" style="display:flex;gap:10px;align-items:end;margin-bottom:18px;flex-wrap:wrap;">
     <div>
         <label>Kontrahent</label><br>
@@ -21,35 +27,33 @@
     <button type="submit">Zapisz zmiany</button>
 </form>
 
-<form method="post" action="/doc/{{ doc[0] }}/delete" onsubmit="return confirm('Usunąć dokument i jego pozycje z historii?');" style="margin-bottom:18px;">
-    <button type="submit" style="background:#ef4444;color:white;">Usuń dokument</button>
+{% if session.get('role') == 'admin' %}
+<form method="post" action="/doc/{{ doc[0] }}/delete" onsubmit="return confirm('Anulować dokument i odwrócić jego wpływ na stany? Historia pozostanie zachowana.');" style="margin-bottom:18px;">
+    <button type="submit" style="background:#ef4444;color:white;">Anuluj dokument</button>
 </form>
+{% endif %}
+{% endif %}
 
-<style>
-.box {
-    background:white;
-    padding:20px;
-    border-radius:12px;
-    border:1px solid #e5e7eb;
-}
-
-.row {
-    display:flex;
-    justify-content:space-between;
-    padding:10px 0;
-    border-bottom:1px solid #eee;
-}
-</style>
-
-<div class="box">
-
-{% for item in items %}
-<div class="row">
-    <span>{{ item[0] }}</span>
-    <span>{{ item[1] }}</span>
+<div class="card">
+    <table style="width:100%; border-collapse:collapse;">
+        <thead>
+            <tr>
+                <th style="text-align:left;padding:8px;">Produkt</th>
+                <th style="text-align:right;padding:8px;">Ilość</th>
+                <th style="text-align:left;padding:8px;">Magazyn</th>
+                <th style="text-align:left;padding:8px;">Paczka</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for item in items %}
+            <tr>
+                <td style="padding:8px;border-top:1px solid #eee;">{{ item[0] }}</td>
+                <td style="padding:8px;border-top:1px solid #eee;text-align:right;">{{ item[1] }}</td>
+                <td style="padding:8px;border-top:1px solid #eee;">{{ item[2] }}</td>
+                <td style="padding:8px;border-top:1px solid #eee;">{{ item[3] or '—' }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
 </div>
-{% endfor %}
-
-</div>
-
 {% endblock %}

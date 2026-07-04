@@ -68,8 +68,8 @@ button {
 
 <!-- 🔥 DOKUMENT -->
 <input name="doc_number" placeholder="Numer dokumentu (np. PZ/01)">
-<input type="date" name="date">
-<input name="kontrahent" placeholder="Dostawca">
+<input type="date" name="date" required>
+<input name="kontrahent" placeholder="Dostawca" required>
 
 <hr>
 
@@ -118,12 +118,12 @@ button {
 {% endif %}
 
 <!-- 🔥 NUMER PACZKI -->
-<input name="package_number" placeholder="Numer paczki (np. PZ-001)">
+<input name="package_number" maxlength="100" placeholder="Numer paczki (np. PZ-001)">
 
 <!-- 🔥 ILOŚĆ -->
-<input name="qty" placeholder="Ilość">
-<input name="price_netto" placeholder="Cena netto">
-<input name="price_brutto" placeholder="Cena brutto">
+<input name="qty" type="number" min="0.001" step="0.001" placeholder="Ilość" required>
+<input name="price_netto" type="number" min="0" step="0.01" placeholder="Cena netto">
+<input name="price_brutto" type="number" min="0" step="0.01" placeholder="Cena brutto">
 
 <!-- 🔥 JEDNOSTKA -->
 <select name="unit">
@@ -153,7 +153,7 @@ button {
 <script>
 const PRODUCTS = [
 {% for p in products %}
-{ id: {{p[0]}}, name: "{{p[1]}}", qty: "{{p[2]}}", unit: "{{p[3]}}", warehouse: "{{p[4]}}", price_netto: "{{p[5]}}", vat: "{{p[6]}}" },
+{ id: {{p[0]|tojson}}, name: {{p[1]|tojson}}, qty: {{p[2]|tojson}}, unit: {{p[3]|tojson}}, warehouse: {{p[4]|tojson}}, price_netto: {{p[5]|tojson}}, vat: {{p[6]|tojson}} },
 {% endfor %}
 ];
 

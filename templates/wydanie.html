@@ -63,8 +63,8 @@ button {
 
 <!-- 🔥 DOKUMENT -->
 <input name="doc_number" placeholder="Numer dokumentu (np. WZ/01)">
-<input type="date" name="date">
-<input name="kontrahent" placeholder="Kontrahent">
+<input type="date" name="date" required>
+<input name="kontrahent" placeholder="Kontrahent" required>
 
 <hr>
 
@@ -119,7 +119,8 @@ button {
 {% for pkg in packages %}
 <option value="{{pkg[0]}}"
         data-product="{{pkg[1]}}"
-        data-qty="{{pkg[3]}}">
+        data-qty="{{pkg[3]}}"
+        data-warehouse="{{pkg[4]}}">
 Paczka {{pkg[2]}} ({{pkg[3]}})
 </option>
 {% endfor %}
@@ -128,9 +129,9 @@ Paczka {{pkg[2]}} ({{pkg[3]}})
 <div class="info package-info"></div>
 
 <!-- 🔥 ILOŚĆ -->
-<input name="qty" placeholder="Ilość">
-<input name="price_netto" placeholder="Cena netto">
-<input name="price_brutto" placeholder="Cena brutto">
+<input name="qty" type="number" min="0.001" step="0.001" placeholder="Ilość" required>
+<input name="price_netto" type="number" min="0" step="0.01" placeholder="Cena netto">
+<input name="price_brutto" type="number" min="0" step="0.01" placeholder="Cena brutto">
 
 <!-- 🔥 JEDNOSTKA -->
 <select name="unit">
@@ -161,7 +162,7 @@ Paczka {{pkg[2]}} ({{pkg[3]}})
 <script>
 const PRODUCTS = [
 {% for p in products %}
-{ id: {{p[0]}}, name: "{{p[1]}}", qty: "{{p[2]}}", unit: "{{p[3]}}", warehouse: "{{p[4]}}", price_netto: "{{p[5]}}", vat: "{{p[6]}}" },
+{ id: {{p[0]|tojson}}, name: {{p[1]|tojson}}, qty: {{p[2]|tojson}}, unit: {{p[3]|tojson}}, warehouse: {{p[4]|tojson}}, price_netto: {{p[5]|tojson}}, vat: {{p[6]|tojson}} },
 {% endfor %}
 ];
 
@@ -224,9 +225,24 @@ function searchProduct(input) {
 function showPackageInfo(select) {
     let option = select.options[select.selectedIndex];
     let qty = option.dataset.qty || "";
-
-    let info = select.parentElement.querySelector(".package-info");
+    let item = select.closest(".item");
+    let info = item.querySelector(".package-info");
     info.innerHTML = qty ? "W paczce: " + qty : "";
+    if (!option.value) return;
+
+    const product = PRODUCTS.find(p => String(p.id) === String(option.dataset.product));
+    if (!product) return;
+    item.querySelector(".product-input").value = product.name;
+    item.querySelector("input[name='product_id']").value = product.id;
+    item.querySelector("input[name='qty']").value = "";
+    item.querySelector("input[name='qty']").max = qty;
+    const warehouseSelect = item.querySelector("select[name='warehouse']");
+    if (warehouseSelect) warehouseSelect.value = option.dataset.warehouse;
+    item.querySelector("input[name='price_netto']").value = product.price_netto || "";
+    const netto = Number(product.price_netto || 0);
+    item.querySelector("input[name='price_brutto']").value =
+        (netto * (1 + Number(product.vat || 0) / 100)).toFixed(2);
+    item.querySelector(".info").innerHTML = "Stan produktu: " + product.qty + " " + product.unit;
 }
 
 // ➕ DODAJ

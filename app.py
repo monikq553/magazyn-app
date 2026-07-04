@@ -1,10 +1,14 @@
 import os
 import logging
+import math
+import secrets
+import threading
 from flask import Flask, render_template, request, redirect, session, jsonify, Response
 from functools import wraps
 import psycopg2
 from psycopg2.pool import ThreadedConnectionPool
 from werkzeug.security import generate_password_hash
+from werkzeug.middleware.proxy_fix import ProxyFix
 from datetime import datetime
 import json
 import io
@@ -25,9 +29,25 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 app = Flask(__name__)
-app.secret_key = "supersecretkey"
+app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=os.environ.get("RENDER", "").lower() == "true",
+    MAX_CONTENT_LENGTH=10 * 1024 * 1024,
+)
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 INVESTMENT_WAREHOUSE = "Inwestycja Suwaj"
 MAIN_WAREHOUSE = "Drewno"
+WAREHOUSES = (
+    "Drewno",
+    "Farby",
+    "Śruby i wkręty",
+    "Pellet",
+    "Golden Oak",
+    "Inne",
+    INVESTMENT_WAREHOUSE,
+)
 FIREBASE_CONFIG = {
     "apiKey": os.environ.get("FIREBASE_API_KEY", "AIzaSyDeQD7CKOFY-GHbjz_Sn9WNgjnQQquBYAU"),
     "authDomain": os.environ.get("FIREBASE_AUTH_DOMAIN", "magazyn-app-8cab2.firebaseapp.com"),
@@ -42,9 +62,15 @@ ALLOWED_EMAILS = {e.strip().lower() for e in os.environ.get("ALLOWED_EMAILS", ""
 FIREBASE_ADMIN_READY = False
 FIREBASE_ADMIN_ERROR = ""
 DB_POOL = None
+DB_INIT_LOCK = threading.Lock()
+DB_INITIALIZED = False
 cache = Cache(config={"CACHE_TYPE": "SimpleCache", "CACHE_DEFAULT_TIMEOUT": 60})
 cache.init_app(app)
-limiter = Limiter(key_func=get_remote_address, default_limits=["200 per minute"])
+limiter = Limiter(
+    key_func=get_remote_address,
+    default_limits=["200 per minute"],
+    storage_uri=os.environ.get("RATELIMIT_STORAGE_URI", "memory://"),
+)
 limiter.init_app(app)
 
 
@@ -68,7 +94,16 @@ def init_db_pool():
     if DB_POOL:
         return
     dsn = os.environ.get("DATABASE_URL")
-    DB_POOL = ThreadedConnectionPool(minconn=1, maxconn=20, dsn=dsn)
+    if not dsn:
+        raise RuntimeError("Brak wymaganej zmiennej środowiskowej DATABASE_URL.")
+    pool_size = max(2, int(os.environ.get("DB_POOL_SIZE", "5")))
+    DB_POOL = ThreadedConnectionPool(
+        minconn=1,
+        maxconn=pool_size,
+        dsn=dsn,
+        connect_timeout=10,
+        application_name="magazyn-app",
+    )
     logger.info("DB pool initialized.")
 
 
@@ -167,9 +202,10 @@ def db():
 
 
 # 🔥 INIT DB
-def init_db():
+def run_db_migrations():
     conn = db()
     cur = conn.cursor()
+    cur.execute("SELECT pg_advisory_xact_lock(67431029)")
 
     # USERS
     cur.execute("""
@@ -293,11 +329,119 @@ def init_db():
             ON CONFLICT (username) DO UPDATE SET role='admin'
         """, (admin_email, generate_password_hash("firebase-managed"), "admin"))
 
+    cur.execute("ALTER TABLE packages ADD COLUMN IF NOT EXISTS initial_qty REAL")
+    cur.execute("ALTER TABLE packages ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'active'")
+    cur.execute("ALTER TABLE packages ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ")
+    cur.execute("ALTER TABLE issue_docs ADD COLUMN IF NOT EXISTS movement_type TEXT")
+    cur.execute("ALTER TABLE issue_docs ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW()")
+    cur.execute("ALTER TABLE issue_docs ADD COLUMN IF NOT EXISTS voided_at TIMESTAMPTZ")
+    cur.execute("ALTER TABLE issue_docs ADD COLUMN IF NOT EXISTS voided_by TEXT")
+    cur.execute("ALTER TABLE issue_items ADD COLUMN IF NOT EXISTS package_number TEXT")
+    cur.execute("ALTER TABLE costs ADD COLUMN IF NOT EXISTS source_warehouse TEXT")
+    cur.execute("UPDATE products SET qty=0 WHERE qty IS NULL OR qty < 0 OR qty::text='NaN'")
+    cur.execute("UPDATE packages SET qty=0 WHERE qty IS NULL OR qty < 0 OR qty::text='NaN'")
+    cur.execute("UPDATE packages SET initial_qty=qty WHERE initial_qty IS NULL")
+    cur.execute("""
+        UPDATE packages
+        SET status=CASE WHEN qty <= 0 THEN 'issued' ELSE 'active' END,
+            archived_at=CASE WHEN qty <= 0 THEN COALESCE(archived_at, NOW()) ELSE archived_at END
+        WHERE status IS NULL OR status NOT IN ('active', 'issued', 'cancelled')
+           OR (qty <= 0 AND status='active')
+    """)
+    cur.execute("""
+        UPDATE issue_docs
+        SET movement_type=CASE
+            WHEN COALESCE(doc_number, '') LIKE 'PZ%' THEN 'PZ'
+            WHEN COALESCE(doc_number, '') LIKE 'WZ%' THEN 'WZ'
+            ELSE movement_type
+        END
+        WHERE movement_type IS NULL
+    """)
+    cur.execute("""
+        UPDATE issue_items i SET package_number=p.number
+        FROM packages p
+        WHERE i.package_id=p.id AND i.package_number IS NULL
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_products_warehouse_name ON products(warehouse, lower(name))")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_packages_product_active ON packages(product_id, warehouse, status)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_packages_number ON packages(warehouse, lower(number))")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_issue_items_doc ON issue_items(doc_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_issue_docs_date ON issue_docs(date)")
+    cur.execute("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='products_qty_nonnegative') THEN
+                ALTER TABLE products
+                ADD CONSTRAINT products_qty_nonnegative CHECK (qty >= 0);
+            END IF;
+            IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='packages_qty_nonnegative') THEN
+                ALTER TABLE packages
+                ADD CONSTRAINT packages_qty_nonnegative CHECK (qty >= 0);
+            END IF;
+            IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='issue_items_qty_positive') THEN
+                ALTER TABLE issue_items
+                ADD CONSTRAINT issue_items_qty_positive CHECK (qty > 0) NOT VALID;
+            END IF;
+        END $$;
+    """)
+
     conn.commit()
     conn.close()
 
 
-init_db()
+def ensure_db_initialized():
+    global DB_INITIALIZED, DB_POOL
+    if DB_INITIALIZED:
+        return
+    with DB_INIT_LOCK:
+        if DB_INITIALIZED:
+            return
+        try:
+            run_db_migrations()
+            DB_INITIALIZED = True
+        except Exception:
+            logger.exception("Database initialization failed.")
+            if DB_POOL:
+                DB_POOL.closeall()
+                DB_POOL = None
+            raise
+
+
+def csrf_token():
+    token = session.get("_csrf_token")
+    if not token:
+        token = secrets.token_urlsafe(32)
+        session["_csrf_token"] = token
+    return token
+
+
+app.jinja_env.globals["csrf_token"] = csrf_token
+
+
+def parse_positive_number(value, field_name="Ilość"):
+    try:
+        number = float(str(value or "").strip().replace(",", "."))
+    except (TypeError, ValueError):
+        raise ValueError(f"{field_name}: podaj prawidłową liczbę.")
+    if not math.isfinite(number) or number <= 0:
+        raise ValueError(f"{field_name} musi być większa od zera.")
+    return number
+
+
+def parse_nonnegative_number(value, field_name):
+    if value in (None, ""):
+        return 0.0
+    try:
+        number = float(str(value).strip().replace(",", "."))
+    except (TypeError, ValueError):
+        raise ValueError(f"{field_name}: podaj prawidłową liczbę.")
+    if not math.isfinite(number) or number < 0:
+        raise ValueError(f"{field_name} nie może być ujemna.")
+    return number
+
+
+def close_with_rollback(conn):
+    conn.rollback()
 
 # 🔒 LOGIN REQUIRED
 def login_required(f):
@@ -368,6 +512,7 @@ def create_session():
     if ALLOWED_EMAILS and email not in ALLOWED_EMAILS:
         return jsonify({"ok": False, "error": "E-mail poza listą dozwolonych użytkowników"}), 403
 
+    ensure_db_initialized()
     conn = db()
     cur = conn.cursor()
     cur.execute("SELECT role FROM users WHERE username=%s", (email,))
@@ -379,7 +524,6 @@ def create_session():
             users_count == 0
             or email in ADMIN_EMAILS
             or email in ALLOWED_EMAILS
-            or not ALLOWED_EMAILS
         )
         if not can_autoprovision:
             conn.close()
@@ -402,7 +546,7 @@ def create_session():
     return jsonify({"ok": True, "role": role})
 
 
-@app.route('/logout')
+@app.route('/logout', methods=['POST'])
 def logout():
     session.clear()
     return redirect('/login')
@@ -410,17 +554,39 @@ def logout():
 
 @app.before_request
 def require_login_for_private_app():
-    allowed_routes = {"login", "create_session", "logout", "static", "favicon"}
+    allowed_routes = {"login", "create_session", "logout", "static", "favicon", "health"}
+    if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+        sent_token = request.form.get("_csrf_token") or request.headers.get("X-CSRF-Token")
+        if not sent_token or not secrets.compare_digest(sent_token, session.get("_csrf_token", "")):
+            if request.is_json:
+                return jsonify({"ok": False, "error": "Sesja formularza wygasła. Odśwież stronę."}), 400
+            return "Sesja formularza wygasła. Odśwież stronę.", 400
     if request.endpoint in allowed_routes:
         return None
     if 'user' not in session:
         return redirect('/login')
+    ensure_db_initialized()
     return None
 
 
 @app.route('/favicon.ico')
 def favicon():
     return Response(status=204)
+
+
+@app.route('/health')
+def health():
+    try:
+        ensure_db_initialized()
+        conn = db()
+        cur = conn.cursor()
+        cur.execute("SELECT 1")
+        cur.fetchone()
+        conn.close()
+        return jsonify({"status": "ok"})
+    except Exception:
+        logger.exception("Health check failed.")
+        return jsonify({"status": "error", "database": "unavailable"}), 503
 
 
 @app.after_request
@@ -440,14 +606,27 @@ def home():
 @app.route('/dashboard', endpoint='dashboard_page_view')
 @login_required
 def dashboard_page():
-    return render_template("home.html")
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*), COALESCE(SUM(qty), 0) FROM products")
+    total_products, total_qty = cur.fetchone()
+    cur.execute("SELECT name, qty FROM products ORDER BY qty DESC LIMIT 10")
+    top_products = cur.fetchall()
+    conn.close()
+    return render_template(
+        "dashboard.html",
+        total_products=total_products,
+        total_qty=round(total_qty or 0, 3),
+        names=json.dumps([row[0] for row in top_products]),
+        qtys=json.dumps([row[1] for row in top_products]),
+    )
 
 
 @app.route('/magazyny')
 @login_required
 @cache.cached(timeout=30)
 def magazyny():
-    return render_template("magazyny.html")
+    return render_template("magazyny.html", warehouses=WAREHOUSES)
 
 
 @app.route('/users')
@@ -466,13 +645,17 @@ def users():
 def add_user():
     conn = db()
     cur = conn.cursor()
+    username = (request.form.get('username') or '').strip().lower()
+    if not username or "@" not in username or len(username) > 254:
+        conn.close()
+        return "Podaj prawidłowy adres e-mail.", 400
     role = request.form.get('role', 'employee')
     if role not in ('admin', 'employee'):
         role = 'employee'
     cur.execute(
         "INSERT INTO users(username, password, role) VALUES (%s,%s,%s) ON CONFLICT (username) DO NOTHING",
         (
-            request.form.get('username'),
+            username,
             generate_password_hash("firebase-managed"),
             role
         )
@@ -485,11 +668,21 @@ def add_user():
 @app.route('/delete_user/<int:user_id>', methods=['POST'])
 @admin_required
 def delete_user(user_id):
-    if user_id == 1:
-        return redirect('/users')
-
     conn = db()
     cur = conn.cursor()
+    cur.execute("SELECT username, role FROM users WHERE id=%s FOR UPDATE", (user_id,))
+    user = cur.fetchone()
+    if not user:
+        conn.close()
+        return redirect('/users')
+    if user[0].lower() == (session.get("user") or "").lower():
+        conn.close()
+        return "Nie możesz usunąć aktualnie zalogowanego konta.", 400
+    if user[1] == "admin":
+        cur.execute("SELECT COUNT(*) FROM users WHERE role='admin'")
+        if cur.fetchone()[0] <= 1:
+            conn.close()
+            return "Nie można usunąć ostatniego administratora.", 400
     cur.execute("DELETE FROM users WHERE id=%s", (user_id,))
     conn.commit()
     conn.close()
@@ -542,8 +735,66 @@ def magazyn(name):
     return render_template("index.html", products=products, warehouse=name)
 
 
-@app.route('/delete_product/<int:product_id>', methods=['POST'])
+@app.route('/packages/<int:product_id>')
 @login_required
+def packages_for_product(product_id):
+    conn = db()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT number, qty, status
+        FROM packages
+        WHERE product_id=%s
+        ORDER BY CASE WHEN status='active' THEN 0 ELSE 1 END, id DESC
+        """,
+        (product_id,),
+    )
+    packages = cur.fetchall()
+    conn.close()
+    return render_template("packages.html", packages=packages)
+
+
+@app.route('/api/packages/lookup')
+@login_required
+def package_lookup():
+    number = (request.args.get("number") or "").strip()
+    warehouse = (request.args.get("warehouse") or "").strip()
+    if not number:
+        return jsonify({"ok": False, "error": "Podaj numer paczki."}), 400
+    conn = db()
+    cur = conn.cursor()
+    query = """
+        SELECT pk.id, pk.number, pk.qty, pk.warehouse, pk.status,
+               p.id, p.name, p.unit, p.price_netto, p.vat
+        FROM packages pk
+        JOIN products p ON p.id=pk.product_id
+        WHERE lower(pk.number)=lower(%s)
+    """
+    params = [number]
+    if warehouse:
+        query += " AND pk.warehouse=%s"
+        params.append(warehouse)
+    query += " ORDER BY CASE WHEN pk.status='active' THEN 0 ELSE 1 END, pk.id DESC LIMIT 2"
+    cur.execute(query, tuple(params))
+    rows = cur.fetchall()
+    conn.close()
+    if not rows:
+        return jsonify({"ok": False, "error": "Nie znaleziono paczki."}), 404
+    if len(rows) > 1 and not warehouse:
+        return jsonify({"ok": False, "error": "Numer występuje w kilku magazynach. Wybierz magazyn."}), 409
+    row = rows[0]
+    return jsonify({
+        "ok": True,
+        "package": {
+            "id": row[0], "number": row[1], "qty": row[2], "warehouse": row[3],
+            "status": row[4], "product_id": row[5], "product": row[6],
+            "unit": row[7], "price_netto": row[8], "vat": row[9],
+        },
+    })
+
+
+@app.route('/delete_product/<int:product_id>', methods=['POST'])
+@admin_required
 def delete_product(product_id):
     conn = db()
     cur = conn.cursor()
@@ -561,7 +812,7 @@ def delete_product(product_id):
 
 
 @app.route('/delete_selected', methods=['POST'])
-@login_required
+@admin_required
 def delete_selected():
     selected = request.form.getlist("selected")
     if not selected:
@@ -593,19 +844,88 @@ def delete_selected():
 def costs():
     conn = db()
     cur = conn.cursor()
-    cur.execute("SELECT id, name, amount, date, warehouse_source, description FROM costs ORDER BY date DESC, id DESC")
+    cur.execute(
+        "SELECT id, name, amount, date, warehouse_source, description, source_warehouse "
+        "FROM costs ORDER BY date DESC, id DESC"
+    )
     costs_rows = cur.fetchall()
     conn.close()
-    return render_template("costs.html", costs=costs_rows)
+    return render_template("costs.html", costs=costs_rows, warehouses=WAREHOUSES)
+
+
+def process_cost():
+    name = (request.form.get("name") or "").strip()
+    description = (request.form.get("description") or "").strip()
+    source_warehouse = (request.form.get("source_warehouse") or "").strip()
+    warehouse_source = request.form.get("warehouse_source") == "on"
+    try:
+        amount = parse_positive_number(request.form.get("amount"), "Kwota / ilość")
+        date = normalized_document_date(request.form.get("date"))
+    except ValueError as exc:
+        return str(exc), 400
+    if not name:
+        return "Nazwa jest wymagana.", 400
+    if warehouse_source and source_warehouse not in WAREHOUSES:
+        return "Wybierz prawidłowy magazyn źródłowy.", 400
+
+    conn = db()
+    cur = conn.cursor()
+    try:
+        if warehouse_source:
+            cur.execute(
+                """
+                SELECT id, qty FROM products
+                WHERE lower(name)=lower(%s) AND warehouse=%s
+                ORDER BY id LIMIT 1 FOR UPDATE
+                """,
+                (name, source_warehouse),
+            )
+            product = cur.fetchone()
+            if not product:
+                raise ValueError(f"Brak produktu '{name}' w magazynie {source_warehouse}.")
+            cur.execute(
+                "SELECT 1 FROM packages WHERE product_id=%s AND status='active' AND qty>0 LIMIT 1",
+                (product[0],),
+            )
+            if cur.fetchone():
+                raise ValueError("Ten produkt jest ewidencjonowany w paczkach. Użyj formularza wydania.")
+            cur.execute(
+                "UPDATE products SET qty=qty-%s WHERE id=%s AND qty >= %s",
+                (amount, product[0], amount),
+            )
+            if cur.rowcount != 1:
+                raise ValueError(f"Brak wystarczającej ilości w magazynie {source_warehouse}.")
+        cur.execute(
+            """
+            INSERT INTO costs(name, amount, date, warehouse_source, description, source_warehouse)
+            VALUES (%s,%s,%s,%s,%s,%s)
+            """,
+            (name, amount, date, warehouse_source, description, source_warehouse or None),
+        )
+        conn.commit()
+        cache.clear()
+        return redirect("/costs")
+    except ValueError as exc:
+        conn.rollback()
+        return str(exc), 400
+    except Exception:
+        conn.rollback()
+        logger.exception("Cost creation failed.")
+        return "Nie udało się zapisać kosztu.", 500
+    finally:
+        conn.close()
 
 
 @app.route('/add_cost', methods=['POST'])
 @login_required
 def add_cost():
+    return process_cost()
+
     name = (request.form.get('name') or '').strip()
     description = (request.form.get('description') or '').strip()
     date = request.form.get('date') or datetime.now().strftime("%Y-%m-%d")
     warehouse_source = request.form.get('warehouse_source') == 'on'
+    source_warehouse = (request.form.get('source_warehouse') or '').strip()
     try:
         amount = float((request.form.get('amount') or '0').replace(",", "."))
     except Exception:
@@ -618,9 +938,11 @@ def add_cost():
     cur = conn.cursor()
     try:
         if warehouse_source:
+            if source_warehouse not in WAREHOUSES:
+                return "Wybierz prawidłowy magazyn źródłowy.", 400
             cur.execute(
                 "SELECT id, qty FROM products WHERE name=%s AND warehouse=%s ORDER BY id LIMIT 1 FOR UPDATE",
-                (name, MAIN_WAREHOUSE)
+                (name, source_warehouse)
             )
             product = cur.fetchone()
             if not product:
@@ -630,16 +952,26 @@ def add_cost():
                 conn.close()
                 return "Brak wystarczającej ilości w magazynie głównym.", 400
 
-            cur.execute("UPDATE products SET qty = qty - %s WHERE id=%s", (amount, product[0]))
+            cur.execute(
+                "SELECT 1 FROM packages WHERE product_id=%s AND status='active' AND qty>0 LIMIT 1",
+                (product[0],)
+            )
+            if cur.fetchone():
+                return "Ten produkt jest ewidencjonowany w paczkach. Użyj formularza wydania.", 400
+            cur.execute(
+                "UPDATE products SET qty=qty-%s WHERE id=%s AND qty >= %s",
+                (amount, product[0], amount)
+            )
 
         cur.execute(
             """
-            INSERT INTO costs(name, amount, date, warehouse_source, description)
-            VALUES (%s,%s,%s,%s,%s)
+            INSERT INTO costs(name, amount, date, warehouse_source, description, source_warehouse)
+            VALUES (%s,%s,%s,%s,%s,%s)
             """,
-            (name, amount, date, warehouse_source, description)
+            (name, amount, date, warehouse_source, description, source_warehouse or None)
         )
         conn.commit()
+        cache.clear()
     except Exception:
         conn.rollback()
         return "Błąd podczas zapisu kosztu.", 400
@@ -647,6 +979,286 @@ def add_cost():
         conn.close()
 
     return redirect('/costs')
+
+
+def form_value(values, index, default=""):
+    return values[index] if index < len(values) else default
+
+
+def normalized_document_date(value):
+    value = (value or "").strip() or datetime.now().strftime("%Y-%m-%d")
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        raise ValueError("Nieprawidłowa data dokumentu.")
+    return value
+
+
+def collect_document_items(forced_warehouse=None, issuing=False):
+    product_ids = request.form.getlist("product_id")
+    quantities = request.form.getlist("qty")
+    warehouses = request.form.getlist("warehouse")
+    package_values = request.form.getlist("package_id" if issuing else "package_number")
+    netto_values = request.form.getlist("price_netto")
+    brutto_values = request.form.getlist("price_brutto")
+    items = []
+    for index, raw_product_id in enumerate(product_ids):
+        raw_product_id = (raw_product_id or "").strip()
+        if not raw_product_id:
+            continue
+        try:
+            product_id = int(raw_product_id)
+        except ValueError:
+            raise ValueError("Wybrano nieprawidłowy produkt.")
+        warehouse = forced_warehouse or form_value(warehouses, index).strip()
+        if not warehouse:
+            raise ValueError("Wybierz magazyn dla każdej pozycji.")
+        qty = parse_positive_number(form_value(quantities, index))
+        price_netto = parse_nonnegative_number(form_value(netto_values, index), "Cena netto")
+        price_brutto = parse_nonnegative_number(form_value(brutto_values, index), "Cena brutto")
+        package_value = form_value(package_values, index).strip()
+        if not issuing and len(package_value) > 100:
+            raise ValueError("Numer paczki może mieć maksymalnie 100 znaków.")
+        items.append({
+            "product_id": product_id,
+            "warehouse": warehouse,
+            "qty": qty,
+            "package": package_value,
+            "price_netto": price_netto,
+            "price_brutto": price_brutto,
+        })
+    if not items:
+        raise ValueError("Dodaj co najmniej jedną kompletną pozycję dokumentu.")
+    return items
+
+
+def create_receipt(forced_warehouse=None):
+    try:
+        items = collect_document_items(forced_warehouse=forced_warehouse, issuing=False)
+        date = normalized_document_date(request.form.get("date"))
+    except ValueError as exc:
+        return str(exc), 400
+    contractor = (request.form.get("kontrahent") or "").strip()
+    if not contractor:
+        return "Dostawca jest wymagany.", 400
+
+    conn = db()
+    cur = conn.cursor()
+    try:
+        resolved = []
+        for item in items:
+            cur.execute(
+                "SELECT name, unit, price_netto, vat FROM products WHERE id=%s",
+                (item["product_id"],),
+            )
+            source = cur.fetchone()
+            if not source:
+                raise ValueError("Wybrany produkt już nie istnieje.")
+            cur.execute(
+                """
+                SELECT id FROM products
+                WHERE warehouse=%s AND lower(name)=lower(%s)
+                ORDER BY id LIMIT 1 FOR UPDATE
+                """,
+                (item["warehouse"], source[0]),
+            )
+            target = cur.fetchone()
+            target_id = target[0] if target else None
+            if item["package"]:
+                cur.execute(
+                    """
+                    SELECT 1 FROM packages
+                    WHERE warehouse=%s AND lower(number)=lower(%s) AND status='active'
+                    LIMIT 1 FOR UPDATE
+                    """,
+                    (item["warehouse"], item["package"]),
+                )
+                if cur.fetchone():
+                    raise ValueError(
+                        f"Aktywna paczka {item['package']} już istnieje w magazynie {item['warehouse']}."
+                    )
+            resolved.append((item, source, target_id))
+
+        cur.execute(
+            """
+            INSERT INTO issue_docs(date, kontrahent, warehouse, image, doc_number, movement_type)
+            VALUES (%s,%s,%s,%s,%s,'PZ') RETURNING id
+            """,
+            (date, contractor, forced_warehouse or "", "", ""),
+        )
+        doc_id = cur.fetchone()[0]
+        requested_number = (request.form.get("doc_number") or "").strip()
+        prefix = "PZ-IS" if forced_warehouse == INVESTMENT_WAREHOUSE else "PZ"
+        doc_number = requested_number or f"{prefix}/{doc_id}/{datetime.now().year}"
+        cur.execute("UPDATE issue_docs SET doc_number=%s WHERE id=%s", (doc_number, doc_id))
+
+        for item, source, target_id in resolved:
+            if target_id:
+                cur.execute(
+                    "UPDATE products SET qty=qty+%s, price_netto=%s WHERE id=%s",
+                    (item["qty"], item["price_netto"], target_id),
+                )
+            else:
+                cur.execute(
+                    """
+                    INSERT INTO products(name, qty, unit, warehouse, price_netto, vat)
+                    VALUES (%s,%s,%s,%s,%s,%s) RETURNING id
+                    """,
+                    (source[0], item["qty"], source[1], item["warehouse"],
+                     item["price_netto"] or source[2] or 0, source[3] or 0),
+                )
+                target_id = cur.fetchone()[0]
+
+            package_id = None
+            if item["package"]:
+                cur.execute(
+                    """
+                    INSERT INTO packages(product_id, number, qty, warehouse, initial_qty, status)
+                    VALUES (%s,%s,%s,%s,%s,'active') RETURNING id
+                    """,
+                    (target_id, item["package"], item["qty"], item["warehouse"], item["qty"]),
+                )
+                package_id = cur.fetchone()[0]
+            cur.execute(
+                """
+                INSERT INTO issue_items(
+                    doc_id, product_id, qty, warehouse, package_id, package_number,
+                    price_netto, price_brutto
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                """,
+                (doc_id, target_id, item["qty"], item["warehouse"], package_id,
+                 item["package"] or None, item["price_netto"], item["price_brutto"]),
+            )
+        conn.commit()
+        cache.clear()
+        return redirect(f"/doc/{doc_id}")
+    except ValueError as exc:
+        close_with_rollback(conn)
+        return str(exc), 400
+    except Exception:
+        close_with_rollback(conn)
+        logger.exception("Receipt creation failed.")
+        return "Nie udało się zapisać przyjęcia. Żadne stany nie zostały zmienione.", 500
+    finally:
+        conn.close()
+
+
+def create_issue(forced_warehouse=None):
+    try:
+        items = collect_document_items(forced_warehouse=forced_warehouse, issuing=True)
+        date = normalized_document_date(request.form.get("date"))
+    except ValueError as exc:
+        return str(exc), 400
+    contractor = (request.form.get("kontrahent") or "").strip()
+    if not contractor:
+        return "Kontrahent jest wymagany.", 400
+
+    conn = db()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            INSERT INTO issue_docs(date, kontrahent, warehouse, image, doc_number, movement_type)
+            VALUES (%s,%s,%s,%s,%s,'WZ') RETURNING id
+            """,
+            (date, contractor, forced_warehouse or "", "", ""),
+        )
+        doc_id = cur.fetchone()[0]
+        requested_number = (request.form.get("doc_number") or "").strip()
+        prefix = "WZ-IS" if forced_warehouse == INVESTMENT_WAREHOUSE else "WZ"
+        doc_number = requested_number or f"{prefix}/{doc_id}/{datetime.now().year}"
+        cur.execute("UPDATE issue_docs SET doc_number=%s WHERE id=%s", (doc_number, doc_id))
+
+        for item in items:
+            cur.execute(
+                """
+                SELECT id FROM products
+                WHERE id=%s AND warehouse=%s
+                FOR UPDATE
+                """,
+                (item["product_id"], item["warehouse"]),
+            )
+            if not cur.fetchone():
+                raise ValueError("Produkt nie istnieje w wybranym magazynie.")
+
+            package_id = None
+            package_number = None
+            if item["package"]:
+                try:
+                    package_id = int(item["package"])
+                except ValueError:
+                    raise ValueError("Wybrano nieprawidłową paczkę.")
+                cur.execute(
+                    """
+                    SELECT number, qty FROM packages
+                    WHERE id=%s AND product_id=%s AND warehouse=%s AND status='active'
+                    FOR UPDATE
+                    """,
+                    (package_id, item["product_id"], item["warehouse"]),
+                )
+                package = cur.fetchone()
+                if not package:
+                    raise ValueError("Paczka nie należy do wybranego produktu lub magazynu.")
+                package_number = package[0]
+                if package[1] + 1e-9 < item["qty"]:
+                    raise ValueError(
+                        f"W paczce {package_number} jest tylko {package[1]}."
+                    )
+                cur.execute(
+                    """
+                    UPDATE packages
+                    SET qty=qty-%s,
+                        status=CASE WHEN qty-%s <= 0 THEN 'issued' ELSE 'active' END,
+                        archived_at=CASE WHEN qty-%s <= 0 THEN NOW() ELSE NULL END
+                    WHERE id=%s AND qty >= %s
+                    """,
+                    (item["qty"], item["qty"], item["qty"], package_id, item["qty"]),
+                )
+                if cur.rowcount != 1:
+                    raise ValueError("Stan paczki zmienił się. Odśwież stronę i spróbuj ponownie.")
+            else:
+                cur.execute(
+                    """
+                    SELECT 1 FROM packages
+                    WHERE product_id=%s AND warehouse=%s AND status='active' AND qty>0
+                    LIMIT 1
+                    """,
+                    (item["product_id"], item["warehouse"]),
+                )
+                if cur.fetchone():
+                    raise ValueError("Ten produkt jest ewidencjonowany w paczkach. Wybierz numer paczki.")
+
+            cur.execute(
+                """
+                UPDATE products SET qty=qty-%s
+                WHERE id=%s AND warehouse=%s AND qty >= %s
+                """,
+                (item["qty"], item["product_id"], item["warehouse"], item["qty"]),
+            )
+            if cur.rowcount != 1:
+                raise ValueError(f"Brak wystarczającego stanu w magazynie {item['warehouse']}.")
+            cur.execute(
+                """
+                INSERT INTO issue_items(
+                    doc_id, product_id, qty, warehouse, package_id, package_number,
+                    price_netto, price_brutto
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                """,
+                (doc_id, item["product_id"], item["qty"], item["warehouse"], package_id,
+                 package_number, item["price_netto"], item["price_brutto"]),
+            )
+        conn.commit()
+        cache.clear()
+        return redirect(f"/doc/{doc_id}")
+    except ValueError as exc:
+        close_with_rollback(conn)
+        return str(exc), 400
+    except Exception:
+        close_with_rollback(conn)
+        logger.exception("Issue creation failed.")
+        return "Nie udało się zapisać wydania. Żadne stany nie zostały zmienione.", 500
+    finally:
+        conn.close()
 
 
 # 📥 PRZYJĘCIE
@@ -659,7 +1271,7 @@ def przyjecie():
     cur.execute("SELECT * FROM products")
     products = cur.fetchall()
 
-    cur.execute("SELECT * FROM packages")
+    cur.execute("SELECT * FROM packages WHERE status='active' AND qty > 0")
     packages = cur.fetchall()
 
     conn.close()
@@ -671,6 +1283,8 @@ def przyjecie():
 @app.route('/receive_doc', methods=['POST'])
 @login_required
 def receive_doc():
+    return create_receipt()
+
     conn = db()
     cur = conn.cursor()
 
@@ -739,10 +1353,124 @@ def receive_doc():
     return redirect('/historia')
 
 
+def process_excel_import(upload):
+    if not upload or not upload.filename:
+        return "Brak pliku do importu.", 400
+    if not upload.filename.lower().endswith(".xlsx"):
+        return "Dozwolony jest tylko plik .xlsx.", 400
+    try:
+        dataframe = pd.read_excel(io.BytesIO(upload.read()), engine="openpyxl")
+    except Exception:
+        return "Nie udało się odczytać pliku Excel.", 400
+    required = {"name", "qty", "unit", "warehouse"}
+    if not required.issubset(dataframe.columns):
+        return f"Brak wymaganych kolumn: {', '.join(sorted(required))}.", 400
+
+    rows = []
+    try:
+        for row_number, row in dataframe.iterrows():
+            name = str(row.get("name", "")).strip()
+            unit = str(row.get("unit", "")).strip()
+            warehouse = str(row.get("warehouse", "")).strip()
+            if not name or not unit or warehouse not in WAREHOUSES:
+                raise ValueError(f"Wiersz {row_number + 2}: brak nazwy/jednostki lub nieprawidłowy magazyn.")
+            qty = parse_positive_number(row.get("qty"), f"Wiersz {row_number + 2}, ilość")
+            package_number = str(row.get("package_number", "")).strip()
+            if package_number.lower() == "nan":
+                package_number = ""
+            rows.append((name, qty, unit, warehouse, package_number))
+    except ValueError as exc:
+        return str(exc), 400
+    if not rows:
+        return "Plik nie zawiera żadnych pozycji.", 400
+
+    conn = db()
+    cur = conn.cursor()
+    try:
+        date = datetime.now().strftime("%Y-%m-%d")
+        cur.execute(
+            """
+            INSERT INTO issue_docs(date, kontrahent, warehouse, image, doc_number, movement_type)
+            VALUES (%s,%s,%s,%s,%s,'PZ') RETURNING id
+            """,
+            (date, f"Import: {upload.filename}", "", "", ""),
+        )
+        doc_id = cur.fetchone()[0]
+        cur.execute(
+            "UPDATE issue_docs SET doc_number=%s WHERE id=%s",
+            (f"PZ-IMPORT/{doc_id}/{datetime.now().year}", doc_id),
+        )
+        for name, qty, unit, warehouse, package_number in rows:
+            cur.execute(
+                """
+                SELECT id FROM products
+                WHERE warehouse=%s AND lower(name)=lower(%s)
+                ORDER BY id LIMIT 1 FOR UPDATE
+                """,
+                (warehouse, name),
+            )
+            existing = cur.fetchone()
+            if existing:
+                product_id = existing[0]
+                cur.execute(
+                    "UPDATE products SET qty=qty+%s, unit=%s WHERE id=%s",
+                    (qty, unit, product_id),
+                )
+            else:
+                cur.execute(
+                    """
+                    INSERT INTO products(name, qty, unit, warehouse, price_netto, vat)
+                    VALUES (%s,%s,%s,%s,0,23) RETURNING id
+                    """,
+                    (name, qty, unit, warehouse),
+                )
+                product_id = cur.fetchone()[0]
+            package_id = None
+            if package_number:
+                cur.execute(
+                    """
+                    SELECT 1 FROM packages
+                    WHERE warehouse=%s AND lower(number)=lower(%s) AND status='active'
+                    """,
+                    (warehouse, package_number),
+                )
+                if cur.fetchone():
+                    raise ValueError(f"Aktywna paczka {package_number} już istnieje w magazynie {warehouse}.")
+                cur.execute(
+                    """
+                    INSERT INTO packages(product_id, number, qty, warehouse, initial_qty, status)
+                    VALUES (%s,%s,%s,%s,%s,'active') RETURNING id
+                    """,
+                    (product_id, package_number, qty, warehouse, qty),
+                )
+                package_id = cur.fetchone()[0]
+            cur.execute(
+                """
+                INSERT INTO issue_items(doc_id, product_id, qty, warehouse, package_id, package_number)
+                VALUES (%s,%s,%s,%s,%s,%s)
+                """,
+                (doc_id, product_id, qty, warehouse, package_id, package_number or None),
+            )
+        conn.commit()
+        cache.clear()
+        return redirect(f"/doc/{doc_id}")
+    except ValueError as exc:
+        conn.rollback()
+        return str(exc), 400
+    except Exception:
+        conn.rollback()
+        logger.exception("Excel import failed.")
+        return "Błąd importu. Żadne dane nie zostały zapisane.", 500
+    finally:
+        conn.close()
+
+
 @app.route('/import_excel', methods=['POST'])
 @login_required
 def import_excel():
     file = request.files.get("excel_file")
+    return process_excel_import(file)
+
     if not file or not file.filename:
         return "Brak pliku do importu.", 400
     if not file.filename.lower().endswith(".xlsx"):
@@ -814,7 +1542,7 @@ def wydanie():
     cur.execute("SELECT * FROM products")
     products = cur.fetchall()
 
-    cur.execute("SELECT * FROM packages")
+    cur.execute("SELECT * FROM packages WHERE status='active' AND qty > 0")
     packages = cur.fetchall()
 
     conn.close()
@@ -849,7 +1577,10 @@ def inwestycja_suwaj_przyjecie():
     cur.execute("SELECT * FROM products")
     products = cur.fetchall()
 
-    cur.execute("SELECT * FROM packages WHERE warehouse=%s OR warehouse IS NULL", (INVESTMENT_WAREHOUSE,))
+    cur.execute(
+        "SELECT * FROM packages WHERE warehouse=%s AND status='active' AND qty > 0",
+        (INVESTMENT_WAREHOUSE,),
+    )
     packages = cur.fetchall()
 
     conn.close()
@@ -867,6 +1598,8 @@ def inwestycja_suwaj_przyjecie():
 @app.route('/inwestycja-suwaj/receive_doc', methods=['POST'])
 @login_required
 def inwestycja_suwaj_receive_doc():
+    return create_receipt(INVESTMENT_WAREHOUSE)
+
     conn = db()
     cur = conn.cursor()
 
@@ -960,7 +1693,10 @@ def inwestycja_suwaj_wydanie():
     cur.execute("SELECT * FROM products WHERE warehouse=%s", (INVESTMENT_WAREHOUSE,))
     products = cur.fetchall()
 
-    cur.execute("SELECT * FROM packages WHERE warehouse=%s OR warehouse IS NULL", (INVESTMENT_WAREHOUSE,))
+    cur.execute(
+        "SELECT * FROM packages WHERE warehouse=%s AND status='active' AND qty > 0",
+        (INVESTMENT_WAREHOUSE,),
+    )
     packages = cur.fetchall()
     conn.close()
 
@@ -977,6 +1713,8 @@ def inwestycja_suwaj_wydanie():
 @app.route('/inwestycja-suwaj/issue_doc', methods=['POST'])
 @login_required
 def inwestycja_suwaj_issue_doc():
+    return create_issue(INVESTMENT_WAREHOUSE)
+
     conn = db()
     cur = conn.cursor()
 
@@ -1059,6 +1797,8 @@ def inwestycja_suwaj_issue_doc():
 @app.route('/issue_doc', methods=['POST'])
 @login_required
 def issue_doc():
+    return create_issue()
+
     conn = db()
     cur = conn.cursor()
 
@@ -1156,9 +1896,13 @@ def doc_detail(id):
 
     cur.execute("SELECT * FROM issue_docs WHERE id=%s", (id,))
     doc = cur.fetchone()
+    if not doc:
+        conn.close()
+        return "Nie znaleziono dokumentu.", 404
 
     cur.execute("""
-        SELECT p.name, i.qty, COALESCE(i.warehouse, p.warehouse), pk.number
+        SELECT p.name, i.qty, COALESCE(i.warehouse, p.warehouse),
+               COALESCE(i.package_number, pk.number)
         FROM issue_items i
         JOIN products p ON p.id = i.product_id
         LEFT JOIN packages pk ON pk.id = i.package_id
@@ -1174,21 +1918,118 @@ def doc_detail(id):
 @app.route('/doc/<int:id>/edit', methods=['POST'])
 @login_required
 def edit_doc(id):
+    contractor = (request.form.get("kontrahent") or "").strip()
+    try:
+        date = normalized_document_date(request.form.get("date"))
+    except ValueError as exc:
+        return str(exc), 400
+    if not contractor:
+        return "Kontrahent jest wymagany.", 400
     conn = db()
     cur = conn.cursor()
     cur.execute("""
         UPDATE issue_docs
         SET kontrahent=%s, date=%s
-        WHERE id=%s
-    """, (request.form.get('kontrahent', ''), request.form.get('date', ''), id))
+        WHERE id=%s AND voided_at IS NULL
+    """, (contractor, date, id))
     conn.commit()
     conn.close()
+    cache.clear()
     return redirect(f"/doc/{id}")
 
 
+def void_document(document_id):
+    conn = db()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT movement_type, doc_number, voided_at
+            FROM issue_docs WHERE id=%s FOR UPDATE
+            """,
+            (document_id,),
+        )
+        document = cur.fetchone()
+        if not document:
+            return redirect("/historia")
+        if document[2]:
+            return redirect(f"/doc/{document_id}")
+        movement_type = document[0] or (
+            "WZ" if str(document[1] or "").startswith("WZ") else "PZ"
+        )
+        cur.execute(
+            """
+            SELECT product_id, qty, warehouse, package_id
+            FROM issue_items WHERE doc_id=%s ORDER BY id FOR UPDATE
+            """,
+            (document_id,),
+        )
+        items = cur.fetchall()
+        if movement_type == "WZ":
+            for product_id, qty, warehouse, package_id in items:
+                cur.execute(
+                    "UPDATE products SET qty=qty+%s WHERE id=%s AND warehouse=%s",
+                    (qty, product_id, warehouse),
+                )
+                if package_id:
+                    cur.execute(
+                        """
+                        UPDATE packages
+                        SET qty=qty+%s, status='active', archived_at=NULL
+                        WHERE id=%s
+                        """,
+                        (qty, package_id),
+                    )
+        else:
+            for product_id, qty, warehouse, package_id in items:
+                cur.execute(
+                    """
+                    UPDATE products SET qty=qty-%s
+                    WHERE id=%s AND warehouse=%s AND qty >= %s
+                    """,
+                    (qty, product_id, warehouse, qty),
+                )
+                if cur.rowcount != 1:
+                    raise ValueError("Nie można anulować przyjęcia: część towaru została już wydana.")
+                if package_id:
+                    cur.execute(
+                        "SELECT qty FROM packages WHERE id=%s FOR UPDATE",
+                        (package_id,),
+                    )
+                    package = cur.fetchone()
+                    if not package or package[0] + 1e-9 < qty:
+                        raise ValueError("Nie można anulować przyjęcia: paczka została już częściowo wydana.")
+                    cur.execute(
+                        """
+                        UPDATE packages
+                        SET qty=0, status='cancelled', archived_at=NOW()
+                        WHERE id=%s
+                        """,
+                        (package_id,),
+                    )
+        cur.execute(
+            "UPDATE issue_docs SET voided_at=NOW(), voided_by=%s WHERE id=%s",
+            (session.get("user"), document_id),
+        )
+        conn.commit()
+        cache.clear()
+        return redirect(f"/doc/{document_id}")
+    except ValueError as exc:
+        conn.rollback()
+        return str(exc), 409
+    except Exception:
+        conn.rollback()
+        logger.exception("Document cancellation failed.")
+        return "Nie udało się anulować dokumentu.", 500
+    finally:
+        conn.close()
+
+
 @app.route('/doc/<int:id>/delete', methods=['POST'])
-@login_required
+@admin_required
 def delete_doc(id):
+    return void_document(id)
+
     conn = db()
     cur = conn.cursor()
 
@@ -1259,7 +2100,7 @@ def report():
         FROM issue_docs d
         JOIN issue_items i ON i.doc_id = d.id
         LEFT JOIN products p ON p.id = i.product_id
-        WHERE d.date = %s
+        WHERE d.date = %s AND d.voided_at IS NULL
         ORDER BY d.id DESC, i.id ASC
         """,
         (selected_date,)
@@ -1281,7 +2122,7 @@ def report_pdf():
         FROM issue_docs d
         JOIN issue_items i ON i.doc_id = d.id
         LEFT JOIN products p ON p.id = i.product_id
-        WHERE d.date = %s
+        WHERE d.date = %s AND d.voided_at IS NULL
         ORDER BY d.id DESC, i.id ASC
         """,
         (selected_date,)
@@ -1323,22 +2164,4 @@ def report_pdf():
 
 
 if __name__ == '__main__':
-    app.run()
-@app.route('/fix_db')
-@admin_required
-def fix_db():
-    conn = db()
-    cur = conn.cursor()
-
-    try:
-        cur.execute("""
-        ALTER TABLE issue_items
-        ADD COLUMN package_id INTEGER;
-        """)
-    except Exception as e:
-        pass
-
-    conn.commit()
-    conn.close()
-
-    return "DB FIXED"
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "5000")), debug=False)

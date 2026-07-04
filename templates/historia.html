@@ -51,9 +51,9 @@
 <details class="day" open>
     <summary class="day-title">{{ day }} ({{ docs|length }})</summary>
     {% for d in docs %}
-    <div class="doc" onclick="go('/doc/{{d[0]}}')">
+    <div class="doc" onclick="go('/doc/{{d[0]}}')" {% if d[8] %}style="opacity:.6;"{% endif %}>
         <div class="left">
-            <div class="nr">{{ d[5] }}</div>
+            <div class="nr">{{ d[5] }}{% if d[8] %} — ANULOWANY{% endif %}</div>
             <div class="kontrahent">{{ d[2] }}</div>
         </div>
         <div>→</div>

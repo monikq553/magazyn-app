@@ -1,17 +1,12 @@
 {% extends "base.html" %}
 
 {% block content %}
-
 <h2 style="margin-bottom:18px;">Magazyny</h2>
 
 <div class="tiles">
-    <a class="tile" href="/magazyn/Drewno">Drewno</a>
-    <a class="tile" href="/magazyn/Farby">Farby</a>
-    <a class="tile" href="/magazyn/Śruby">Śruby i wkręty</a>
-    <a class="tile" href="/magazyn/Pellet">Pellet</a>
-    <a class="tile" href="/magazyn/Golden Oak">Golden Oak</a>
-    <a class="tile" href="/magazyn/Inne">Inne</a>
-    <a class="tile" href="/magazyn/Wszystko">Wszystko</a>
+    {% for warehouse in warehouses %}
+    <a class="tile" href="{{ url_for('magazyn', name=warehouse) }}">{{ warehouse }}</a>
+    {% endfor %}
+    <a class="tile" href="{{ url_for('magazyn', name='Wszystko') }}">Wszystko</a>
 </div>
-
 {% endblock %}
