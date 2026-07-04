@@ -15,6 +15,7 @@ import io
 import pandas as pd
 from urllib import request as urlrequest
 from urllib import error as urlerror
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from reportlab.lib.pagesizes import A4
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib import colors
@@ -97,13 +98,41 @@ def init_db_pool():
     if not dsn:
         raise RuntimeError("Brak wymaganej zmiennej środowiskowej DATABASE_URL.")
     pool_size = max(2, int(os.environ.get("DB_POOL_SIZE", "5")))
-    DB_POOL = ThreadedConnectionPool(
-        minconn=1,
-        maxconn=pool_size,
-        dsn=dsn,
-        connect_timeout=10,
-        application_name="magazyn-app",
-    )
+    candidates = [dsn]
+    try:
+        parsed = urlsplit(dsn)
+        hostname = parsed.hostname or ""
+        if os.environ.get("RENDER") and hostname.endswith("-postgres.render.com"):
+            internal_hostname = hostname.split(".", 1)[0]
+            userinfo = parsed.netloc.rsplit("@", 1)[0] if "@" in parsed.netloc else ""
+            port = f":{parsed.port}" if parsed.port else ""
+            internal_netloc = f"{userinfo}@{internal_hostname}{port}" if userinfo else f"{internal_hostname}{port}"
+            internal_query = urlencode(
+                [(key, value) for key, value in parse_qsl(parsed.query) if key.lower() != "sslmode"]
+            )
+            internal_dsn = urlunsplit(
+                (parsed.scheme, internal_netloc, parsed.path, internal_query, parsed.fragment)
+            )
+            candidates.insert(0, internal_dsn)
+    except ValueError:
+        logger.warning("DATABASE_URL is not a standard URL; using it without normalization.")
+
+    last_error = None
+    for candidate in candidates:
+        try:
+            DB_POOL = ThreadedConnectionPool(
+                minconn=1,
+                maxconn=pool_size,
+                dsn=candidate,
+                connect_timeout=10,
+                application_name="magazyn-app",
+            )
+            break
+        except psycopg2.OperationalError as exc:
+            last_error = exc
+            logger.warning("Database connection candidate failed; trying fallback if available.")
+    if DB_POOL is None:
+        raise last_error or RuntimeError("Nie udało się utworzyć puli połączeń z bazą.")
     logger.info("DB pool initialized.")
 
 

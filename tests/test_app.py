@@ -1,4 +1,5 @@
 import copy
+import os
 import unittest
 from unittest.mock import patch
 
@@ -227,6 +228,26 @@ class InventoryFlowTests(unittest.TestCase):
         for value in ("0", "-1", "nan", "inf", ""):
             with self.assertRaises(ValueError):
                 warehouse_app.parse_positive_number(value)
+
+    def test_render_external_database_url_prefers_internal_network(self):
+        external = (
+            "postgresql://user:secret@"
+            "dpg-example-a.frankfurt-postgres.render.com:5432/magazyn?sslmode=require"
+        )
+        fake_pool = object()
+        warehouse_app.DB_POOL = None
+        with patch.dict(os.environ, {"DATABASE_URL": external, "RENDER": "true"}, clear=False):
+            with patch.object(
+                warehouse_app,
+                "ThreadedConnectionPool",
+                return_value=fake_pool,
+            ) as pool_factory:
+                warehouse_app.init_db_pool()
+        self.assertIs(warehouse_app.DB_POOL, fake_pool)
+        internal_dsn = pool_factory.call_args.kwargs["dsn"]
+        self.assertIn("@dpg-example-a:5432/magazyn", internal_dsn)
+        self.assertNotIn("sslmode", internal_dsn)
+        warehouse_app.DB_POOL = None
 
 
 if __name__ == "__main__":
