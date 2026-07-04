@@ -13,7 +13,6 @@ import json
 import io
 import pandas as pd
 from urllib import request as urlrequest
-from urllib import error as urlerror
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from reportlab.lib.pagesizes import A4
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
@@ -29,11 +28,16 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
+IS_PRODUCTION = os.environ.get("RENDER", "").lower() == "true"
+configured_secret_key = os.environ.get("SECRET_KEY")
+if IS_PRODUCTION and not configured_secret_key:
+    raise RuntimeError("Brak wymaganej zmiennej środowiskowej SECRET_KEY.")
+app.secret_key = configured_secret_key or secrets.token_hex(32)
 app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
-    SESSION_COOKIE_SECURE=os.environ.get("RENDER", "").lower() == "true",
+    SESSION_COOKIE_SECURE=IS_PRODUCTION,
+    SESSION_COOKIE_NAME="magazyn_csrf_session",
     MAX_CONTENT_LENGTH=10 * 1024 * 1024,
 )
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
@@ -50,16 +54,15 @@ WAREHOUSES = (
 )
 UNITS = {"m2", "m3", "szt", "l", "opak", "kg"}
 FIREBASE_CONFIG = {
-    "apiKey": os.environ.get("FIREBASE_API_KEY", "AIzaSyDeQD7CKOFY-GHbjz_Sn9WNgjnQQquBYAU"),
-    "authDomain": os.environ.get("FIREBASE_AUTH_DOMAIN", "magazyn-app-8cab2.firebaseapp.com"),
-    "projectId": os.environ.get("FIREBASE_PROJECT_ID", "magazyn-app-8cab2"),
-    "storageBucket": os.environ.get("FIREBASE_STORAGE_BUCKET", "magazyn-app-8cab2.firebasestorage.app"),
-    "messagingSenderId": os.environ.get("FIREBASE_MESSAGING_SENDER_ID", "808429208979"),
-    "appId": os.environ.get("FIREBASE_APP_ID", "1:808429208979:web:b64c24422cce1989051466"),
-    "measurementId": os.environ.get("FIREBASE_MEASUREMENT_ID", "G-SDGZD53J7L"),
+    "apiKey": os.environ.get("FIREBASE_API_KEY", ""),
+    "authDomain": os.environ.get("FIREBASE_AUTH_DOMAIN", ""),
+    "projectId": os.environ.get("FIREBASE_PROJECT_ID", ""),
+    "storageBucket": os.environ.get("FIREBASE_STORAGE_BUCKET", ""),
+    "messagingSenderId": os.environ.get("FIREBASE_MESSAGING_SENDER_ID", ""),
+    "appId": os.environ.get("FIREBASE_APP_ID", ""),
+    "measurementId": os.environ.get("FIREBASE_MEASUREMENT_ID", ""),
 }
 ADMIN_EMAILS = {e.strip().lower() for e in os.environ.get("ADMIN_EMAILS", "").split(",") if e.strip()}
-ALLOWED_EMAILS = {e.strip().lower() for e in os.environ.get("ALLOWED_EMAILS", "").split(",") if e.strip()}
 FIREBASE_ADMIN_READY = False
 FIREBASE_ADMIN_ERROR = ""
 DB_POOL = None
@@ -190,34 +193,14 @@ def get_missing_firebase_web_envs():
     return [env_key for env_key, cfg_key in key_map.items() if not FIREBASE_CONFIG.get(cfg_key)]
 
 
-def verify_id_token_with_firebase_rest(id_token):
-    api_key = FIREBASE_CONFIG.get("apiKey")
-    if not api_key:
-        raise ValueError("Brak FIREBASE_API_KEY do fallback verify.")
-    endpoint = f"https://identitytoolkit.googleapis.com/v1/accounts:lookup?key={api_key}"
-    payload = json.dumps({"idToken": id_token}).encode("utf-8")
-    req = urlrequest.Request(
-        endpoint,
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST"
+if IS_PRODUCTION and get_missing_firebase_web_envs():
+    raise RuntimeError(
+        "Brak wymaganych zmiennych Firebase Web: "
+        + ", ".join(get_missing_firebase_web_envs())
     )
-    try:
-        with urlrequest.urlopen(req, timeout=8) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except urlerror.HTTPError:
-        raise ValueError("Nieprawidłowy token")
-    users = data.get("users") or []
-    if not users:
-        raise ValueError("Brak użytkownika w tokenie")
-    user = users[0]
-    return {
-        "email": (user.get("email") or "").lower(),
-        "uid": user.get("localId") or ""
-    }
-
-
 init_firebase_admin()
+if IS_PRODUCTION and not FIREBASE_ADMIN_READY:
+    raise RuntimeError(FIREBASE_ADMIN_ERROR or "Firebase Admin nie jest skonfigurowany.")
 
 
 # 🔥 DB
@@ -582,7 +565,6 @@ def login():
         firebase_admin_ready=FIREBASE_ADMIN_READY,
         firebase_admin_error=FIREBASE_ADMIN_ERROR,
         missing_firebase_web_envs=get_missing_firebase_web_envs(),
-        firebase_rest_fallback=not FIREBASE_ADMIN_READY and bool(FIREBASE_CONFIG.get("apiKey"))
     )
 
 
@@ -592,7 +574,7 @@ def register():
 
 
 @app.route('/auth/session', methods=['POST'])
-@limiter.limit("20 per minute")
+@limiter.limit("10 per minute")
 def create_session():
     payload = request.get_json(silent=True) or {}
     id_token = payload.get("idToken")
@@ -683,6 +665,9 @@ def logout():
 
 @app.before_request
 def require_login_for_private_app():
+    if IS_PRODUCTION and not request.is_secure:
+        secure_url = request.url.replace("http://", "https://", 1)
+        return redirect(secure_url, code=308)
     public_routes = {"static", "favicon", "health"}
     if request.endpoint in public_routes:
         return None
@@ -777,6 +762,26 @@ def add_private_cache_headers(response):
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     response.headers["Pragma"] = "no-cache"
     response.headers["Expires"] = "0"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = (
+        "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+    )
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline' https://www.gstatic.com; "
+        "style-src 'self' 'unsafe-inline'; "
+        "font-src 'self' data:; "
+        "img-src 'self' data:; "
+        "connect-src 'self' https://identitytoolkit.googleapis.com "
+        "https://securetoken.googleapis.com https://www.googleapis.com; "
+        "frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+    )
+    if request.is_secure:
+        response.headers["Strict-Transport-Security"] = (
+            "max-age=31536000; includeSubDomains"
+        )
     return response
 
 
@@ -800,8 +805,8 @@ def dashboard_page():
         "dashboard.html",
         total_products=total_products,
         total_qty=round(total_qty or 0, 3),
-        names=json.dumps([row[0] for row in top_products]),
-        qtys=json.dumps([row[1] for row in top_products]),
+        top_products=top_products,
+        max_top_qty=max((row[1] or 0 for row in top_products), default=0),
     )
 
 
@@ -981,6 +986,7 @@ def send_firebase_password_reset(email):
 
 @app.route('/users/<int:user_id>/reset-password', methods=['POST'])
 @admin_required
+@limiter.limit("10 per hour")
 def reset_user_password(user_id):
     conn = db()
     cur = conn.cursor()

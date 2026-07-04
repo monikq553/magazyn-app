@@ -23,9 +23,8 @@ const firebaseConfig = {{ firebase_config|tojson }};
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const firebaseAdminReady = {{ "true" if firebase_admin_ready else "false" }};
-const firebaseRestFallback = {{ "true" if firebase_rest_fallback else "false" }};
 document.getElementById("submitBtn").addEventListener("click", async () => {
-  if (!firebaseAdminReady && !firebaseRestFallback) {
+  if (!firebaseAdminReady) {
     document.getElementById("error").textContent = "Logowanie jest wyłączone do czasu konfiguracji backendu Firebase.";
     return;
   }

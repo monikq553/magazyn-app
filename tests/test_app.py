@@ -285,6 +285,22 @@ class InventoryFlowTests(unittest.TestCase):
         response = client.get("/login")
         self.assertEqual(response.status_code, 200)
         self.assertIn("Logowanie", response.get_data(as_text=True))
+        self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
+        self.assertEqual(response.headers["X-Frame-Options"], "DENY")
+        self.assertIn("frame-ancestors 'none'", response.headers["Content-Security-Policy"])
+
+    def test_production_http_is_redirected_to_https(self):
+        client = warehouse_app.app.test_client()
+        with patch.object(warehouse_app, "IS_PRODUCTION", True):
+            response = client.get("/health", base_url="http://pmagazyn.pl")
+        self.assertEqual(response.status_code, 308)
+        self.assertTrue(response.headers["Location"].startswith("https://"))
+
+    def test_firebase_web_config_has_no_repository_defaults(self):
+        if not os.environ.get("FIREBASE_API_KEY"):
+            self.assertEqual(warehouse_app.FIREBASE_CONFIG["apiKey"], "")
+        if not os.environ.get("FIREBASE_PROJECT_ID"):
+            self.assertEqual(warehouse_app.FIREBASE_CONFIG["projectId"], "")
 
     def test_firebase_login_sets_verified_cookie_without_storing_password(self):
         client = warehouse_app.app.test_client()
