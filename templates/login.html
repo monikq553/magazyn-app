@@ -8,12 +8,15 @@
     <button id="submitBtn" style="width:100%; padding:10px; background:#FFC067; color:#422d00; border:none; border-radius:8px;">
         Zaloguj
     </button>
+    <button id="resetBtn" type="button" style="width:100%; margin-top:10px; background:white; border:1px solid #d1d5db;">
+        Nie pamiętam hasła
+    </button>
     <p id="error" style="color:#dc2626; margin-top:10px;"></p>
 </div>
 
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-app.js";
-import { getAuth, signInWithEmailAndPassword, setPersistence, browserLocalPersistence } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js";
+import { getAuth, signInWithEmailAndPassword, sendPasswordResetEmail, setPersistence, browserLocalPersistence } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js";
 
 const firebaseConfig = {{ firebase_config|tojson }};
 
@@ -53,6 +56,23 @@ document.getElementById("submitBtn").addEventListener("click", async () => {
     window.location.href = "/";
   } catch (e) {
     err.textContent = e?.message || "Błąd logowania.";
+  }
+});
+
+document.getElementById("resetBtn").addEventListener("click", async () => {
+  const email = document.getElementById("email").value.trim();
+  const err = document.getElementById("error");
+  if (!email) {
+    err.textContent = "Wpisz adres e-mail.";
+    return;
+  }
+  try {
+    await sendPasswordResetEmail(auth, email);
+    err.style.color = "#166534";
+    err.textContent = "Wysłaliśmy wiadomość do ustawienia nowego hasła.";
+  } catch (e) {
+    err.style.color = "#dc2626";
+    err.textContent = e?.message || "Nie udało się wysłać wiadomości.";
   }
 });
 </script>

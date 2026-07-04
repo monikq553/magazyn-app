@@ -180,6 +180,7 @@ input:focus {
         <div class="logo">Magazyn</div>
 
         <div class="nav">
+            {% if session.get('user') %}
             <a href="/">Start</a>
             <a href="/dashboard">Dashboard</a>
             <a href="/magazyny">Magazyny</a>
@@ -194,6 +195,7 @@ input:focus {
             <form method="POST" action="/logout">
                 <button type="submit">Wyloguj</button>
             </form>
+            {% endif %}
         </div>
     </div>
 
@@ -206,7 +208,9 @@ input:focus {
 
         <div class="container">
 
+            {% if session.get('user') %}
             <button class="back" onclick="goBack()">Wróć</button>
+            {% endif %}
 
             {% block content %}{% endblock %}
 

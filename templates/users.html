@@ -43,42 +43,64 @@ input, select {
 
 .delete {
     background:#ef4444;
+    color:white;
 }
+.blocked { opacity:.65; }
 </style>
 
 <!-- ➕ DODAWANIE -->
 <div class="card" style="margin-bottom:20px;">
     <form method="POST" action="/add_user" style="display:flex; gap:10px; flex-wrap:wrap;">
-        <input name="username" type="email" placeholder="Email" required>
+        <input name="first_name" placeholder="Imię" maxlength="100" required>
+        <input name="last_name" placeholder="Nazwisko" maxlength="100" required>
+        <input name="email" type="email" placeholder="E-mail" maxlength="254" required>
         
         <select name="role">
-            <option value="employee">Employee</option>
-            <option value="admin">Admin</option>
+            <option value="employee">Pracownik</option>
+            <option value="admin">Administrator</option>
         </select>
 
-        <button class="btn">Dodaj</button>
+        <button class="btn">Dodaj użytkownika</button>
     </form>
+    <p style="color:#6b7280;font-size:13px;margin-bottom:0;">
+        Hasło nie jest zapisywane w aplikacji. Nowy użytkownik ustawia je przez „Nie pamiętam hasła” na ekranie logowania.
+    </p>
 </div>
+
+{% if request.args.get('reset') == 'sent' %}
+<div class="card" style="margin-bottom:16px;color:#166534;">Wiadomość do ustawienia nowego hasła została wysłana.</div>
+{% endif %}
 
 <!-- 📋 LISTA -->
 {% for u in users %}
-<div class="user">
+<div class="user {% if u[6] == 'blocked' %}blocked{% endif %}">
 
     <div>
-        <strong>{{u[1]}}</strong>
-        <div class="role">{{u[2]}}</div>
+        <strong>{{u[2]}} {{u[3]}}</strong>
+        <div>{{u[4]}}</div>
+        <div class="role">
+            {{ 'Administrator' if u[5] == 'admin' else 'Pracownik' }}
+            · {{ 'aktywne' if u[6] == 'active' else 'zablokowane' }}
+        </div>
     </div>
 
     <div class="actions">
         <form method="POST" action="/update_user_role/{{u[0]}}" style="display:flex; gap:8px; align-items:center;">
             <select name="role">
-                <option value="employee" {% if u[2] != 'admin' %}selected{% endif %}>Employee</option>
-                <option value="admin" {% if u[2] == 'admin' %}selected{% endif %}>Admin</option>
+                <option value="employee" {% if u[5] != 'admin' %}selected{% endif %}>Pracownik</option>
+                <option value="admin" {% if u[5] == 'admin' %}selected{% endif %}>Administrator</option>
             </select>
             <button class="btn">Zmień rolę</button>
         </form>
 
-        {% if u[0] != 1 %}
+        <form method="POST" action="/users/{{u[0]}}/reset-password">
+            <button class="btn">Resetuj hasło</button>
+        </form>
+
+        {% if u[1] != session.get('uid') %}
+        <form method="POST" action="/users/{{u[0]}}/toggle-block">
+            <button class="btn">{{ 'Odblokuj' if u[6] == 'blocked' else 'Zablokuj' }}</button>
+        </form>
         <form method="POST" action="/delete_user/{{u[0]}}">
             <button class="btn delete" onclick="return confirm('Usunąć użytkownika?')">
                 Usuń
