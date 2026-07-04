@@ -231,6 +231,9 @@ document.addEventListener("DOMContentLoaded", () => {
         input.value = token;
         form.appendChild(input);
     });
+    document.querySelectorAll('input[type="date"][name="date"]').forEach(input => {
+        if (!input.value) input.value = new Date().toISOString().slice(0, 10);
+    });
 });
 </script>
 

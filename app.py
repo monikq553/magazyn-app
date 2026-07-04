@@ -49,6 +49,7 @@ WAREHOUSES = (
     "Inne",
     INVESTMENT_WAREHOUSE,
 )
+UNITS = {"m2", "m3", "szt", "l", "opak", "kg"}
 FIREBASE_CONFIG = {
     "apiKey": os.environ.get("FIREBASE_API_KEY", "AIzaSyDeQD7CKOFY-GHbjz_Sn9WNgjnQQquBYAU"),
     "authDomain": os.environ.get("FIREBASE_AUTH_DOMAIN", "magazyn-app-8cab2.firebaseapp.com"),
@@ -396,6 +397,7 @@ def run_db_migrations():
     cur.execute("CREATE INDEX IF NOT EXISTS idx_packages_number ON packages(warehouse, lower(number))")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_issue_items_doc ON issue_items(doc_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_issue_docs_date ON issue_docs(date)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_issue_docs_number ON issue_docs(lower(doc_number))")
     cur.execute("""
         DO $$
         BEGIN
@@ -410,6 +412,41 @@ def run_db_migrations():
             IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='issue_items_qty_positive') THEN
                 ALTER TABLE issue_items
                 ADD CONSTRAINT issue_items_qty_positive CHECK (qty > 0) NOT VALID;
+            END IF;
+            IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='products_qty_finite_nonnegative') THEN
+                ALTER TABLE products
+                ADD CONSTRAINT products_qty_finite_nonnegative
+                CHECK (qty >= 0 AND qty::text <> 'NaN') NOT VALID;
+            END IF;
+            IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='packages_qty_finite_nonnegative') THEN
+                ALTER TABLE packages
+                ADD CONSTRAINT packages_qty_finite_nonnegative
+                CHECK (qty >= 0 AND qty::text <> 'NaN') NOT VALID;
+            END IF;
+            IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='packages_status_valid') THEN
+                ALTER TABLE packages
+                ADD CONSTRAINT packages_status_valid
+                CHECK (status IN ('active', 'issued', 'cancelled')) NOT VALID;
+            END IF;
+            IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='packages_product_fk') THEN
+                ALTER TABLE packages
+                ADD CONSTRAINT packages_product_fk
+                FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE RESTRICT NOT VALID;
+            END IF;
+            IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='issue_items_doc_fk') THEN
+                ALTER TABLE issue_items
+                ADD CONSTRAINT issue_items_doc_fk
+                FOREIGN KEY (doc_id) REFERENCES issue_docs(id) ON DELETE RESTRICT NOT VALID;
+            END IF;
+            IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='issue_items_product_fk') THEN
+                ALTER TABLE issue_items
+                ADD CONSTRAINT issue_items_product_fk
+                FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE RESTRICT NOT VALID;
+            END IF;
+            IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='issue_items_package_fk') THEN
+                ALTER TABLE issue_items
+                ADD CONSTRAINT issue_items_package_fk
+                FOREIGN KEY (package_id) REFERENCES packages(id) ON DELETE SET NULL NOT VALID;
             END IF;
         END $$;
     """)
@@ -750,13 +787,15 @@ def update_user_role(user_id):
 @app.route('/magazyn/<name>')
 @login_required
 def magazyn(name):
+    if name != "Wszystko" and name not in WAREHOUSES:
+        return "Nie znaleziono magazynu.", 404
     conn = db()
     cur = conn.cursor()
 
     if name == "Wszystko":
-        cur.execute("SELECT * FROM products")
+        cur.execute("SELECT * FROM products ORDER BY warehouse, lower(name), id")
     else:
-        cur.execute("SELECT * FROM products WHERE warehouse=%s", (name,))
+        cur.execute("SELECT * FROM products WHERE warehouse=%s ORDER BY lower(name), id", (name,))
 
     products = cur.fetchall()
     conn.close()
@@ -797,7 +836,7 @@ def package_lookup():
                p.id, p.name, p.unit, p.price_netto, p.vat
         FROM packages pk
         JOIN products p ON p.id=pk.product_id
-        WHERE lower(pk.number)=lower(%s)
+        WHERE lower(pk.number)=lower(%s) AND pk.status='active' AND pk.qty>0
     """
     params = [number]
     if warehouse:
@@ -820,6 +859,58 @@ def package_lookup():
             "unit": row[7], "price_netto": row[8], "vat": row[9],
         },
     })
+
+
+@app.route('/add_product', methods=['POST'])
+@login_required
+def add_product():
+    name = (request.form.get("name") or "").strip()
+    unit = (request.form.get("unit") or "").strip()
+    warehouse = (request.form.get("warehouse") or "").strip()
+    if not name or len(name) > 200:
+        return "Nazwa produktu jest wymagana i może mieć maksymalnie 200 znaków.", 400
+    if unit not in UNITS:
+        return "Wybierz prawidłową jednostkę.", 400
+    if warehouse not in WAREHOUSES:
+        return "Wybierz prawidłowy magazyn.", 400
+    try:
+        price_netto = parse_nonnegative_number(request.form.get("price_netto"), "Cena netto")
+        vat = parse_nonnegative_number(request.form.get("vat"), "VAT")
+    except ValueError as exc:
+        return str(exc), 400
+    if vat > 100:
+        return "VAT nie może przekraczać 100%.", 400
+
+    conn = db()
+    cur = conn.cursor()
+    try:
+        lock_key = f"product:{warehouse}:{name.casefold()}"
+        cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (lock_key,))
+        cur.execute(
+            "SELECT id FROM products WHERE warehouse=%s AND lower(name)=lower(%s) LIMIT 1",
+            (warehouse, name),
+        )
+        if cur.fetchone():
+            raise ValueError("Taki produkt już istnieje w tym magazynie.")
+        cur.execute(
+            """
+            INSERT INTO products(name, qty, unit, warehouse, price_netto, vat)
+            VALUES (%s,0,%s,%s,%s,%s)
+            """,
+            (name, unit, warehouse, price_netto, vat),
+        )
+        conn.commit()
+        cache.clear()
+        return redirect(f"/magazyn/{warehouse}")
+    except ValueError as exc:
+        conn.rollback()
+        return str(exc), 409
+    except Exception:
+        conn.rollback()
+        logger.exception("Product creation failed.")
+        return "Nie udało się dodać produktu.", 500
+    finally:
+        conn.close()
 
 
 @app.route('/delete_product/<int:product_id>', methods=['POST'])
@@ -1040,8 +1131,8 @@ def collect_document_items(forced_warehouse=None, issuing=False):
         except ValueError:
             raise ValueError("Wybrano nieprawidłowy produkt.")
         warehouse = forced_warehouse or form_value(warehouses, index).strip()
-        if not warehouse:
-            raise ValueError("Wybierz magazyn dla każdej pozycji.")
+        if warehouse not in WAREHOUSES:
+            raise ValueError("Wybierz prawidłowy magazyn dla każdej pozycji.")
         qty = parse_positive_number(form_value(quantities, index))
         price_netto = parse_nonnegative_number(form_value(netto_values, index), "Cena netto")
         price_brutto = parse_nonnegative_number(form_value(brutto_values, index), "Cena brutto")
@@ -1064,12 +1155,15 @@ def collect_document_items(forced_warehouse=None, issuing=False):
 def create_receipt(forced_warehouse=None):
     try:
         items = collect_document_items(forced_warehouse=forced_warehouse, issuing=False)
+        items.sort(key=lambda item: (item["warehouse"], item["product_id"], item["package"].casefold()))
         date = normalized_document_date(request.form.get("date"))
     except ValueError as exc:
         return str(exc), 400
     contractor = (request.form.get("kontrahent") or "").strip()
     if not contractor:
         return "Dostawca jest wymagany.", 400
+    if len(contractor) > 200:
+        return "Nazwa dostawcy może mieć maksymalnie 200 znaków.", 400
 
     conn = db()
     cur = conn.cursor()
@@ -1084,6 +1178,10 @@ def create_receipt(forced_warehouse=None):
             if not source:
                 raise ValueError("Wybrany produkt już nie istnieje.")
             cur.execute(
+                "SELECT pg_advisory_xact_lock(hashtext(%s))",
+                (f"product:{item['warehouse']}:{source[0].casefold()}",),
+            )
+            cur.execute(
                 """
                 SELECT id FROM products
                 WHERE warehouse=%s AND lower(name)=lower(%s)
@@ -1095,16 +1193,20 @@ def create_receipt(forced_warehouse=None):
             target_id = target[0] if target else None
             if item["package"]:
                 cur.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext(%s))",
+                    (f"package:{item['warehouse']}:{item['package'].casefold()}",),
+                )
+                cur.execute(
                     """
                     SELECT 1 FROM packages
-                    WHERE warehouse=%s AND lower(number)=lower(%s) AND status='active'
+                    WHERE warehouse=%s AND lower(number)=lower(%s)
                     LIMIT 1 FOR UPDATE
                     """,
                     (item["warehouse"], item["package"]),
                 )
                 if cur.fetchone():
                     raise ValueError(
-                        f"Aktywna paczka {item['package']} już istnieje w magazynie {item['warehouse']}."
+                        f"Paczka {item['package']} już istnieje w magazynie {item['warehouse']}."
                     )
             resolved.append((item, source, target_id))
 
@@ -1117,6 +1219,19 @@ def create_receipt(forced_warehouse=None):
         )
         doc_id = cur.fetchone()[0]
         requested_number = (request.form.get("doc_number") or "").strip()
+        if len(requested_number) > 100:
+            raise ValueError("Numer dokumentu może mieć maksymalnie 100 znaków.")
+        if requested_number:
+            cur.execute(
+                "SELECT pg_advisory_xact_lock(hashtext(%s))",
+                (f"document:{requested_number.casefold()}",),
+            )
+            cur.execute(
+                "SELECT 1 FROM issue_docs WHERE id<>%s AND lower(doc_number)=lower(%s) LIMIT 1",
+                (doc_id, requested_number),
+            )
+            if cur.fetchone():
+                raise ValueError("Dokument o takim numerze już istnieje.")
         prefix = "PZ-IS" if forced_warehouse == INVESTMENT_WAREHOUSE else "PZ"
         doc_number = requested_number or f"{prefix}/{doc_id}/{datetime.now().year}"
         cur.execute("UPDATE issue_docs SET doc_number=%s WHERE id=%s", (doc_number, doc_id))
@@ -1175,12 +1290,24 @@ def create_receipt(forced_warehouse=None):
 def create_issue(forced_warehouse=None):
     try:
         items = collect_document_items(forced_warehouse=forced_warehouse, issuing=True)
+        items.sort(
+            key=lambda item: (
+                item["warehouse"],
+                item["product_id"],
+                int(item["package"]) if item["package"].isdigit() else 0,
+            )
+        )
         date = normalized_document_date(request.form.get("date"))
     except ValueError as exc:
         return str(exc), 400
     contractor = (request.form.get("kontrahent") or "").strip()
     if not contractor:
         return "Kontrahent jest wymagany.", 400
+    if len(contractor) > 200:
+        return "Nazwa kontrahenta może mieć maksymalnie 200 znaków.", 400
+    movement_type = (request.form.get("movement_type") or "WZ").strip().upper()
+    if movement_type not in {"WZ", "RW"}:
+        return "Nieprawidłowy typ dokumentu wydania.", 400
 
     conn = db()
     cur = conn.cursor()
@@ -1188,13 +1315,26 @@ def create_issue(forced_warehouse=None):
         cur.execute(
             """
             INSERT INTO issue_docs(date, kontrahent, warehouse, image, doc_number, movement_type)
-            VALUES (%s,%s,%s,%s,%s,'WZ') RETURNING id
+            VALUES (%s,%s,%s,%s,%s,%s) RETURNING id
             """,
-            (date, contractor, forced_warehouse or "", "", ""),
+            (date, contractor, forced_warehouse or "", "", "", movement_type),
         )
         doc_id = cur.fetchone()[0]
         requested_number = (request.form.get("doc_number") or "").strip()
-        prefix = "WZ-IS" if forced_warehouse == INVESTMENT_WAREHOUSE else "WZ"
+        if len(requested_number) > 100:
+            raise ValueError("Numer dokumentu może mieć maksymalnie 100 znaków.")
+        if requested_number:
+            cur.execute(
+                "SELECT pg_advisory_xact_lock(hashtext(%s))",
+                (f"document:{requested_number.casefold()}",),
+            )
+            cur.execute(
+                "SELECT 1 FROM issue_docs WHERE id<>%s AND lower(doc_number)=lower(%s) LIMIT 1",
+                (doc_id, requested_number),
+            )
+            if cur.fetchone():
+                raise ValueError("Dokument o takim numerze już istnieje.")
+        prefix = f"{movement_type}-IS" if forced_warehouse == INVESTMENT_WAREHOUSE else movement_type
         doc_number = requested_number or f"{prefix}/{doc_id}/{datetime.now().year}"
         cur.execute("UPDATE issue_docs SET doc_number=%s WHERE id=%s", (doc_number, doc_id))
 
@@ -1297,15 +1437,12 @@ def przyjecie():
     conn = db()
     cur = conn.cursor()
 
-    cur.execute("SELECT * FROM products")
+    cur.execute("SELECT * FROM products ORDER BY warehouse, lower(name), id")
     products = cur.fetchall()
-
-    cur.execute("SELECT * FROM packages WHERE status='active' AND qty > 0")
-    packages = cur.fetchall()
 
     conn.close()
 
-    return render_template("przyjecie.html", products=products, packages=packages)
+    return render_template("przyjecie.html", products=products)
 
 
 # 📥 ZAPIS PRZYJĘCIA
@@ -1398,20 +1535,29 @@ def process_excel_import(upload):
     rows = []
     try:
         for row_number, row in dataframe.iterrows():
-            name = str(row.get("name", "")).strip()
-            unit = str(row.get("unit", "")).strip()
-            warehouse = str(row.get("warehouse", "")).strip()
-            if not name or not unit or warehouse not in WAREHOUSES:
-                raise ValueError(f"Wiersz {row_number + 2}: brak nazwy/jednostki lub nieprawidłowy magazyn.")
+            raw_name = row.get("name", "")
+            raw_unit = row.get("unit", "")
+            raw_warehouse = row.get("warehouse", "")
+            name = "" if pd.isna(raw_name) else str(raw_name).strip()
+            unit = "" if pd.isna(raw_unit) else str(raw_unit).strip()
+            warehouse = "" if pd.isna(raw_warehouse) else str(raw_warehouse).strip()
+            if not name or len(name) > 200 or unit not in UNITS or warehouse not in WAREHOUSES:
+                raise ValueError(
+                    f"Wiersz {row_number + 2}: nieprawidłowa nazwa, jednostka lub magazyn."
+                )
             qty = parse_positive_number(row.get("qty"), f"Wiersz {row_number + 2}, ilość")
-            package_number = str(row.get("package_number", "")).strip()
-            if package_number.lower() == "nan":
-                package_number = ""
+            raw_package_number = row.get("package_number", "")
+            package_number = (
+                "" if pd.isna(raw_package_number) else str(raw_package_number).strip()
+            )
+            if len(package_number) > 100:
+                raise ValueError(f"Wiersz {row_number + 2}: numer paczki jest za długi.")
             rows.append((name, qty, unit, warehouse, package_number))
     except ValueError as exc:
         return str(exc), 400
     if not rows:
         return "Plik nie zawiera żadnych pozycji.", 400
+    rows.sort(key=lambda row: (row[3], row[0].casefold(), row[4].casefold()))
 
     conn = db()
     cur = conn.cursor()
@@ -1430,6 +1576,10 @@ def process_excel_import(upload):
             (f"PZ-IMPORT/{doc_id}/{datetime.now().year}", doc_id),
         )
         for name, qty, unit, warehouse, package_number in rows:
+            cur.execute(
+                "SELECT pg_advisory_xact_lock(hashtext(%s))",
+                (f"product:{warehouse}:{name.casefold()}",),
+            )
             cur.execute(
                 """
                 SELECT id FROM products
@@ -1457,14 +1607,18 @@ def process_excel_import(upload):
             package_id = None
             if package_number:
                 cur.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext(%s))",
+                    (f"package:{warehouse}:{package_number.casefold()}",),
+                )
+                cur.execute(
                     """
                     SELECT 1 FROM packages
-                    WHERE warehouse=%s AND lower(number)=lower(%s) AND status='active'
+                    WHERE warehouse=%s AND lower(number)=lower(%s)
                     """,
                     (warehouse, package_number),
                 )
                 if cur.fetchone():
-                    raise ValueError(f"Aktywna paczka {package_number} już istnieje w magazynie {warehouse}.")
+                    raise ValueError(f"Paczka {package_number} już istnieje w magazynie {warehouse}.")
                 cur.execute(
                     """
                     INSERT INTO packages(product_id, number, qty, warehouse, initial_qty, status)
@@ -1568,15 +1722,12 @@ def wydanie():
     conn = db()
     cur = conn.cursor()
 
-    cur.execute("SELECT * FROM products")
+    cur.execute("SELECT * FROM products ORDER BY warehouse, lower(name), id")
     products = cur.fetchall()
-
-    cur.execute("SELECT * FROM packages WHERE status='active' AND qty > 0")
-    packages = cur.fetchall()
 
     conn.close()
 
-    return render_template("wydanie.html", products=products, packages=packages)
+    return render_template("wydanie.html", products=products)
 
 
 @app.route('/inwestycja-suwaj', endpoint='inwestycja_suwaj_page_view')
@@ -1603,21 +1754,14 @@ def inwestycja_suwaj_przyjecie():
     cur = conn.cursor()
 
     # pokazujemy wszystkie produkty, żeby można było dodać nowy asortyment do magazynu inwestycji
-    cur.execute("SELECT * FROM products")
+    cur.execute("SELECT * FROM products ORDER BY warehouse, lower(name), id")
     products = cur.fetchall()
-
-    cur.execute(
-        "SELECT * FROM packages WHERE warehouse=%s AND status='active' AND qty > 0",
-        (INVESTMENT_WAREHOUSE,),
-    )
-    packages = cur.fetchall()
 
     conn.close()
 
     return render_template(
         "przyjecie.html",
         products=products,
-        packages=packages,
         forced_warehouse=INVESTMENT_WAREHOUSE,
         form_action="/inwestycja-suwaj/receive_doc",
         page_title="📥 Przyjęcie (PZ) – Inwestycja Suwaj"
@@ -1719,20 +1863,16 @@ def inwestycja_suwaj_wydanie():
     conn = db()
     cur = conn.cursor()
 
-    cur.execute("SELECT * FROM products WHERE warehouse=%s", (INVESTMENT_WAREHOUSE,))
-    products = cur.fetchall()
-
     cur.execute(
-        "SELECT * FROM packages WHERE warehouse=%s AND status='active' AND qty > 0",
+        "SELECT * FROM products WHERE warehouse=%s ORDER BY lower(name), id",
         (INVESTMENT_WAREHOUSE,),
     )
-    packages = cur.fetchall()
+    products = cur.fetchall()
     conn.close()
 
     return render_template(
         "wydanie.html",
         products=products,
-        packages=packages,
         forced_warehouse=INVESTMENT_WAREHOUSE,
         form_action="/inwestycja-suwaj/issue_doc",
         page_title="📄 Wydanie (WZ) – Inwestycja Suwaj"
@@ -1994,7 +2134,7 @@ def void_document(document_id):
             (document_id,),
         )
         items = cur.fetchall()
-        if movement_type == "WZ":
+        if movement_type in {"WZ", "RW"}:
             for product_id, qty, warehouse, package_id in items:
                 cur.execute(
                     "UPDATE products SET qty=qty+%s WHERE id=%s AND warehouse=%s",
