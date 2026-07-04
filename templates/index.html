@@ -67,6 +67,24 @@ input {
 <div class="box">
 <h2>Magazyn: {{warehouse}}</h2>
 
+{% if warehouse != "Wszystko" %}
+<details style="margin-bottom:16px;">
+<summary class="btn" style="display:inline-block;">Dodaj kartotekę produktu</summary>
+<form method="POST" action="/add_product" style="display:grid;grid-template-columns:2fr repeat(3,1fr);gap:8px;margin-top:12px;">
+    <input type="hidden" name="warehouse" value="{{ warehouse }}">
+    <input name="name" maxlength="200" placeholder="Nazwa produktu" required>
+    <select name="unit" required>
+        <option value="m2">m2</option><option value="m3">m3</option>
+        <option value="szt">szt</option><option value="l">l</option>
+        <option value="opak">opak</option><option value="kg">kg</option>
+    </select>
+    <input name="price_netto" type="number" min="0" step="0.01" placeholder="Cena netto">
+    <input name="vat" type="number" min="0" max="100" step="0.01" value="23" placeholder="VAT">
+    <button type="submit">Dodaj produkt</button>
+</form>
+</details>
+{% endif %}
+
 <!-- 🔍 WYSZUKIWARKA -->
 <div style="position:relative;">
     <input type="text" id="search" class="search" placeholder="Szukaj produktu..." onkeyup="showSuggestions()">

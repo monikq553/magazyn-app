@@ -55,7 +55,9 @@ class FakeCursor:
         normalized = " ".join(sql.lower().split())
         self.result = None
         self.rowcount = 0
-        if normalized.startswith("select name, unit, price_netto, vat from products"):
+        if normalized.startswith("select pg_advisory_xact_lock"):
+            self.result = (None,)
+        elif normalized.startswith("select name, unit, price_netto, vat from products"):
             product = self.store.products.get(params[0])
             if product:
                 self.result = (
@@ -82,7 +84,8 @@ class FakeCursor:
         elif normalized.startswith("insert into issue_docs"):
             doc_id = self.store.next_doc
             self.store.next_doc += 1
-            self.store.docs[doc_id] = {"type": "PZ" if "'pz'" in normalized else "WZ"}
+            movement_type = "PZ" if "'pz'" in normalized else params[-1]
+            self.store.docs[doc_id] = {"type": movement_type}
             self.result = (doc_id,)
             self.rowcount = 1
         elif normalized.startswith("update issue_docs set doc_number"):
@@ -228,6 +231,47 @@ class InventoryFlowTests(unittest.TestCase):
         for value in ("0", "-1", "nan", "inf", ""):
             with self.assertRaises(ValueError):
                 warehouse_app.parse_positive_number(value)
+
+    def test_rw_issue_is_recorded_as_outgoing_document(self):
+        self.post(
+            "/receive_doc",
+            {
+                "date": "2026-07-04",
+                "kontrahent": "Dostawca",
+                "product_id": "1",
+                "warehouse": "Drewno",
+                "package_number": "RW-TEST",
+                "qty": "2",
+            },
+        )
+        result = self.post(
+            "/issue_doc",
+            {
+                "date": "2026-07-04",
+                "kontrahent": "Produkcja",
+                "movement_type": "RW",
+                "product_id": "1",
+                "warehouse": "Drewno",
+                "package_id": "1",
+                "qty": "1",
+            },
+        )
+        self.assertEqual(result.status_code, 302)
+        self.assertEqual(self.store.docs[2]["type"], "RW")
+        self.assertEqual(self.store.products[1]["qty"], 1)
+
+    def test_unknown_warehouse_is_rejected(self):
+        with warehouse_app.app.test_request_context(
+            "/receive_doc",
+            method="POST",
+            data={
+                "product_id": "1",
+                "warehouse": "Nieistniejący",
+                "qty": "1",
+            },
+        ):
+            with self.assertRaises(ValueError):
+                warehouse_app.collect_document_items()
 
     def test_render_external_database_url_prefers_internal_network(self):
         external = (

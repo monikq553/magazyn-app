@@ -132,6 +132,7 @@ button {
 <option>szt</option>
 <option>l</option>
 <option>opak</option>
+<option>kg</option>
 </select>
 
 <button type="button" onclick="removeItem(this)" style="background:red;">Usuń</button>
@@ -182,13 +183,15 @@ function searchProduct(input) {
             input.value = p.name;
             hidden.value = p.id;
 
-            info.innerHTML = "Stan: " + p.qty + " " + p.unit;
+            info.textContent = "Stan: " + p.qty + " " + p.unit;
             let item = input.closest(".item");
+            item.dataset.vat = String(p.vat || 0);
             let nettoInput = item.querySelector("input[name='price_netto']");
             let bruttoInput = item.querySelector("input[name='price_brutto']");
             nettoInput.value = p.price_netto || "";
             let netto = parseFloat((p.price_netto || "0").toString().replace(",", "."));
-            bruttoInput.value = (netto * 1.23).toFixed(2);
+            bruttoInput.value = (netto * (1 + Number(p.vat || 0) / 100)).toFixed(2);
+            item.querySelector("select[name='unit']").value = p.unit;
 
             // 🔥 ustaw magazyn (gdy jest select)
             let warehouseSelect = input.closest(".item").querySelector("select[name='warehouse']");
@@ -225,7 +228,7 @@ document.addEventListener("input", function(e){
 
     const nettoInput = item.querySelector("input[name='price_netto']");
     const bruttoInput = item.querySelector("input[name='price_brutto']");
-    const VAT = 0.23;
+    const VAT = Number(item.dataset.vat || 23) / 100;
 
     if (e.target.name === "price_netto") {
         const nettoVal = parseFloat((nettoInput.value || "0").replace(",", "."));
