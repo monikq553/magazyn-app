@@ -1,7 +1,8 @@
 import copy
 import os
 import unittest
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import app as warehouse_app
 
@@ -272,6 +273,58 @@ class InventoryFlowTests(unittest.TestCase):
         ):
             with self.assertRaises(ValueError):
                 warehouse_app.collect_document_items()
+
+    def test_private_api_requires_firebase_session(self):
+        client = warehouse_app.app.test_client()
+        response = client.get("/api/packages/lookup?number=TEST")
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.get_json()["error"], "Wymagane logowanie.")
+
+    def test_login_page_is_public_without_firebase_session(self):
+        client = warehouse_app.app.test_client()
+        response = client.get("/login")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Logowanie", response.get_data(as_text=True))
+
+    def test_firebase_login_sets_verified_cookie_without_storing_password(self):
+        client = warehouse_app.app.test_client()
+        with client.session_transaction() as flask_session:
+            flask_session["_csrf_token"] = "csrf-test"
+
+        cursor = MagicMock()
+        cursor.fetchone.return_value = ("employee", "active")
+        connection = MagicMock()
+        connection.cursor.return_value = cursor
+        firebase_user = SimpleNamespace(disabled=False, display_name="Jan Testowy")
+
+        with (
+            patch.object(warehouse_app, "FIREBASE_ADMIN_READY", True),
+            patch.object(warehouse_app, "ensure_db_initialized"),
+            patch.object(warehouse_app, "db", return_value=connection),
+            patch.object(
+                warehouse_app.auth,
+                "verify_id_token",
+                return_value={"uid": "firebase-uid", "email": "jan@example.com"},
+            ),
+            patch.object(warehouse_app.auth, "get_user", return_value=firebase_user),
+            patch.object(
+                warehouse_app.auth,
+                "create_session_cookie",
+                return_value="verified-firebase-cookie",
+            ),
+        ):
+            response = client.post(
+                "/auth/session",
+                json={"idToken": "firebase-id-token"},
+                headers={"X-CSRF-Token": "csrf-test"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("firebase_session=verified-firebase-cookie", response.headers["Set-Cookie"])
+        executed_sql = " ".join(
+            call.args[0] for call in cursor.execute.call_args_list if call.args
+        ).lower()
+        self.assertNotIn("password", executed_sql)
 
     def test_render_external_database_url_prefers_internal_network(self):
         external = (

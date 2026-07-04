@@ -3,13 +3,12 @@ import logging
 import math
 import secrets
 import threading
-from flask import Flask, render_template, request, redirect, session, jsonify, Response
+from flask import Flask, render_template, request, redirect, session, jsonify, Response, make_response
 from functools import wraps
 import psycopg2
 from psycopg2.pool import ThreadedConnectionPool
-from werkzeug.security import generate_password_hash
 from werkzeug.middleware.proxy_fix import ProxyFix
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import io
 import pandas as pd
@@ -241,11 +240,53 @@ def run_db_migrations():
     cur.execute("""
     CREATE TABLE IF NOT EXISTS users(
         id SERIAL PRIMARY KEY,
-        username TEXT UNIQUE,
-        password TEXT,
-        role TEXT
+        firebase_uid TEXT UNIQUE NOT NULL,
+        first_name TEXT NOT NULL DEFAULT '',
+        last_name TEXT NOT NULL DEFAULT '',
+        email TEXT UNIQUE NOT NULL,
+        role TEXT NOT NULL DEFAULT 'employee',
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
     """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS schema_migrations(
+        name TEXT PRIMARY KEY,
+        applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    """)
+    cur.execute(
+        "SELECT 1 FROM schema_migrations WHERE name='firebase_users_v2'"
+    )
+    if not cur.fetchone():
+        cur.execute("""
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='users' AND column_name='password'
+            )
+        """)
+        if cur.fetchone()[0]:
+            cur.execute("DROP TABLE users")
+            cur.execute("""
+                CREATE TABLE users(
+                    id SERIAL PRIMARY KEY,
+                    firebase_uid TEXT UNIQUE NOT NULL,
+                    first_name TEXT NOT NULL DEFAULT '',
+                    last_name TEXT NOT NULL DEFAULT '',
+                    email TEXT UNIQUE NOT NULL,
+                    role TEXT NOT NULL DEFAULT 'employee',
+                    status TEXT NOT NULL DEFAULT 'active',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+        else:
+            # Jednorazowe usunięcie wcześniejszych kont zgodnie z migracją do Firebase.
+            cur.execute("DELETE FROM users")
+        cur.execute(
+            "INSERT INTO schema_migrations(name) VALUES ('firebase_users_v2')"
+        )
 
     # PRODUCTS
     cur.execute("""
@@ -351,14 +392,6 @@ def run_db_migrations():
         WHERE number IS NULL
         """)
 
-    # aktualizacja ról adminów z env (bez kasowania użytkowników)
-    for admin_email in ADMIN_EMAILS:
-        cur.execute("""
-            INSERT INTO users(username, password, role)
-            VALUES (%s,%s,%s)
-            ON CONFLICT (username) DO UPDATE SET role='admin'
-        """, (admin_email, generate_password_hash("firebase-managed"), "admin"))
-
     cur.execute("ALTER TABLE packages ADD COLUMN IF NOT EXISTS initial_qty REAL")
     cur.execute("ALTER TABLE packages ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'active'")
     cur.execute("ALTER TABLE packages ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ")
@@ -447,6 +480,14 @@ def run_db_migrations():
                 ALTER TABLE issue_items
                 ADD CONSTRAINT issue_items_package_fk
                 FOREIGN KEY (package_id) REFERENCES packages(id) ON DELETE SET NULL NOT VALID;
+            END IF;
+            IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='users_role_valid') THEN
+                ALTER TABLE users
+                ADD CONSTRAINT users_role_valid CHECK (role IN ('admin', 'employee'));
+            END IF;
+            IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='users_status_valid') THEN
+                ALTER TABLE users
+                ADD CONSTRAINT users_status_valid CHECK (status IN ('active', 'blocked'));
             END IF;
         END $$;
     """)
@@ -558,80 +599,156 @@ def create_session():
     if not id_token:
         return jsonify({"ok": False, "error": "Brak tokenu"}), 400
 
-    if FIREBASE_ADMIN_READY:
-        try:
-            decoded = auth.verify_id_token(id_token)
-            email = (decoded.get("email") or "").lower()
-            uid = decoded.get("uid")
-        except Exception:
-            return jsonify({"ok": False, "error": "Nieprawidłowy token"}), 401
-    else:
-        try:
-            decoded = verify_id_token_with_firebase_rest(id_token)
-            email = decoded.get("email")
-            uid = decoded.get("uid")
-        except Exception:
-            return jsonify({"ok": False, "error": FIREBASE_ADMIN_ERROR or "Nie udało się zweryfikować tokenu."}), 503
+    if not FIREBASE_ADMIN_READY:
+        return jsonify({
+            "ok": False,
+            "error": FIREBASE_ADMIN_ERROR or "Firebase Admin nie jest skonfigurowany.",
+        }), 503
+    try:
+        decoded = auth.verify_id_token(id_token, check_revoked=True)
+        email = (decoded.get("email") or "").strip().lower()
+        uid = decoded.get("uid")
+        firebase_user = auth.get_user(uid)
+        if firebase_user.disabled:
+            return jsonify({"ok": False, "error": "Konto jest zablokowane."}), 403
+    except Exception:
+        return jsonify({"ok": False, "error": "Nieprawidłowy lub wygasły token"}), 401
     if not email or not uid:
         return jsonify({"ok": False, "error": "Brak danych użytkownika"}), 400
-
-    if ALLOWED_EMAILS and email not in ALLOWED_EMAILS:
-        return jsonify({"ok": False, "error": "E-mail poza listą dozwolonych użytkowników"}), 403
 
     ensure_db_initialized()
     conn = db()
     cur = conn.cursor()
-    cur.execute("SELECT role FROM users WHERE username=%s", (email,))
+    cur.execute(
+        "SELECT role, status FROM users WHERE firebase_uid=%s OR lower(email)=lower(%s) FOR UPDATE",
+        (uid, email),
+    )
     row = cur.fetchone()
     if not row:
-        cur.execute("SELECT COUNT(*) FROM users")
-        users_count = cur.fetchone()[0]
-        can_autoprovision = (
-            users_count == 0
-            or email in ADMIN_EMAILS
-            or email in ALLOWED_EMAILS
-        )
-        if not can_autoprovision:
+        if email not in ADMIN_EMAILS:
             conn.close()
             return jsonify({"ok": False, "error": "Brak konta. Skontaktuj się z administratorem."}), 403
-
-        role = "admin" if (users_count == 0 or email in ADMIN_EMAILS) else "employee"
+        display_name = (decoded.get("name") or firebase_user.display_name or "").strip()
+        first_name, _, last_name = display_name.partition(" ")
+        role = "admin"
         cur.execute(
-            "INSERT INTO users(username, password, role) VALUES (%s,%s,%s)",
-            (email, generate_password_hash(uid), role)
+            """
+            INSERT INTO users(firebase_uid, first_name, last_name, email, role, status)
+            VALUES (%s,%s,%s,%s,'admin','active')
+            """,
+            (uid, first_name, last_name, email),
         )
     else:
-        role = row[0] or ("admin" if email in ADMIN_EMAILS else "employee")
-    cur.execute("UPDATE users SET password=%s WHERE username=%s", (generate_password_hash(uid), email))
+        role, status = row
+        if status != "active":
+            conn.close()
+            return jsonify({"ok": False, "error": "Konto jest zablokowane."}), 403
+        cur.execute(
+            """
+            UPDATE users SET firebase_uid=%s, email=%s, updated_at=NOW()
+            WHERE firebase_uid=%s OR lower(email)=lower(%s)
+            """,
+            (uid, email, uid, email),
+        )
     conn.commit()
     conn.close()
-
+    expires = timedelta(days=5)
+    try:
+        firebase_cookie = auth.create_session_cookie(id_token, expires_in=expires)
+    except Exception:
+        logger.exception("Firebase session cookie creation failed.")
+        return jsonify({"ok": False, "error": "Nie udało się utworzyć bezpiecznej sesji."}), 500
     session['user'] = email
     session['role'] = role
     session['uid'] = uid
-    return jsonify({"ok": True, "role": role})
+    response = make_response(jsonify({"ok": True, "role": role}))
+    response.set_cookie(
+        "firebase_session",
+        firebase_cookie,
+        max_age=int(expires.total_seconds()),
+        httponly=True,
+        secure=os.environ.get("RENDER", "").lower() == "true",
+        samesite="Lax",
+    )
+    return response
 
 
 @app.route('/logout', methods=['POST'])
 def logout():
     session.clear()
-    return redirect('/login')
+    response = make_response(redirect('/login'))
+    response.delete_cookie("firebase_session")
+    return response
 
 
 @app.before_request
 def require_login_for_private_app():
-    allowed_routes = {"login", "create_session", "logout", "static", "favicon", "health"}
-    if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+    public_routes = {"static", "favicon", "health"}
+    if request.endpoint in public_routes:
+        return None
+
+    def csrf_error():
+        if request.is_json or request.path.startswith("/api/"):
+            return jsonify({"ok": False, "error": "Sesja formularza wygasła. Odśwież stronę."}), 400
+        return "Sesja formularza wygasła. Odśwież stronę.", 400
+
+    def validate_csrf():
         sent_token = request.form.get("_csrf_token") or request.headers.get("X-CSRF-Token")
         if not sent_token or not secrets.compare_digest(sent_token, session.get("_csrf_token", "")):
-            if request.is_json:
-                return jsonify({"ok": False, "error": "Sesja formularza wygasła. Odśwież stronę."}), 400
-            return "Sesja formularza wygasła. Odśwież stronę.", 400
-    if request.endpoint in allowed_routes:
+            return csrf_error()
         return None
-    if 'user' not in session:
-        return redirect('/login')
-    ensure_db_initialized()
+
+    if request.endpoint == "create_session":
+        return validate_csrf()
+
+    if request.endpoint == "logout":
+        if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+            return validate_csrf()
+        return None
+
+    firebase_cookie = request.cookies.get("firebase_session")
+    decoded = None
+    if firebase_cookie and FIREBASE_ADMIN_READY:
+        try:
+            decoded = auth.verify_session_cookie(firebase_cookie, check_revoked=True)
+        except Exception:
+            decoded = None
+
+    if decoded:
+        uid = decoded.get("uid")
+        email = (decoded.get("email") or "").strip().lower()
+        ensure_db_initialized()
+        conn = db()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT role, status FROM users WHERE firebase_uid=%s AND lower(email)=lower(%s)",
+            (uid, email),
+        )
+        account = cur.fetchone()
+        conn.close()
+        if account and account[1] == "active":
+            session["user"] = email
+            session["uid"] = uid
+            session["role"] = account[0]
+            if request.endpoint == "login":
+                return redirect("/")
+        else:
+            decoded = None
+
+    if not decoded:
+        session.pop("user", None)
+        session.pop("uid", None)
+        session.pop("role", None)
+        if request.endpoint == "login":
+            return None
+        if request.path.startswith("/api/") or request.is_json:
+            return jsonify({"ok": False, "error": "Wymagane logowanie."}), 401
+        return redirect("/login")
+
+    if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+        csrf_failure = validate_csrf()
+        if csrf_failure:
+            return csrf_failure
     return None
 
 
@@ -700,7 +817,12 @@ def magazyny():
 def users():
     conn = db()
     cur = conn.cursor()
-    cur.execute("SELECT id, username, role FROM users ORDER BY id")
+    cur.execute(
+        """
+        SELECT id, firebase_uid, first_name, last_name, email, role, status
+        FROM users ORDER BY lower(last_name), lower(first_name), lower(email)
+        """
+    )
     users_list = cur.fetchall()
     conn.close()
     return render_template("users.html", users=users_list)
@@ -709,25 +831,69 @@ def users():
 @app.route('/add_user', methods=['POST'])
 @admin_required
 def add_user():
+    email = (request.form.get("email") or "").strip().lower()
+    first_name = (request.form.get("first_name") or "").strip()
+    last_name = (request.form.get("last_name") or "").strip()
+    if not email or "@" not in email or len(email) > 254:
+        return "Podaj prawidłowy adres e-mail.", 400
+    if not first_name or not last_name or len(first_name) > 100 or len(last_name) > 100:
+        return "Imię i nazwisko są wymagane (maksymalnie 100 znaków).", 400
+    role = request.form.get("role", "employee")
+    if role not in {"admin", "employee"}:
+        return "Nieprawidłowa rola.", 400
+    if not FIREBASE_ADMIN_READY:
+        return "Firebase Admin nie jest skonfigurowany.", 503
+
+    created_in_firebase = False
+    try:
+        try:
+            firebase_user = auth.get_user_by_email(email)
+            if firebase_user.disabled:
+                firebase_user = auth.update_user(
+                    firebase_user.uid,
+                    disabled=False,
+                    display_name=f"{first_name} {last_name}",
+                )
+        except auth.UserNotFoundError:
+            firebase_user = auth.create_user(
+                email=email,
+                display_name=f"{first_name} {last_name}",
+                disabled=False,
+            )
+            created_in_firebase = True
+    except Exception:
+        logger.exception("Firebase user creation failed.")
+        return "Nie udało się utworzyć użytkownika w Firebase.", 502
+
     conn = db()
     cur = conn.cursor()
-    username = (request.form.get('username') or '').strip().lower()
-    if not username or "@" not in username or len(username) > 254:
-        conn.close()
-        return "Podaj prawidłowy adres e-mail.", 400
-    role = request.form.get('role', 'employee')
-    if role not in ('admin', 'employee'):
-        role = 'employee'
-    cur.execute(
-        "INSERT INTO users(username, password, role) VALUES (%s,%s,%s) ON CONFLICT (username) DO NOTHING",
-        (
-            username,
-            generate_password_hash("firebase-managed"),
-            role
+    try:
+        cur.execute(
+            """
+            INSERT INTO users(firebase_uid, first_name, last_name, email, role, status)
+            VALUES (%s,%s,%s,%s,%s,'active')
+            ON CONFLICT (email) DO UPDATE SET
+                firebase_uid=EXCLUDED.firebase_uid,
+                first_name=EXCLUDED.first_name,
+                last_name=EXCLUDED.last_name,
+                role=EXCLUDED.role,
+                status='active',
+                updated_at=NOW()
+            """,
+            (firebase_user.uid, first_name, last_name, email, role),
         )
-    )
-    conn.commit()
-    conn.close()
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        if created_in_firebase:
+            try:
+                auth.delete_user(firebase_user.uid)
+            except Exception:
+                logger.exception("Firebase compensation delete failed.")
+        logger.exception("Application user creation failed.")
+        return "Nie udało się zapisać użytkownika.", 500
+    finally:
+        conn.close()
     return redirect('/users')
 
 
@@ -736,22 +902,35 @@ def add_user():
 def delete_user(user_id):
     conn = db()
     cur = conn.cursor()
-    cur.execute("SELECT username, role FROM users WHERE id=%s FOR UPDATE", (user_id,))
+    cur.execute(
+        "SELECT firebase_uid, email, role, status FROM users WHERE id=%s FOR UPDATE",
+        (user_id,),
+    )
     user = cur.fetchone()
     if not user:
         conn.close()
         return redirect('/users')
-    if user[0].lower() == (session.get("user") or "").lower():
+    if user[0] == session.get("uid"):
         conn.close()
         return "Nie możesz usunąć aktualnie zalogowanego konta.", 400
-    if user[1] == "admin":
-        cur.execute("SELECT COUNT(*) FROM users WHERE role='admin'")
+    if user[2] == "admin" and user[3] == "active":
+        cur.execute("SELECT COUNT(*) FROM users WHERE role='admin' AND status='active'")
         if cur.fetchone()[0] <= 1:
             conn.close()
             return "Nie można usunąć ostatniego administratora.", 400
-    cur.execute("DELETE FROM users WHERE id=%s", (user_id,))
-    conn.commit()
-    conn.close()
+    try:
+        auth.delete_user(user[0])
+        cur.execute("DELETE FROM users WHERE id=%s", (user_id,))
+        conn.commit()
+    except auth.UserNotFoundError:
+        cur.execute("DELETE FROM users WHERE id=%s", (user_id,))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        logger.exception("User deletion failed.")
+        return "Nie udało się usunąć użytkownika.", 502
+    finally:
+        conn.close()
     return redirect('/users')
 
 
@@ -764,24 +943,97 @@ def update_user_role(user_id):
 
     conn = db()
     cur = conn.cursor()
-    cur.execute("SELECT role FROM users WHERE id=%s", (user_id,))
+    cur.execute("SELECT role, status FROM users WHERE id=%s FOR UPDATE", (user_id,))
     row = cur.fetchone()
     if not row:
         conn.close()
         return redirect('/users')
 
-    old_role = row[0] or 'employee'
-    if old_role == 'admin' and new_role != 'admin':
-        cur.execute("SELECT COUNT(*) FROM users WHERE role='admin'")
+    old_role, status = row
+    if old_role == 'admin' and new_role != 'admin' and status == "active":
+        cur.execute("SELECT COUNT(*) FROM users WHERE role='admin' AND status='active'")
         admins_count = cur.fetchone()[0]
         if admins_count <= 1:
             conn.close()
             return redirect('/users')
 
-    cur.execute("UPDATE users SET role=%s WHERE id=%s", (new_role, user_id))
+    cur.execute("UPDATE users SET role=%s, updated_at=NOW() WHERE id=%s", (new_role, user_id))
     conn.commit()
     conn.close()
     return redirect('/users')
+
+
+def send_firebase_password_reset(email):
+    endpoint = (
+        "https://identitytoolkit.googleapis.com/v1/accounts:sendOobCode"
+        f"?key={FIREBASE_CONFIG['apiKey']}"
+    )
+    payload = json.dumps({"requestType": "PASSWORD_RESET", "email": email}).encode("utf-8")
+    req = urlrequest.Request(
+        endpoint,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urlrequest.urlopen(req, timeout=10) as response:
+        return response.status == 200
+
+
+@app.route('/users/<int:user_id>/reset-password', methods=['POST'])
+@admin_required
+def reset_user_password(user_id):
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT email FROM users WHERE id=%s", (user_id,))
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return "Nie znaleziono użytkownika.", 404
+    try:
+        send_firebase_password_reset(row[0])
+    except Exception:
+        logger.exception("Password reset email failed.")
+        return "Nie udało się wysłać wiadomości resetującej hasło.", 502
+    return redirect("/users?reset=sent")
+
+
+@app.route('/users/<int:user_id>/toggle-block', methods=['POST'])
+@admin_required
+def toggle_user_block(user_id):
+    conn = db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT firebase_uid, role, status FROM users WHERE id=%s FOR UPDATE",
+        (user_id,),
+    )
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        return "Nie znaleziono użytkownika.", 404
+    uid, role, status = row
+    if uid == session.get("uid"):
+        conn.close()
+        return "Nie możesz zablokować własnego konta.", 400
+    target_status = "active" if status == "blocked" else "blocked"
+    if role == "admin" and status == "active" and target_status == "blocked":
+        cur.execute("SELECT COUNT(*) FROM users WHERE role='admin' AND status='active'")
+        if cur.fetchone()[0] <= 1:
+            conn.close()
+            return "Nie można zablokować ostatniego administratora.", 400
+    try:
+        auth.update_user(uid, disabled=(target_status == "blocked"))
+        cur.execute(
+            "UPDATE users SET status=%s, updated_at=NOW() WHERE id=%s",
+            (target_status, user_id),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        logger.exception("User block toggle failed.")
+        return "Nie udało się zmienić statusu konta.", 502
+    finally:
+        conn.close()
+    return redirect("/users")
 
 
 @app.route('/magazyn/<name>')
