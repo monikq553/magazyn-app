@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Sklep internetowy</h2>
+<div class="tiles" style="margin-bottom:16px;">
+  <div class="tile"><strong>Liczba zamówień</strong><br>{{ reports[0] or 0 }}</div>
+  <div class="tile"><strong>Wartość sprzedaży</strong><br>{{ '%.2f'|format(reports[1] or 0) }} zł</div>
+  <div class="tile"><strong>W realizacji</strong><br>{{ reports[2] or 0 }}</div>
+  <div class="tile"><strong>Zakończone / anulowane</strong><br>{{ reports[3] or 0 }} / {{ reports[4] or 0 }}</div>
+</div>
+<div class="card" style="margin-bottom:16px;">
+  <h3>Powiadomienia</h3>
+  {% for n in notifications %}<p><strong>{{ n[0] }}</strong>: {{ n[1] }} <small>{{ n[2] }}</small></p>{% else %}<p>Brak aktywnych powiadomień.</p>{% endfor %}
+</div>
+<div class="card" style="margin-bottom:16px;">
+  <h3>Nowe zamówienie</h3>
+  <form method="POST" action="/sklep/orders" style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;">
+    <input name="order_number" placeholder="Numer zamówienia (auto)">
+    <input type="date" name="date">
+    <input name="customer_name" placeholder="Klient" required>
+    <input name="delivery_address" placeholder="Adres dostawy" required>
+    <input name="phone" placeholder="Telefon">
+    <input name="email" type="email" placeholder="E-mail">
+    <input name="nip" placeholder="NIP">
+    <input name="shipping_cost" placeholder="Koszt wysyłki" value="0">
+    <input name="payment_method" placeholder="Sposób płatności">
+    <select name="payment_status"><option>Oczekuje na płatność</option><option>Opłacone</option></select>
+    <input name="sales_document_number" placeholder="Nr faktury/paragonu">
+    <input name="tracking_number" placeholder="Nr listu przewozowego">
+    <input name="notes" placeholder="Uwagi" style="grid-column:1/-1;">
+    <div style="grid-column:1/-1;">
+      <strong>Produkty</strong>
+      {% for i in range(3) %}
+      <div style="display:flex;gap:8px;margin-top:8px;">
+        <select name="product_id"><option value="">-- produkt --</option>{% for p in products %}<option value="{{ p[0] }}">{{ p[4] }} · {{ p[1] }} ({{ p[2] }} {{ p[3] }})</option>{% endfor %}</select>
+        <input name="qty" placeholder="Ilość">
+      </div>
+      {% endfor %}
+    </div>
+    <button>Utwórz, sprawdź stan i wygeneruj dokument</button>
+  </form>
+</div>
+<div class="card">
+  <form method="GET" action="/sklep" style="display:flex;gap:8px;margin-bottom:12px;">
+    <input name="q" value="{{ request.args.get('q','') }}" placeholder="Szukaj: zamówienie, klient, paczka, dokument, produkt">
+    <select name="status"><option value="">Wszystkie statusy</option>{% for s in statuses %}<option {% if request.args.get('status') == s %}selected{% endif %}>{{ s }}</option>{% endfor %}</select>
+    <button>Szukaj</button>
+  </form>
+  <table width="100%"><tr><th>Numer</th><th>Data</th><th>Klient</th><th>Status</th><th>Płatność</th><th>Dokument</th><th>Paczka</th><th>Wartość</th></tr>
+  {% for o in orders %}<tr><td><a href="/sklep/orders/{{ o[0] }}">{{ o[1] }}</a></td><td>{{ o[2] }}</td><td>{{ o[3] }}</td><td>{{ o[4] }}</td><td>{{ o[5] }}</td><td>{{ o[6] or '' }}</td><td>{{ o[7] or '' }}</td><td>{{ '%.2f'|format(o[8] or 0) }}</td></tr>{% endfor %}</table>
+</div>
+{% endblock %}

@@ -56,4 +56,55 @@
         </tbody>
     </table>
 </div>
+{% if issue_document %}
+<style>
+.photo-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:14px; }
+.photo-card { border:1px solid #e5e7eb; border-radius:12px; padding:10px; background:#fff; }
+.photo-card img { width:100%; aspect-ratio:1/1; object-fit:cover; border-radius:10px; display:block; }
+.photo-meta { font-size:12px; color:#6b7280; margin-top:8px; overflow-wrap:anywhere; }
+</style>
+
+<div class="card" style="margin-top:18px;">
+    <h3>Zdjęcia wydania</h3>
+    <form method="POST" action="/doc/{{ doc[0] }}/photos" enctype="multipart/form-data" style="margin-bottom:16px;">
+        <label>Dodaj zdjęcia paczki, towaru, załadunku lub uszkodzeń</label><br>
+        <input name="photos" type="file" accept="image/*" multiple style="margin:8px 0;width:100%;">
+        <input name="photo_note" placeholder="Opis zdjęć (opcjonalnie)" style="margin-bottom:8px;width:100%;">
+        <button type="submit">Dodaj zdjęcia</button>
+    </form>
+
+    <div class="photo-grid">
+    {% for photo in photos %}
+        <div class="photo-card">
+            <a href="/doc-photo/{{ photo[0] }}" target="_blank" rel="noopener">
+                <img src="/doc-photo/{{ photo[0] }}" alt="{{ photo[1] }}">
+            </a>
+            <div class="photo-meta">
+                <strong>{{ photo[1] }}</strong><br>
+                {{ photo[3] or 'Bez opisu' }}<br>
+                Dodał: {{ photo[4] }}<br>
+                {{ photo[5] }}
+            </div>
+            {% if session.get('role') == 'admin' %}
+            <form method="POST" action="/doc-photo/{{ photo[0] }}/delete" onsubmit="return confirm('Usunąć zdjęcie?');" style="margin-top:8px;">
+                <button type="submit" style="background:#ef4444;color:white;">Usuń zdjęcie</button>
+            </form>
+            {% endif %}
+        </div>
+    {% else %}
+        <p>Brak zdjęć przy tym wydaniu.</p>
+    {% endfor %}
+    </div>
+</div>
+
+<div class="card" style="margin-top:18px;">
+    <h3>Historia zdjęć</h3>
+    {% for h in history %}
+        <p>{{ h[3] }} · <strong>{{ h[1] }}</strong> · {{ h[0] }} · {{ h[2] }}</p>
+    {% else %}
+        <p>Brak wpisów historii zdjęć.</p>
+    {% endfor %}
+</div>
+{% endif %}
+
 {% endblock %}

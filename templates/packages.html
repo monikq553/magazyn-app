@@ -1,5 +1,6 @@
 <div style="padding:10px;">
 <h3>Paczki</h3>
+{% if unnumbered_qty and unnumbered_qty > 0 %}<p><strong>Bez numeru paczki:</strong> {{ unnumbered_qty }}</p>{% endif %}
 {% if packages %}
 <table style="width:100%; border-collapse:collapse;">
     <tr style="background:#f1f2f6;">
