@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Sklep internetowy</h2>
+<div class="card" style="margin-bottom:20px;">
+  <h3>Nowe zamówienie z rezerwacją towaru</h3>
+  <form method="POST" action="/shop/orders/add" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;">
+    <input name="number" placeholder="Numer zamówienia" maxlength="100" required>
+    <input name="customer" placeholder="Klient" maxlength="200" required>
+    <select name="product_id" required>
+      <option value="">Produkt</option>
+      {% for p in products %}
+      <option value="{{ p[0] }}">{{ p[4] }} · {{ p[1] }} (stan: {{ p[2] }} {{ p[3] }})</option>
+      {% endfor %}
+    </select>
+    <input name="qty" placeholder="Ilość" inputmode="decimal" required>
+    <select name="payment_status">
+      <option value="new">Płatność: nowe</option>
+      <option value="paid">Opłacone</option>
+      <option value="pending">Oczekuje</option>
+    </select>
+    <input name="invoice_number" placeholder="Faktura/paragon">
+    <input name="tracking_number" placeholder="Numer przesyłki">
+    <input name="notes" placeholder="Uwagi">
+    <button>Dodaj i zarezerwuj</button>
+  </form>
+</div>
+
+<div class="card">
+  <table style="width:100%;border-collapse:collapse;">
+    <thead>
+      <tr>
+        <th style="text-align:left;padding:8px;">Numer</th>
+        <th style="text-align:left;padding:8px;">Klient</th>
+        <th style="text-align:left;padding:8px;">Płatność</th>
+        <th style="text-align:left;padding:8px;">Magazyn</th>
+        <th style="text-align:left;padding:8px;">Księgowość</th>
+        <th style="text-align:left;padding:8px;">Wysyłka</th>
+        <th style="text-align:left;padding:8px;">Etap</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for o in orders %}
+      <tr>
+        <td style="padding:8px;border-top:1px solid #eee;">{{ o[1] }}</td>
+        <td style="padding:8px;border-top:1px solid #eee;">{{ o[2] }}</td>
+        <td style="padding:8px;border-top:1px solid #eee;">{{ o[3] }}</td>
+        <td style="padding:8px;border-top:1px solid #eee;">{{ o[4] }}</td>
+        <td style="padding:8px;border-top:1px solid #eee;">{{ o[5] }}</td>
+        <td style="padding:8px;border-top:1px solid #eee;">{{ o[6] }}</td>
+        <td style="padding:8px;border-top:1px solid #eee;">{{ o[9] }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="7" style="padding:12px;">Brak zamówień.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

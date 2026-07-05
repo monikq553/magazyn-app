@@ -73,6 +73,53 @@ FIREBASE_CONFIG = {
     "measurementId": os.environ.get("FIREBASE_MEASUREMENT_ID", ""),
 }
 ADMIN_EMAILS = {e.strip().lower() for e in os.environ.get("ADMIN_EMAILS", "").split(",") if e.strip()}
+ALLOWED_ORIGINS = {
+    origin.strip().rstrip("/")
+    for origin in os.environ.get(
+        "ALLOWED_ORIGINS",
+        "https://pmagazyn.pl,https://app.pmagazyn.pl",
+    ).split(",")
+    if origin.strip()
+}
+ROLES = {"admin", "warehouse", "shop", "accounting"}
+ROLE_LABELS = {
+    "admin": "Administrator",
+    "warehouse": "Magazynier",
+    "shop": "Obsługa sklepu internetowego",
+    "accounting": "Księgowość",
+}
+ROLE_PERMISSIONS = {
+    "admin": {"dashboard", "inventory", "receive", "issue", "history", "reports", "users", "backups", "shop", "accounting"},
+    "warehouse": {"dashboard", "inventory", "receive", "issue", "history", "shop"},
+    "shop": {"dashboard", "inventory", "shop", "history"},
+    "accounting": {"dashboard", "history", "reports", "accounting"},
+}
+ENDPOINT_PERMISSIONS = {
+    "dashboard_page_view": "dashboard",
+    "magazyny": "inventory",
+    "magazyn": "inventory",
+    "packages_for_product": "inventory",
+    "package_lookup": "inventory",
+    "add_product": "inventory",
+    "przyjecie": "receive",
+    "receive_doc": "receive",
+    "import_excel": "receive",
+    "wydanie": "issue",
+    "issue_doc": "issue",
+    "inwestycja_suwaj_page_view": "inventory",
+    "inwestycja_suwaj_magazyn": "inventory",
+    "inwestycja_suwaj_przyjecie": "receive",
+    "inwestycja_suwaj_receive_doc": "receive",
+    "inwestycja_suwaj_wydanie": "issue",
+    "inwestycja_suwaj_issue_doc": "issue",
+    "historia": "history",
+    "doc_detail": "history",
+    "edit_doc": "history",
+    "report": "reports",
+    "report_pdf": "reports",
+    "shop_orders_page": "shop",
+    "add_shop_order": "shop",
+}
 FIREBASE_ADMIN_READY = False
 FIREBASE_ADMIN_ERROR = ""
 DB_POOL = None
@@ -238,7 +285,7 @@ def run_db_migrations():
         first_name TEXT NOT NULL DEFAULT '',
         last_name TEXT NOT NULL DEFAULT '',
         email TEXT UNIQUE NOT NULL,
-        role TEXT NOT NULL DEFAULT 'employee',
+        role TEXT NOT NULL DEFAULT 'warehouse',
         status TEXT NOT NULL DEFAULT 'active',
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -269,7 +316,7 @@ def run_db_migrations():
                     first_name TEXT NOT NULL DEFAULT '',
                     last_name TEXT NOT NULL DEFAULT '',
                     email TEXT UNIQUE NOT NULL,
-                    role TEXT NOT NULL DEFAULT 'employee',
+                    role TEXT NOT NULL DEFAULT 'warehouse',
                     status TEXT NOT NULL DEFAULT 'active',
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -475,16 +522,63 @@ def run_db_migrations():
                 ADD CONSTRAINT issue_items_package_fk
                 FOREIGN KEY (package_id) REFERENCES packages(id) ON DELETE SET NULL NOT VALID;
             END IF;
-            IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='users_role_valid') THEN
-                ALTER TABLE users
-                ADD CONSTRAINT users_role_valid CHECK (role IN ('admin', 'employee', 'warehouse', 'shop', 'accounting'));
+            UPDATE users SET role='warehouse' WHERE role='employee';
+            IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname='users_role_valid') THEN
+                ALTER TABLE users DROP CONSTRAINT users_role_valid;
             END IF;
+            ALTER TABLE users
+            ADD CONSTRAINT users_role_valid CHECK (role IN ('admin', 'warehouse', 'shop', 'accounting'));
             IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='users_status_valid') THEN
                 ALTER TABLE users
                 ADD CONSTRAINT users_status_valid CHECK (status IN ('active', 'blocked'));
             END IF;
         END $$;
     """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS action_logs(
+        id SERIAL PRIMARY KEY,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        actor_email TEXT,
+        actor_uid TEXT,
+        action TEXT NOT NULL,
+        entity_type TEXT,
+        entity_id TEXT,
+        details JSONB NOT NULL DEFAULT '{}'::jsonb
+    );
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_action_logs_created_at ON action_logs(created_at DESC)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_action_logs_actor ON action_logs(lower(actor_email))")
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS shop_orders(
+        id SERIAL PRIMARY KEY,
+        number TEXT UNIQUE NOT NULL,
+        customer TEXT NOT NULL,
+        payment_status TEXT NOT NULL DEFAULT 'new',
+        warehouse_status TEXT NOT NULL DEFAULT 'new',
+        accounting_status TEXT NOT NULL DEFAULT 'new',
+        shipping_status TEXT NOT NULL DEFAULT 'new',
+        invoice_number TEXT,
+        tracking_number TEXT,
+        notes TEXT,
+        stage TEXT NOT NULL DEFAULT 'new',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS shop_order_items(
+        id SERIAL PRIMARY KEY,
+        order_id INTEGER NOT NULL REFERENCES shop_orders(id) ON DELETE CASCADE,
+        product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE RESTRICT,
+        qty REAL NOT NULL CHECK (qty > 0),
+        reserved_qty REAL NOT NULL DEFAULT 0 CHECK (reserved_qty >= 0),
+        issued_qty REAL NOT NULL DEFAULT 0 CHECK (issued_qty >= 0)
+    );
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_shop_orders_stage ON shop_orders(stage)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_shop_order_items_order ON shop_order_items(order_id)")
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS backup_runs(
@@ -961,6 +1055,56 @@ def admin_required(f):
     return decorated
 
 
+def current_user_can(permission):
+    role = session.get("role")
+    return permission in ROLE_PERMISSIONS.get(role, set())
+
+
+def permission_required(permission):
+    def outer(f):
+        @wraps(f)
+        def decorated(*args, **kwargs):
+            if 'user' not in session:
+                return redirect('/login')
+            if not current_user_can(permission):
+                return "Brak uprawnień", 403
+            return f(*args, **kwargs)
+        return decorated
+    return outer
+
+
+def log_action(action, entity_type=None, entity_id=None, details=None, conn=None):
+    target_conn = conn or db()
+    try:
+        cur = target_conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO action_logs(actor_email, actor_uid, action, entity_type, entity_id, details)
+            VALUES (%s,%s,%s,%s,%s,%s::jsonb)
+            """,
+            (
+                session.get("user"),
+                session.get("uid"),
+                action,
+                entity_type,
+                str(entity_id) if entity_id is not None else None,
+                json.dumps(details or {}, ensure_ascii=False),
+            ),
+        )
+        if conn is None:
+            target_conn.commit()
+    except Exception:
+        logger.warning("Action log skipped.", exc_info=True)
+    finally:
+        if conn is None:
+            target_conn.close()
+
+
+@app.context_processor
+def inject_permissions():
+    return {"can": current_user_can, "role_labels": ROLE_LABELS}
+
+
 # 🔐 LOGIN
 @app.route('/login')
 def login():
@@ -1029,6 +1173,8 @@ def create_session():
         )
     else:
         role, status = row
+        if role == "employee":
+            role = "warehouse"
         if status != "active":
             conn.close()
             return jsonify({"ok": False, "error": "Konto jest zablokowane."}), 403
@@ -1075,6 +1221,8 @@ def require_login_for_private_app():
     if IS_PRODUCTION and not request.is_secure:
         secure_url = request.url.replace("http://", "https://", 1)
         return redirect(secure_url, code=308)
+    if request.method == "OPTIONS":
+        return Response(status=204)
     public_routes = {"static", "favicon", "health"}
     if request.endpoint in public_routes:
         return None
@@ -1141,6 +1289,9 @@ def require_login_for_private_app():
         csrf_failure = validate_csrf()
         if csrf_failure:
             return csrf_failure
+    required_permission = ENDPOINT_PERMISSIONS.get(request.endpoint)
+    if required_permission and not current_user_can(required_permission):
+        return "Brak uprawnień", 403
     return None
 
 
@@ -1223,6 +1374,13 @@ def add_private_cache_headers(response):
         response.headers["Strict-Transport-Security"] = (
             "max-age=31536000; includeSubDomains"
         )
+    origin = request.headers.get("Origin", "").rstrip("/")
+    if origin in ALLOWED_ORIGINS:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Vary"] = "Origin"
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, X-CSRF-Token"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
     return response
 
 
@@ -1284,8 +1442,8 @@ def add_user():
         return "Podaj prawidłowy adres e-mail.", 400
     if not first_name or not last_name or len(first_name) > 100 or len(last_name) > 100:
         return "Imię i nazwisko są wymagane (maksymalnie 100 znaków).", 400
-    role = request.form.get("role", "employee")
-    if role not in SHOP_ROLES:
+    role = request.form.get("role", "warehouse")
+    if role not in ROLES:
         return "Nieprawidłowa rola.", 400
     if not FIREBASE_ADMIN_READY:
         return "Firebase Admin nie jest skonfigurowany.", 503
@@ -1383,8 +1541,8 @@ def delete_user(user_id):
 @app.route('/update_user_role/<int:user_id>', methods=['POST'])
 @admin_required
 def update_user_role(user_id):
-    new_role = request.form.get('role', 'employee')
-    if new_role not in SHOP_ROLES:
+    new_role = request.form.get('role', 'warehouse')
+    if new_role not in ROLES:
         return redirect('/users')
 
     conn = db()
@@ -1829,6 +1987,107 @@ def add_cost():
     return redirect('/costs')
 
 
+SHOP_ORDER_STAGES = {
+    "new", "accepted", "reserved", "document_created", "packed",
+    "sent", "completed", "cancelled",
+}
+
+
+@app.route('/shop/orders')
+@login_required
+def shop_orders_page():
+    conn = db()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, number, customer, payment_status, warehouse_status,
+               accounting_status, shipping_status, invoice_number,
+               tracking_number, stage, notes, created_at
+        FROM shop_orders ORDER BY id DESC LIMIT 200
+        """
+    )
+    orders = cur.fetchall()
+    cur.execute("SELECT id, name, qty, unit, warehouse FROM products ORDER BY warehouse, lower(name), id")
+    products = cur.fetchall()
+    conn.close()
+    return render_template("shop_orders.html", orders=orders, products=products, stages=SHOP_ORDER_STAGES)
+
+
+@app.route('/shop/orders/add', methods=['POST'])
+@login_required
+def add_shop_order():
+    number = (request.form.get("number") or "").strip()
+    customer = (request.form.get("customer") or "").strip()
+    product_id = request.form.get("product_id")
+    if not number or len(number) > 100:
+        return "Numer zamówienia jest wymagany (maksymalnie 100 znaków).", 400
+    if not customer or len(customer) > 200:
+        return "Klient jest wymagany (maksymalnie 200 znaków).", 400
+    try:
+        product_id = int(product_id)
+        qty = parse_positive_number(request.form.get("qty"), "Ilość")
+    except (TypeError, ValueError) as exc:
+        return str(exc), 400
+    notes = (request.form.get("notes") or "").strip()
+    conn = db()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT id, qty FROM products WHERE id=%s FOR UPDATE", (product_id,))
+        product = cur.fetchone()
+        if not product:
+            raise ValueError("Produkt nie istnieje.")
+        cur.execute(
+            """
+            SELECT COALESCE(SUM(oi.reserved_qty - oi.issued_qty), 0)
+            FROM shop_order_items oi
+            JOIN shop_orders o ON o.id=oi.order_id
+            WHERE oi.product_id=%s AND o.stage NOT IN ('sent','completed','cancelled')
+            """,
+            (product_id,),
+        )
+        reserved = cur.fetchone()[0] or 0
+        available = product[1] - reserved
+        if available + 1e-9 < qty:
+            raise ValueError(f"Brak dostępnego stanu. Dostępne po rezerwacjach: {available}.")
+        cur.execute(
+            """
+            INSERT INTO shop_orders(number, customer, payment_status, warehouse_status,
+                                    accounting_status, shipping_status, invoice_number,
+                                    tracking_number, notes, stage)
+            VALUES (%s,%s,%s,'reserved','new','new',%s,%s,%s,'reserved')
+            RETURNING id
+            """,
+            (
+                number, customer,
+                request.form.get("payment_status") or "new",
+                (request.form.get("invoice_number") or "").strip() or None,
+                (request.form.get("tracking_number") or "").strip() or None,
+                notes,
+            ),
+        )
+        order_id = cur.fetchone()[0]
+        cur.execute(
+            """
+            INSERT INTO shop_order_items(order_id, product_id, qty, reserved_qty)
+            VALUES (%s,%s,%s,%s)
+            """,
+            (order_id, product_id, qty, qty),
+        )
+        log_action("shop_order.created_reserved", "shop_order", order_id, {"number": number, "qty": qty}, conn)
+        conn.commit()
+        cache.clear()
+    except ValueError as exc:
+        conn.rollback()
+        return str(exc), 400
+    except Exception:
+        conn.rollback()
+        logger.exception("Shop order creation failed.")
+        return "Nie udało się utworzyć zamówienia.", 500
+    finally:
+        conn.close()
+    return redirect("/shop/orders")
+
+
 def form_value(values, index, default=""):
     return values[index] if index < len(values) else default
 
@@ -2008,6 +2267,7 @@ def create_receipt(forced_warehouse=None):
                 (doc_id, target_id, item["qty"], item["warehouse"], package_id,
                  item["package"] or None, item["price_netto"], item["price_brutto"]),
             )
+        log_action("document.receipt_created", "issue_doc", doc_id, {"doc_number": doc_number, "items": len(resolved)}, conn)
         conn.commit()
         cache.clear()
         return redirect(f"/doc/{doc_id}")
@@ -2153,7 +2413,7 @@ def create_issue(forced_warehouse=None):
                 (doc_id, item["product_id"], item["qty"], item["warehouse"], package_id,
                  package_number, item["price_netto"], item["price_brutto"]),
             )
-        save_issue_photos(cur, doc_id, request.files.getlist("photos"), request.form.get("photo_note"))
+        log_action("document.issue_created", "issue_doc", doc_id, {"doc_number": doc_number, "movement_type": movement_type, "items": len(items)}, conn)
         conn.commit()
         cache.clear()
         return redirect(f"/doc/{doc_id}")
@@ -3009,6 +3269,7 @@ def void_document(document_id):
             "UPDATE issue_docs SET voided_at=NOW(), voided_by=%s WHERE id=%s",
             (session.get("user"), document_id),
         )
+        log_action("document.voided", "issue_doc", document_id, {"movement_type": movement_type, "doc_number": document[1]}, conn)
         conn.commit()
         cache.clear()
         return redirect(f"/doc/{document_id}")

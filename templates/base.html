@@ -181,14 +181,13 @@ input:focus {
             {% if session.get('user') %}
             <a href="/">Start</a>
             <a href="/dashboard">Dashboard</a>
-            <a href="/magazyny">Magazyny</a>
-            <a href="/przyjecie">Przyjęcie</a>
-            <a href="/wydanie">Wydanie</a>
-            <a href="/sklep">Sklep internetowy</a>
-            {% if session.get('role') in ['admin', 'accounting'] %}<a href="/ksiegowosc">Księgowość</a>{% endif %}
-            <a href="/inwestycja-suwaj">Inwestycja Suwaj</a>
-            <a href="/historia">Historia</a>
-            <a href="/report">Raport dzienny</a>
+            {% if can('inventory') %}<a href="/magazyny">Magazyny</a>{% endif %}
+            {% if can('receive') %}<a href="/przyjecie">Przyjęcie</a>{% endif %}
+            {% if can('issue') %}<a href="/wydanie">Wydanie</a>{% endif %}
+            {% if can('inventory') %}<a href="/inwestycja-suwaj">Inwestycja Suwaj</a>{% endif %}
+            {% if can('shop') %}<a href="/shop/orders">Sklep internetowy</a>{% endif %}
+            {% if can('history') %}<a href="/historia">Historia</a>{% endif %}
+            {% if can('reports') %}<a href="/report">Raport dzienny</a>{% endif %}
             {% if session.get('role') == 'admin' %}
             <a href="/users">Użytkownicy</a>
             <a href="/admin/backups">Kopie zapasowe</a>

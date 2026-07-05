@@ -56,9 +56,8 @@ input, select {
         <input name="email" type="email" placeholder="E-mail" maxlength="254" required>
         
         <select name="role">
-            <option value="employee">Pracownik</option>
             <option value="warehouse">Magazynier</option>
-            <option value="shop">Obsługa sklepu</option>
+            <option value="shop">Obsługa sklepu internetowego</option>
             <option value="accounting">Księgowość</option>
             <option value="admin">Administrator</option>
         </select>
@@ -82,7 +81,7 @@ input, select {
         <strong>{{u[2]}} {{u[3]}}</strong>
         <div>{{u[4]}}</div>
         <div class="role">
-            {{ role_labels.get(u[5], u[5]) if role_labels is defined else ('Administrator' if u[5] == 'admin' else 'Pracownik') }}
+            {{ role_labels.get(u[5], u[5]) }}
             · {{ 'aktywne' if u[6] == 'active' else 'zablokowane' }}
         </div>
     </div>
@@ -90,7 +89,6 @@ input, select {
     <div class="actions">
         <form method="POST" action="/update_user_role/{{u[0]}}" style="display:flex; gap:8px; align-items:center;">
             <select name="role">
-                <option value="employee" {% if u[5] == 'employee' %}selected{% endif %}>Pracownik</option>
                 <option value="warehouse" {% if u[5] == 'warehouse' %}selected{% endif %}>Magazynier</option>
                 <option value="shop" {% if u[5] == 'shop' %}selected{% endif %}>Obsługa sklepu</option>
                 <option value="accounting" {% if u[5] == 'accounting' %}selected{% endif %}>Księgowość</option>
