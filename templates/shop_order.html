@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Zamówienie {{ order[1] }}</h2>
+<div class="card" style="margin-bottom:16px;">
+  <p><strong>Klient:</strong> {{ order[3] }} · {{ order[6] }} · {{ order[5] }}</p>
+  <p><strong>Adres:</strong> {{ order[4] }} {% if order[14] %}· NIP: {{ order[14] }}{% endif %}</p>
+  <p><strong>Status:</strong> {{ order[10] }} · <strong>Płatność:</strong> {{ order[9] }} · <strong>List:</strong> {{ order[12] or '' }}</p>
+  <p><strong>Uwagi:</strong> {{ order[13] or '' }}</p>
+</div>
+<div class="card" style="margin-bottom:16px;">
+  <h3>Produkty</h3>
+  <table width="100%"><tr><th>Produkt</th><th>Ilość</th><th>Netto</th><th>Brutto</th><th>VAT</th><th>Magazyn</th><th>Zarezerwowano</th><th>Wydano</th></tr>
+  {% for i in items %}<tr><td>{{ i[3] }}</td><td>{{ i[4] }}</td><td>{{ i[5] }}</td><td>{{ i[6] }}</td><td>{{ i[7] }}%</td><td>{{ i[8] }}</td><td>{{ i[9] }}</td><td>{{ i[10] }}</td></tr>{% endfor %}</table>
+</div>
+
+{% if accounting %}
+<div class="card" style="margin-bottom:16px;">
+  <h3>Panel księgowy</h3>
+  <p><strong>Można wydać:</strong> {{ 'TAK' if can_ship else 'NIE — wymagane opłacenie lub pobranie oraz oznaczenie gotowości do wysyłki' }}</p>
+  <p><strong>Handlowiec prowadzący:</strong> {{ accounting[21] or 'Nieprzypisany' }}</p>
+  <p><strong>Proforma:</strong> {{ accounting[13] or '—' }} · <strong>Faktura:</strong> {{ accounting[14] or '—' }} · <strong>Paragon:</strong> {{ accounting[15] or '—' }}</p>
+  <p><strong>Zapłacono:</strong> {{ '%.2f'|format(accounting[18] or 0) }} · <strong>Pozostało:</strong> {{ '%.2f'|format(accounting[19] or 0) }} · <strong>Sposób:</strong> {{ accounting[6] or '—' }}</p>
+  {% if session.get('role') in ['admin', 'accounting'] %}
+  <form method="POST" action="/ksiegowosc/orders/{{ order[0] }}" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px;">
+    <label><input type="checkbox" name="proforma_issued" {% if accounting[1] %}checked{% endif %}> Proforma wystawiona</label>
+    <label><input type="checkbox" name="reserved_by_proforma" {% if accounting[2] %}checked{% endif %}> Towar zarezerwowany na podstawie proformy</label>
+    <label><input type="checkbox" name="waiting_for_payment" {% if accounting[3] %}checked{% endif %}> Oczekiwanie na płatność</label>
+    <label><input type="checkbox" name="partial_payment" {% if accounting[4] %}checked{% endif %}> Płatność częściowa</label>
+    <label><input type="checkbox" name="paid" {% if accounting[5] %}checked{% endif %}> Zapłacono</label>
+    <label><input type="checkbox" name="invoice_issued" {% if accounting[7] %}checked{% endif %}> Faktura wystawiona</label>
+    <label><input type="checkbox" name="receipt_issued" {% if accounting[8] %}checked{% endif %}> Paragon wystawiony</label>
+    <label><input type="checkbox" name="invoice_sent" {% if accounting[9] %}checked{% endif %}> Faktura wysłana do klienta</label>
+    <label><input type="checkbox" name="document_to_warehouse" {% if accounting[10] %}checked{% endif %}> Dokument przekazany do magazynu</label>
+    <label><input type="checkbox" name="ready_to_ship" {% if accounting[11] %}checked{% endif %}> Zamówienie gotowe do wysyłki</label>
+    <label><input type="checkbox" name="settled" {% if accounting[12] %}checked{% endif %}> Zamówienie rozliczone</label>
+    <input name="salesperson" placeholder="Handlowiec prowadzący" value="{{ accounting[21] or '' }}">
+    <select name="payment_method"><option value="">Sposób płatności</option>{% for m in payment_methods %}<option {% if accounting[6] == m %}selected{% endif %}>{{ m }}</option>{% endfor %}</select>
+    <input name="proforma_number" placeholder="Nr proformy" value="{{ accounting[13] or '' }}">
+    <input name="invoice_number" placeholder="Nr faktury" value="{{ accounting[14] or '' }}">
+    <input name="receipt_number" placeholder="Nr paragonu" value="{{ accounting[15] or '' }}">
+    <input type="date" name="document_issue_date" value="{{ accounting[16] or '' }}">
+    <input type="date" name="payment_received_date" value="{{ accounting[17] or '' }}">
+    <input name="amount_paid" placeholder="Kwota zapłacona" value="{{ accounting[18] or 0 }}">
+    <input name="amount_due" placeholder="Kwota pozostała" value="{{ accounting[19] or 0 }}">
+    <input name="accounting_notes" placeholder="Uwagi księgowości" value="{{ accounting[20] or '' }}" style="grid-column:1/-1;">
+    <button>Zapisz księgowość</button>
+  </form>
+  {% endif %}
+</div>
+{% endif %}
+
+<div class="card" style="margin-bottom:16px;">
+  <h3>Proces</h3>
+  <form method="POST" action="/sklep/orders/{{ order[0] }}/status" style="display:flex;gap:8px;">
+    <select name="status">{% for s in statuses %}<option {% if order[10] == s %}selected{% endif %}>{{ s }}</option>{% endfor %}</select>
+    <input name="tracking_number" placeholder="Numer listu przewozowego" value="{{ order[12] or '' }}">
+    <button>Zmień status</button>
+  </form>
+</div>
+<div class="card" style="margin-bottom:16px;">
+  <h3>Dokument sprzedaży</h3>
+  {% if document %}
+    <p>Numer: {{ document[1] }} · {{ 'zatwierdzony' if document[3] else 'do edycji/zatwierdzenia' }}</p>
+    <form method="POST" action="/sklep/orders/{{ order[0] }}/document" style="display:flex;gap:8px;">
+      <input name="sales_document_number" placeholder="Numer faktury lub paragonu" value="{{ order[11] or document[1] }}">
+      <button>Zatwierdź dokument</button>
+    </form>
+    <p><a href="/sklep/documents/{{ document[0] }}/pdf">Pobierz PDF</a> · <a href="/sklep/documents/{{ document[0] }}/docx">Pobierz DOCX</a></p>
+  {% endif %}
+</div>
+<div class="card"><h3>Historia zmian</h3>{% for h in history %}<p>{{ h[3] }} · <strong>{{ h[1] }}</strong> · {{ h[0] }} · {{ h[2] }}</p>{% endfor %}</div>
+{% endblock %}

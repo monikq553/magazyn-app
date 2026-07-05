@@ -14,6 +14,7 @@ import io
 import pandas as pd
 from urllib import request as urlrequest
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from dotenv import load_dotenv
 from reportlab.lib.pagesizes import A4
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib import colors
@@ -30,6 +31,8 @@ from backup_service import (
     parse_backup,
     restore_database,
 )
+
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -474,7 +477,7 @@ def run_db_migrations():
             END IF;
             IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='users_role_valid') THEN
                 ALTER TABLE users
-                ADD CONSTRAINT users_role_valid CHECK (role IN ('admin', 'employee'));
+                ADD CONSTRAINT users_role_valid CHECK (role IN ('admin', 'employee', 'warehouse', 'shop', 'accounting'));
             END IF;
             IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='users_status_valid') THEN
                 ALTER TABLE users
@@ -495,6 +498,143 @@ def run_db_migrations():
         error TEXT
     );
     """)
+    cur.execute("ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_valid")
+    cur.execute("""
+        ALTER TABLE users
+        ADD CONSTRAINT users_role_valid
+        CHECK (role IN ('admin', 'employee', 'warehouse', 'shop', 'accounting'))
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS shop_orders(
+        id SERIAL PRIMARY KEY,
+        order_number TEXT UNIQUE NOT NULL,
+        order_date DATE NOT NULL,
+        customer_name TEXT NOT NULL,
+        delivery_address TEXT NOT NULL,
+        phone TEXT,
+        email TEXT,
+        shipping_cost REAL NOT NULL DEFAULT 0,
+        payment_method TEXT,
+        payment_status TEXT NOT NULL DEFAULT 'Oczekuje na płatność',
+        status TEXT NOT NULL DEFAULT 'Nowe zamówienie',
+        sales_document_number TEXT,
+        tracking_number TEXT,
+        notes TEXT,
+        nip TEXT,
+        document_confirmed BOOLEAN NOT NULL DEFAULT FALSE,
+        created_by TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS shop_order_items(
+        id SERIAL PRIMARY KEY,
+        order_id INTEGER NOT NULL REFERENCES shop_orders(id) ON DELETE CASCADE,
+        product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE RESTRICT,
+        product_name TEXT NOT NULL,
+        qty REAL NOT NULL CHECK (qty > 0),
+        price_netto REAL NOT NULL DEFAULT 0,
+        price_brutto REAL NOT NULL DEFAULT 0,
+        vat REAL NOT NULL DEFAULT 0,
+        warehouse TEXT NOT NULL,
+        reserved_qty REAL NOT NULL DEFAULT 0,
+        issued_qty REAL NOT NULL DEFAULT 0
+    );
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS shop_order_history(
+        id SERIAL PRIMARY KEY,
+        order_id INTEGER NOT NULL REFERENCES shop_orders(id) ON DELETE CASCADE,
+        user_email TEXT NOT NULL,
+        action TEXT NOT NULL,
+        details TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS shop_notifications(
+        id SERIAL PRIMARY KEY,
+        order_id INTEGER REFERENCES shop_orders(id) ON DELETE CASCADE,
+        type TEXT NOT NULL,
+        message TEXT NOT NULL,
+        resolved BOOLEAN NOT NULL DEFAULT FALSE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS shop_sales_documents(
+        id SERIAL PRIMARY KEY,
+        order_id INTEGER NOT NULL UNIQUE REFERENCES shop_orders(id) ON DELETE CASCADE,
+        document_number TEXT NOT NULL,
+        editable_data JSONB NOT NULL,
+        docx BYTEA,
+        pdf BYTEA,
+        confirmed BOOLEAN NOT NULL DEFAULT FALSE,
+        created_by TEXT,
+        confirmed_by TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        confirmed_at TIMESTAMPTZ
+    );
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS shop_accounting(
+        order_id INTEGER PRIMARY KEY REFERENCES shop_orders(id) ON DELETE CASCADE,
+        proforma_issued BOOLEAN NOT NULL DEFAULT FALSE,
+        reserved_by_proforma BOOLEAN NOT NULL DEFAULT FALSE,
+        waiting_for_payment BOOLEAN NOT NULL DEFAULT FALSE,
+        partial_payment BOOLEAN NOT NULL DEFAULT FALSE,
+        paid BOOLEAN NOT NULL DEFAULT FALSE,
+        payment_method TEXT,
+        invoice_issued BOOLEAN NOT NULL DEFAULT FALSE,
+        receipt_issued BOOLEAN NOT NULL DEFAULT FALSE,
+        invoice_sent BOOLEAN NOT NULL DEFAULT FALSE,
+        document_to_warehouse BOOLEAN NOT NULL DEFAULT FALSE,
+        ready_to_ship BOOLEAN NOT NULL DEFAULT FALSE,
+        settled BOOLEAN NOT NULL DEFAULT FALSE,
+        proforma_number TEXT,
+        invoice_number TEXT,
+        receipt_number TEXT,
+        document_issue_date DATE,
+        payment_received_date DATE,
+        amount_paid REAL NOT NULL DEFAULT 0,
+        amount_due REAL NOT NULL DEFAULT 0,
+        accounting_notes TEXT,
+        salesperson TEXT,
+        updated_by TEXT,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_shop_accounting_filters ON shop_accounting(payment_method, proforma_number, invoice_number, receipt_number, salesperson)")
+
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_shop_orders_search ON shop_orders(lower(order_number), lower(customer_name), lower(status), order_date)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_shop_items_product ON shop_order_items(product_id)")
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS issue_doc_photos(
+        id SERIAL PRIMARY KEY,
+        doc_id INTEGER NOT NULL REFERENCES issue_docs(id) ON DELETE CASCADE,
+        filename TEXT NOT NULL,
+        content_type TEXT NOT NULL,
+        data BYTEA NOT NULL,
+        note TEXT,
+        added_by TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS issue_doc_history(
+        id SERIAL PRIMARY KEY,
+        doc_id INTEGER NOT NULL REFERENCES issue_docs(id) ON DELETE CASCADE,
+        user_email TEXT NOT NULL,
+        action TEXT NOT NULL,
+        details TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_issue_doc_photos_doc ON issue_doc_photos(doc_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_issue_doc_history_doc ON issue_doc_history(doc_id)")
+
     cur.execute("""
     CREATE TABLE IF NOT EXISTS system_settings(
         key TEXT PRIMARY KEY,
@@ -560,6 +700,245 @@ def parse_nonnegative_number(value, field_name):
 
 def close_with_rollback(conn):
     conn.rollback()
+
+ALLOWED_ISSUE_PHOTO_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
+MAX_ISSUE_PHOTO_BYTES = 5 * 1024 * 1024
+
+
+def is_issue_document(movement_type, doc_number):
+    movement = (movement_type or "").upper()
+    number = (doc_number or "").upper()
+    return movement in {"WZ", "RW"} or number.startswith("WZ") or number.startswith("RW")
+
+
+def issue_doc_history(cur, doc_id, action, details=""):
+    cur.execute(
+        """
+        INSERT INTO issue_doc_history(doc_id, user_email, action, details)
+        VALUES (%s,%s,%s,%s)
+        """,
+        (doc_id, session.get("user", "system"), action, details),
+    )
+
+
+def clean_photo_filename(filename):
+    filename = (filename or "zdjecie").rsplit("/", 1)[-1].rsplit("\\", 1)[-1].strip()
+    return filename[:180] or "zdjecie"
+
+
+def save_issue_photos(cur, doc_id, uploads, note=""):
+    saved = 0
+    for upload in uploads:
+        if not upload or not upload.filename:
+            continue
+        content_type = (upload.mimetype or "").lower()
+        if content_type not in ALLOWED_ISSUE_PHOTO_TYPES:
+            raise ValueError("Dozwolone są tylko zdjęcia JPG, PNG, WEBP lub GIF.")
+        data = upload.read()
+        if not data:
+            continue
+        if len(data) > MAX_ISSUE_PHOTO_BYTES:
+            raise ValueError("Jedno zdjęcie może mieć maksymalnie 5 MB.")
+        cur.execute(
+            """
+            INSERT INTO issue_doc_photos(doc_id, filename, content_type, data, note, added_by)
+            VALUES (%s,%s,%s,%s,%s,%s)
+            """,
+            (
+                doc_id,
+                clean_photo_filename(upload.filename),
+                content_type,
+                psycopg2.Binary(data),
+                (note or "").strip()[:500],
+                session.get("user", "system"),
+            ),
+        )
+        saved += 1
+    if saved:
+        issue_doc_history(cur, doc_id, "dodano zdjęcia", f"Liczba zdjęć: {saved}")
+    return saved
+
+SHOP_ROLES = {"admin", "employee", "warehouse", "shop", "accounting"}
+SHOP_STATUS_FLOW = [
+    "Nowe zamówienie", "Przyjęte", "Oczekuje na płatność", "Opłacone",
+    "Towar zarezerwowany", "Dokument wystawiony", "W trakcie pakowania",
+    "Spakowane", "Wysłane", "Dostarczone", "Zakończone", "Anulowane",
+]
+SHOP_ROLE_LABELS = {
+    "admin": "Administrator", "employee": "Pracownik", "warehouse": "Magazynier",
+    "shop": "Obsługa sklepu internetowego", "accounting": "Księgowość",
+}
+
+ACCOUNTING_PAYMENT_METHODS = ["Przelew", "Gotówka", "Karta", "BLIK", "Autopay", "Pobranie", "Inny"]
+ACCOUNTING_BOOL_FIELDS = [
+    "proforma_issued", "reserved_by_proforma", "waiting_for_payment", "partial_payment",
+    "paid", "invoice_issued", "receipt_issued", "invoice_sent", "document_to_warehouse",
+    "ready_to_ship", "settled",
+]
+ACCOUNTING_FIELD_LABELS = {
+    "proforma_issued": "Proforma wystawiona",
+    "reserved_by_proforma": "Towar zarezerwowany na podstawie proformy",
+    "waiting_for_payment": "Oczekiwanie na płatność",
+    "partial_payment": "Płatność częściowa",
+    "paid": "Zapłacono",
+    "invoice_issued": "Faktura wystawiona",
+    "receipt_issued": "Paragon wystawiony",
+    "invoice_sent": "Faktura wysłana do klienta",
+    "document_to_warehouse": "Dokument przekazany do magazynu",
+    "ready_to_ship": "Zamówienie gotowe do wysyłki",
+    "settled": "Zamówienie rozliczone",
+}
+
+
+def accounting_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if 'user' not in session:
+            return redirect('/login')
+        if session.get('role') not in {'admin', 'accounting'}:
+            return "Brak uprawnień", 403
+        return f(*args, **kwargs)
+    return decorated
+
+
+def order_can_be_shipped(accounting_row):
+    if not accounting_row:
+        return False
+    payment_method = accounting_row[6]
+    paid = bool(accounting_row[5])
+    ready_to_ship = bool(accounting_row[11])
+    return ready_to_ship and (paid or payment_method == "Pobranie")
+
+
+def ensure_shop_accounting_row(cur, order_id):
+    cur.execute(
+        """
+        INSERT INTO shop_accounting(order_id, amount_due)
+        SELECT o.id, COALESCE(SUM(i.qty*i.price_brutto),0)+o.shipping_cost
+        FROM shop_orders o
+        LEFT JOIN shop_order_items i ON i.order_id=o.id
+        WHERE o.id=%s
+        GROUP BY o.id
+        ON CONFLICT (order_id) DO NOTHING
+        """,
+        (order_id,),
+    )
+
+
+def sync_accounting_payment_status(cur, order_id):
+    cur.execute("SELECT paid, partial_payment, waiting_for_payment, payment_method FROM shop_accounting WHERE order_id=%s", (order_id,))
+    row = cur.fetchone()
+    if not row:
+        return
+    if row[0]:
+        status = "Opłacone"
+    elif row[1]:
+        status = "Płatność częściowa"
+    elif row[2]:
+        status = "Oczekuje na płatność"
+    elif row[3] == "Pobranie":
+        status = "Pobranie"
+    else:
+        status = "Oczekuje na płatność"
+    cur.execute("UPDATE shop_orders SET payment_status=%s, payment_method=COALESCE(NULLIF((SELECT payment_method FROM shop_accounting WHERE order_id=%s), ''), payment_method), updated_at=NOW() WHERE id=%s", (status, order_id, order_id))
+
+
+def current_user_role():
+    return session.get("role", "employee")
+
+
+def can_shop(action):
+    role = current_user_role()
+    if role == "admin":
+        return True
+    return action in {
+        "shop_edit": {"shop"},
+        "warehouse": {"warehouse"},
+        "accounting": {"accounting"},
+        "view": {"shop", "warehouse", "accounting"},
+    }.get(action, set())
+
+
+def require_shop_permission(action):
+    if not can_shop(action):
+        return "Brak uprawnień do tej funkcji modułu sklepu internetowego.", 403
+    return None
+
+
+def shop_history(cur, order_id, action, details=""):
+    cur.execute(
+        """
+        INSERT INTO shop_order_history(order_id, user_email, action, details)
+        VALUES (%s,%s,%s,%s)
+        """,
+        (order_id, session.get("user", "system"), action, details),
+    )
+
+
+def create_shop_document_payload(order, items):
+    subtotal_net = sum((item[5] or 0) * (item[4] or 0) for item in items)
+    subtotal_gross = sum((item[6] or 0) * (item[4] or 0) for item in items)
+    shipping = order[8] or 0
+    return {
+        "document_number": order[11] or f"DS/{order[0]}/{datetime.now().year}",
+        "date": order[2],
+        "receipt_or_invoice": order[11] or "Do uzupełnienia",
+        "seller": "Primadera",
+        "buyer": order[3],
+        "address": order[4],
+        "nip": order[14] or "",
+        "items": [
+            {
+                "name": item[3], "qty": item[4], "net": item[5], "vat": item[7],
+                "gross": item[6], "total_gross": (item[6] or 0) * (item[4] or 0),
+            }
+            for item in items
+        ],
+        "shipping": shipping,
+        "total_net": subtotal_net,
+        "total_gross": subtotal_gross + shipping,
+        "notes": order[13] or "",
+    }
+
+
+def simple_docx_bytes(payload):
+    import zipfile
+    from xml.sax.saxutils import escape
+    lines = [
+        "Dokument sprzedaży", f"Numer: {payload['document_number']}", f"Data: {payload['date']}",
+        f"Paragon/Faktura: {payload['receipt_or_invoice']}", f"Sprzedawca: {payload['seller']}",
+        f"Nabywca: {payload['buyer']}", f"Adres: {payload['address']}", f"NIP: {payload['nip']}",
+        "Produkty:",
+    ]
+    for item in payload["items"]:
+        lines.append(f"{item['name']} | ilość {item['qty']} | netto {item['net']:.2f} | VAT {item['vat']:.0f}% | brutto {item['total_gross']:.2f}")
+    lines += [f"Wysyłka: {payload['shipping']:.2f}", f"Razem brutto: {payload['total_gross']:.2f}", f"Uwagi: {payload['notes']}"]
+    paragraphs = "".join(f"<w:p><w:r><w:t>{escape(str(line))}</w:t></w:r></w:p>" for line in lines)
+    document_xml = f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{paragraphs}<w:sectPr/></w:body></w:document>'''
+    content_types = '''<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'''
+    rels = '''<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'''
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("[Content_Types].xml", content_types)
+        zf.writestr("_rels/.rels", rels)
+        zf.writestr("word/document.xml", document_xml)
+    return buffer.getvalue()
+
+
+def shop_pdf_bytes(payload):
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4)
+    styles = getSampleStyleSheet()
+    story = [Paragraph("Dokument sprzedaży", styles["Title"]), Spacer(1, 12)]
+    for key, label in [("document_number", "Numer"), ("date", "Data"), ("receipt_or_invoice", "Paragon/Faktura"), ("buyer", "Nabywca"), ("address", "Adres"), ("nip", "NIP")]:
+        story.append(Paragraph(f"<b>{label}:</b> {payload.get(key) or ''}", styles["Normal"]))
+    data = [["Produkt", "Ilość", "Netto", "VAT", "Brutto"]] + [[i["name"], i["qty"], f"{i['net']:.2f}", f"{i['vat']:.0f}%", f"{i['total_gross']:.2f}"] for i in payload["items"]]
+    table = Table(data, repeatRows=1)
+    table.setStyle(TableStyle([("BACKGROUND", (0,0), (-1,0), colors.lightgrey), ("GRID", (0,0), (-1,-1), 0.5, colors.grey)]))
+    story += [Spacer(1, 12), table, Spacer(1, 12), Paragraph(f"Wysyłka: {payload['shipping']:.2f}", styles["Normal"]), Paragraph(f"Razem brutto: {payload['total_gross']:.2f}", styles["Heading2"]), Paragraph(f"Uwagi: {payload['notes']}", styles["Normal"])]
+    doc.build(story)
+    return buffer.getvalue()
+
 
 # 🔒 LOGIN REQUIRED
 def login_required(f):
@@ -892,7 +1271,7 @@ def users():
     )
     users_list = cur.fetchall()
     conn.close()
-    return render_template("users.html", users=users_list)
+    return render_template("users.html", users=users_list, role_labels=SHOP_ROLE_LABELS)
 
 
 @app.route('/add_user', methods=['POST'])
@@ -906,7 +1285,7 @@ def add_user():
     if not first_name or not last_name or len(first_name) > 100 or len(last_name) > 100:
         return "Imię i nazwisko są wymagane (maksymalnie 100 znaków).", 400
     role = request.form.get("role", "employee")
-    if role not in {"admin", "employee"}:
+    if role not in SHOP_ROLES:
         return "Nieprawidłowa rola.", 400
     if not FIREBASE_ADMIN_READY:
         return "Firebase Admin nie jest skonfigurowany.", 503
@@ -1005,7 +1384,7 @@ def delete_user(user_id):
 @admin_required
 def update_user_role(user_id):
     new_role = request.form.get('role', 'employee')
-    if new_role not in ('admin', 'employee'):
+    if new_role not in SHOP_ROLES:
         return redirect('/users')
 
     conn = db()
@@ -1118,9 +1497,34 @@ def magazyn(name):
         cur.execute("SELECT * FROM products WHERE warehouse=%s ORDER BY lower(name), id", (name,))
 
     products = cur.fetchall()
+    product_ids = [row[0] for row in products]
+    package_modes = {}
+    if product_ids:
+        cur.execute(
+            """
+            SELECT p.id,
+                   COALESCE(SUM(CASE WHEN pk.status='active' AND pk.qty>0 THEN pk.qty ELSE 0 END),0) AS numbered_qty
+            FROM products p
+            LEFT JOIN packages pk ON pk.product_id=p.id AND pk.warehouse=p.warehouse
+            WHERE p.id = ANY(%s)
+            GROUP BY p.id, p.qty
+            """,
+            (product_ids,),
+        )
+        for product_id, numbered_qty in cur.fetchall():
+            product = next((row for row in products if row[0] == product_id), None)
+            total_qty = product[2] if product else 0
+            has_numbered = (numbered_qty or 0) > 0
+            has_unnumbered = (total_qty or 0) - (numbered_qty or 0) > 1e-9
+            package_modes[product_id] = (
+                "mixed" if has_numbered and has_unnumbered else
+                "numbered" if has_numbered else
+                "unnumbered" if has_unnumbered else
+                "empty"
+            )
     conn.close()
 
-    return render_template("index.html", products=products, warehouse=name)
+    return render_template("index.html", products=products, warehouse=name, package_modes=package_modes)
 
 
 @app.route('/packages/<int:product_id>')
@@ -1128,6 +1532,8 @@ def magazyn(name):
 def packages_for_product(product_id):
     conn = db()
     cur = conn.cursor()
+    cur.execute("SELECT qty FROM products WHERE id=%s", (product_id,))
+    product = cur.fetchone()
     cur.execute(
         """
         SELECT number, qty, status
@@ -1138,8 +1544,10 @@ def packages_for_product(product_id):
         (product_id,),
     )
     packages = cur.fetchall()
+    numbered_qty = sum((row[1] or 0) for row in packages if row[2] == 'active')
+    unnumbered_qty = max((product[0] if product else 0) - numbered_qty, 0)
     conn.close()
-    return render_template("packages.html", packages=packages)
+    return render_template("packages.html", packages=packages, unnumbered_qty=unnumbered_qty)
 
 
 @app.route('/api/packages/lookup')
@@ -1439,6 +1847,7 @@ def collect_document_items(forced_warehouse=None, issuing=False):
     quantities = request.form.getlist("qty")
     warehouses = request.form.getlist("warehouse")
     package_values = request.form.getlist("package_id" if issuing else "package_number")
+    has_package_values = request.form.getlist("has_package_number")
     netto_values = request.form.getlist("price_netto")
     brutto_values = request.form.getlist("price_brutto")
     items = []
@@ -1457,13 +1866,19 @@ def collect_document_items(forced_warehouse=None, issuing=False):
         price_netto = parse_nonnegative_number(form_value(netto_values, index), "Cena netto")
         price_brutto = parse_nonnegative_number(form_value(brutto_values, index), "Cena brutto")
         package_value = form_value(package_values, index).strip()
+        has_package_number = form_value(has_package_values, index) == "1"
         if not issuing and len(package_value) > 100:
             raise ValueError("Numer paczki może mieć maksymalnie 100 znaków.")
+        if not issuing and has_package_number and not package_value:
+            raise ValueError("Zaznaczono, że towar posiada numer paczki — wpisz numer paczki.")
+        if not issuing and not has_package_number:
+            package_value = ""
         items.append({
             "product_id": product_id,
             "warehouse": warehouse,
             "qty": qty,
             "package": package_value,
+            "has_package_number": has_package_number,
             "price_netto": price_netto,
             "price_brutto": price_brutto,
         })
@@ -1708,14 +2123,16 @@ def create_issue(forced_warehouse=None):
             else:
                 cur.execute(
                     """
-                    SELECT 1 FROM packages
+                    SELECT COALESCE(SUM(qty),0) FROM packages
                     WHERE product_id=%s AND warehouse=%s AND status='active' AND qty>0
-                    LIMIT 1
                     """,
                     (item["product_id"], item["warehouse"]),
                 )
-                if cur.fetchone():
-                    raise ValueError("Ten produkt jest ewidencjonowany w paczkach. Wybierz numer paczki.")
+                numbered_qty = cur.fetchone()[0] or 0
+                cur.execute("SELECT qty FROM products WHERE id=%s AND warehouse=%s", (item["product_id"], item["warehouse"]))
+                total_qty = (cur.fetchone() or (0,))[0] or 0
+                if total_qty - numbered_qty + 1e-9 < item["qty"]:
+                    raise ValueError("Brak wystarczającej ilości bez numeru paczki. Wybierz paczkę albo zmniejsz ilość.")
 
             cur.execute(
                 """
@@ -1736,6 +2153,7 @@ def create_issue(forced_warehouse=None):
                 (doc_id, item["product_id"], item["qty"], item["warehouse"], package_id,
                  package_number, item["price_netto"], item["price_brutto"]),
             )
+        save_issue_photos(cur, doc_id, request.files.getlist("photos"), request.form.get("photo_note"))
         conn.commit()
         cache.clear()
         return redirect(f"/doc/{doc_id}")
@@ -2398,11 +2816,102 @@ def doc_detail(id):
         WHERE i.doc_id=%s
     """, (id,))
     items = cur.fetchall()
+    issue_document = is_issue_document(doc[7] if len(doc) > 7 else None, doc[5])
+    photos = []
+    history = []
+    if issue_document:
+        cur.execute(
+            """
+            SELECT id, filename, content_type, note, added_by, created_at
+            FROM issue_doc_photos
+            WHERE doc_id=%s
+            ORDER BY created_at DESC, id DESC
+            """,
+            (id,),
+        )
+        photos = cur.fetchall()
+        cur.execute(
+            """
+            SELECT user_email, action, details, created_at
+            FROM issue_doc_history
+            WHERE doc_id=%s
+            ORDER BY created_at DESC, id DESC
+            """,
+            (id,),
+        )
+        history = cur.fetchall()
 
     conn.close()
 
-    return render_template("doc_detail.html", doc=doc, items=items)
+    return render_template(
+        "doc_detail.html",
+        doc=doc,
+        items=items,
+        issue_document=issue_document,
+        photos=photos,
+        history=history,
+    )
 
+
+
+@app.route('/doc/<int:id>/photos', methods=['POST'])
+@login_required
+def add_issue_doc_photos(id):
+    conn = db()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT movement_type, doc_number FROM issue_docs WHERE id=%s", (id,))
+        doc = cur.fetchone()
+        if not doc:
+            return "Nie znaleziono dokumentu.", 404
+        if not is_issue_document(doc[0], doc[1]):
+            return "Zdjęcia można dodawać tylko do dokumentów WZ/RW.", 400
+        saved = save_issue_photos(cur, id, request.files.getlist("photos"), request.form.get("photo_note"))
+        if not saved:
+            return "Dodaj co najmniej jedno zdjęcie.", 400
+        conn.commit()
+        cache.clear()
+        return redirect(f"/doc/{id}")
+    except ValueError as exc:
+        conn.rollback()
+        return str(exc), 400
+    except Exception:
+        conn.rollback()
+        logger.exception("Issue document photo upload failed.")
+        return "Nie udało się zapisać zdjęć.", 500
+    finally:
+        conn.close()
+
+
+@app.route('/doc-photo/<int:photo_id>')
+@login_required
+def view_issue_doc_photo(photo_id):
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT filename, content_type, data FROM issue_doc_photos WHERE id=%s", (photo_id,))
+    photo = cur.fetchone()
+    conn.close()
+    if not photo:
+        return "Nie znaleziono zdjęcia.", 404
+    return Response(bytes(photo[2]), mimetype=photo[1], headers={"Content-Disposition": f"inline; filename=\"{photo[0]}\""})
+
+
+@app.route('/doc-photo/<int:photo_id>/delete', methods=['POST'])
+@admin_required
+def delete_issue_doc_photo(photo_id):
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT doc_id, filename FROM issue_doc_photos WHERE id=%s FOR UPDATE", (photo_id,))
+    photo = cur.fetchone()
+    if not photo:
+        conn.close()
+        return "Nie znaleziono zdjęcia.", 404
+    cur.execute("DELETE FROM issue_doc_photos WHERE id=%s", (photo_id,))
+    issue_doc_history(cur, photo[0], "usunięto zdjęcie", photo[1])
+    conn.commit()
+    cache.clear()
+    conn.close()
+    return redirect(f"/doc/{photo[0]}")
 
 @app.route('/doc/<int:id>/edit', methods=['POST'])
 @login_required
@@ -2745,6 +3254,310 @@ def restore_backup():
 
 
 # 📊 HISTORIA
+@app.route('/ksiegowosc')
+@login_required
+@accounting_required
+def accounting_dashboard():
+    filters = {
+        "payment_status": (request.args.get("payment_status") or "").strip(),
+        "payment_method": (request.args.get("payment_method") or "").strip(),
+        "proforma_status": (request.args.get("proforma_status") or "").strip(),
+        "document_status": (request.args.get("document_status") or "").strip(),
+        "salesperson": (request.args.get("salesperson") or "").strip(),
+        "client": (request.args.get("client") or "").strip(),
+        "proforma_number": (request.args.get("proforma_number") or "").strip(),
+        "invoice_number": (request.args.get("invoice_number") or "").strip(),
+        "receipt_number": (request.args.get("receipt_number") or "").strip(),
+        "date": (request.args.get("date") or "").strip(),
+    }
+    conn = db(); cur = conn.cursor()
+    cur.execute("SELECT id FROM shop_orders")
+    for (order_id,) in cur.fetchall():
+        ensure_shop_accounting_row(cur, order_id)
+    conn.commit()
+
+    where = []
+    params = []
+    if filters["payment_status"]:
+        where.append("o.payment_status=%s"); params.append(filters["payment_status"])
+    if filters["payment_method"]:
+        where.append("a.payment_method=%s"); params.append(filters["payment_method"])
+    if filters["proforma_status"] == "issued":
+        where.append("a.proforma_issued=TRUE")
+    elif filters["proforma_status"] == "not_issued":
+        where.append("a.proforma_issued=FALSE")
+    if filters["document_status"] == "invoice":
+        where.append("a.invoice_issued=TRUE")
+    elif filters["document_status"] == "receipt":
+        where.append("a.receipt_issued=TRUE")
+    elif filters["document_status"] == "none":
+        where.append("a.invoice_issued=FALSE AND a.receipt_issued=FALSE")
+    for key, column in [("salesperson", "a.salesperson"), ("client", "o.customer_name"), ("proforma_number", "a.proforma_number"), ("invoice_number", "a.invoice_number"), ("receipt_number", "a.receipt_number")]:
+        if filters[key]:
+            where.append(f"lower(COALESCE({column},'')) LIKE %s"); params.append(f"%{filters[key].lower()}%")
+    if filters["date"]:
+        where.append("o.order_date=%s"); params.append(filters["date"])
+    where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+    base = f"""
+        FROM shop_orders o
+        JOIN shop_accounting a ON a.order_id=o.id
+        {where_sql}
+    """
+    cur.execute(f"""
+        SELECT o.id,o.order_number,o.order_date,o.customer_name,o.payment_status,o.status,
+               a.payment_method,a.proforma_number,a.invoice_number,a.receipt_number,
+               a.salesperson,a.amount_due,a.amount_paid,a.invoice_issued,a.receipt_issued,
+               a.ready_to_ship,a.settled,a.paid,a.partial_payment,a.waiting_for_payment
+        {base}
+        ORDER BY o.order_date DESC,o.id DESC
+    """, tuple(params))
+    orders = cur.fetchall()
+    cur.execute(f"SELECT COALESCE(SUM(a.amount_due),0), COALESCE(SUM(a.amount_paid),0), COALESCE(SUM(a.amount_due-a.amount_paid),0), COUNT(*), COUNT(*) FILTER (WHERE a.paid), COUNT(*) FILTER (WHERE NOT a.paid), COUNT(*) FILTER (WHERE a.invoice_issued), COUNT(*) FILTER (WHERE NOT a.invoice_issued) {base}", tuple(params))
+    totals = cur.fetchone()
+    cur.execute(f"SELECT COALESCE(NULLIF(a.salesperson,''),'Nieprzypisany'), COUNT(*), COALESCE(SUM(a.amount_due),0), COALESCE(SUM(a.amount_paid),0) {base} GROUP BY COALESCE(NULLIF(a.salesperson,''),'Nieprzypisany') ORDER BY 1", tuple(params))
+    by_salesperson = cur.fetchall()
+    cur.execute(f"SELECT COALESCE(NULLIF(a.payment_method,''),'Brak'), COUNT(*), COALESCE(SUM(a.amount_due),0), COALESCE(SUM(a.amount_paid),0) {base} GROUP BY COALESCE(NULLIF(a.payment_method,''),'Brak') ORDER BY 1", tuple(params))
+    by_payment = cur.fetchall()
+    cur.execute(f"SELECT o.payment_status, COUNT(*), COALESCE(SUM(a.amount_due),0), COALESCE(SUM(a.amount_paid),0) {base} GROUP BY o.payment_status ORDER BY 1", tuple(params))
+    by_status = cur.fetchall()
+    lists = {
+        "waiting": [o for o in orders if o[19] or o[4] == "Oczekuje na płatność"],
+        "paid_no_invoice": [o for o in orders if o[17] and not o[13]],
+        "invoiced": [o for o in orders if o[13]],
+        "ready_warehouse": [o for o in orders if o[15]],
+        "unsettled": [o for o in orders if not o[16]],
+        "finished": [o for o in orders if o[16] or o[5] in {"Zakończone", "Dostarczone"}],
+    }
+    conn.close()
+    return render_template(
+        "accounting.html",
+        orders=orders,
+        totals=totals,
+        by_salesperson=by_salesperson,
+        by_payment=by_payment,
+        by_status=by_status,
+        lists=lists,
+        payment_methods=ACCOUNTING_PAYMENT_METHODS,
+        filters=filters,
+    )
+
+
+@app.route('/ksiegowosc/orders/<int:order_id>', methods=['POST'])
+@login_required
+@accounting_required
+def update_order_accounting(order_id):
+    conn = db(); cur = conn.cursor()
+    try:
+        ensure_shop_accounting_row(cur, order_id)
+        cur.execute("SELECT * FROM shop_accounting WHERE order_id=%s FOR UPDATE", (order_id,))
+        before = cur.fetchone()
+        if not before:
+            return "Nie znaleziono zamówienia.", 404
+        bool_values = {field: request.form.get(field) == "on" for field in ACCOUNTING_BOOL_FIELDS}
+        payment_method = (request.form.get("payment_method") or "").strip()
+        if payment_method and payment_method not in ACCOUNTING_PAYMENT_METHODS:
+            raise ValueError("Nieprawidłowy sposób płatności.")
+        amount_paid = parse_nonnegative_number(request.form.get("amount_paid"), "Kwota zapłacona")
+        amount_due = parse_nonnegative_number(request.form.get("amount_due"), "Kwota pozostała do zapłaty")
+        salesperson = (request.form.get("salesperson") or "").strip()[:200]
+        cur.execute(
+            """
+            UPDATE shop_accounting SET
+                proforma_issued=%s, reserved_by_proforma=%s, waiting_for_payment=%s,
+                partial_payment=%s, paid=%s, payment_method=%s, invoice_issued=%s,
+                receipt_issued=%s, invoice_sent=%s, document_to_warehouse=%s,
+                ready_to_ship=%s, settled=%s, proforma_number=%s, invoice_number=%s,
+                receipt_number=%s, document_issue_date=NULLIF(%s,'')::date,
+                payment_received_date=NULLIF(%s,'')::date, amount_paid=%s,
+                amount_due=%s, accounting_notes=%s, salesperson=%s,
+                updated_by=%s, updated_at=NOW()
+            WHERE order_id=%s
+            """,
+            (
+                bool_values["proforma_issued"], bool_values["reserved_by_proforma"],
+                bool_values["waiting_for_payment"], bool_values["partial_payment"],
+                bool_values["paid"], payment_method or None, bool_values["invoice_issued"],
+                bool_values["receipt_issued"], bool_values["invoice_sent"],
+                bool_values["document_to_warehouse"], bool_values["ready_to_ship"],
+                bool_values["settled"], request.form.get("proforma_number", "").strip(),
+                request.form.get("invoice_number", "").strip(), request.form.get("receipt_number", "").strip(),
+                request.form.get("document_issue_date", ""), request.form.get("payment_received_date", ""),
+                amount_paid, amount_due, request.form.get("accounting_notes", "").strip(),
+                salesperson, session.get("user"), order_id,
+            ),
+        )
+        sync_accounting_payment_status(cur, order_id)
+        if request.form.get("invoice_number"):
+            cur.execute("UPDATE shop_orders SET sales_document_number=%s WHERE id=%s", (request.form.get("invoice_number").strip(), order_id))
+        labels = []
+        before_bool = dict(zip(ACCOUNTING_BOOL_FIELDS, [before[1], before[2], before[3], before[4], before[5], before[7], before[8], before[9], before[10], before[11], before[12]]))
+        for field in ACCOUNTING_BOOL_FIELDS:
+            if bool(before_bool[field]) != bool_values[field]:
+                labels.append(f"{ACCOUNTING_FIELD_LABELS[field]}: {'tak' if bool_values[field] else 'nie'}")
+        if (before[21] or "") != salesperson:
+            labels.append(f"Handlowiec: {before[21] or 'brak'} → {salesperson or 'brak'}")
+        if labels:
+            shop_history(cur, order_id, "zmieniono księgowość", "; ".join(labels))
+        conn.commit(); cache.clear(); return redirect(f"/sklep/orders/{order_id}")
+    except ValueError as exc:
+        conn.rollback(); return str(exc), 400
+    except Exception:
+        conn.rollback(); logger.exception("Accounting update failed."); return "Nie udało się zapisać księgowości.", 500
+    finally:
+        conn.close()
+
+@app.route('/sklep')
+@login_required
+def shop_orders():
+    denied = require_shop_permission("view")
+    if denied:
+        return denied
+    q = (request.args.get("q") or "").strip()
+    status = (request.args.get("status") or "").strip()
+    conn = db(); cur = conn.cursor()
+    params = []
+    where = []
+    if q:
+        like = f"%{q.lower()}%"
+        where.append("(lower(o.order_number) LIKE %s OR lower(o.customer_name) LIKE %s OR lower(COALESCE(o.tracking_number,'')) LIKE %s OR lower(COALESCE(o.sales_document_number,'')) LIKE %s OR EXISTS (SELECT 1 FROM shop_order_items i WHERE i.order_id=o.id AND lower(i.product_name) LIKE %s))")
+        params += [like]*5
+    if status:
+        where.append("o.status=%s"); params.append(status)
+    sql_where = (" WHERE " + " AND ".join(where)) if where else ""
+    cur.execute(f"SELECT o.id,o.order_number,o.order_date,o.customer_name,o.status,o.payment_status,o.sales_document_number,o.tracking_number,COALESCE(SUM(i.qty*i.price_brutto),0)+o.shipping_cost AS total FROM shop_orders o LEFT JOIN shop_order_items i ON i.order_id=o.id{sql_where} GROUP BY o.id ORDER BY o.order_date DESC,o.id DESC", tuple(params))
+    orders = cur.fetchall()
+    cur.execute("SELECT type,message,created_at FROM shop_notifications WHERE resolved=FALSE ORDER BY created_at DESC LIMIT 8")
+    notifications = cur.fetchall()
+    cur.execute("SELECT COUNT(*), COALESCE(SUM(i.qty*i.price_brutto),0), COUNT(*) FILTER (WHERE o.status NOT IN ('Zakończone','Anulowane')), COUNT(*) FILTER (WHERE o.status='Zakończone'), COUNT(*) FILTER (WHERE o.status='Anulowane') FROM shop_orders o LEFT JOIN shop_order_items i ON i.order_id=o.id")
+    reports = cur.fetchone()
+    cur.execute("SELECT id,name,qty,unit,warehouse,price_netto,vat FROM products ORDER BY warehouse,lower(name),id")
+    products = cur.fetchall()
+    conn.close()
+    return render_template("shop.html", orders=orders, notifications=notifications, reports=reports, products=products, statuses=SHOP_STATUS_FLOW, role_labels=SHOP_ROLE_LABELS)
+
+
+@app.route('/sklep/orders', methods=['POST'])
+@login_required
+def shop_create_order():
+    denied = require_shop_permission("shop_edit")
+    if denied: return denied
+    product_ids = request.form.getlist("product_id"); qtys = request.form.getlist("qty")
+    if not any(product_ids): return "Dodaj co najmniej jeden produkt.", 400
+    conn = db(); cur = conn.cursor()
+    try:
+        order_number = (request.form.get("order_number") or f"SK/{datetime.now().strftime('%Y%m%d%H%M%S')}").strip()
+        order_date = normalized_document_date(request.form.get("date"))
+        shipping = parse_nonnegative_number(request.form.get("shipping_cost"), "Koszt wysyłki")
+        cur.execute("INSERT INTO shop_orders(order_number,order_date,customer_name,delivery_address,phone,email,shipping_cost,payment_method,payment_status,status,sales_document_number,tracking_number,notes,nip,created_by) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'Nowe zamówienie',%s,%s,%s,%s,%s) RETURNING id", (order_number,order_date,request.form.get("customer_name",""),request.form.get("delivery_address",""),request.form.get("phone",""),request.form.get("email",""),shipping,request.form.get("payment_method",""),request.form.get("payment_status","Oczekuje na płatność"),request.form.get("sales_document_number",""),request.form.get("tracking_number",""),request.form.get("notes",""),request.form.get("nip",""),session.get("user")))
+        order_id = cur.fetchone()[0]
+        shop_history(cur, order_id, "utworzono zamówienie", order_number)
+        lacking = []
+        for pid_raw, qty_raw in zip(product_ids, qtys):
+            if not pid_raw: continue
+            pid = int(pid_raw); qty = parse_positive_number(qty_raw)
+            cur.execute("SELECT id,name,qty,warehouse,price_netto,vat FROM products WHERE id=%s FOR UPDATE", (pid,))
+            p = cur.fetchone()
+            if not p: raise ValueError("Wybrany produkt nie istnieje.")
+            available = p[2]
+            if available + 1e-9 < qty: lacking.append(f"{p[1]} ({available})")
+            reserved = qty if available + 1e-9 >= qty else 0
+            cur.execute("INSERT INTO shop_order_items(order_id,product_id,product_name,qty,price_netto,price_brutto,vat,warehouse,reserved_qty) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)", (order_id,pid,p[1],qty,p[4] or 0,(p[4] or 0)*(1+(p[5] or 0)/100),p[5] or 0,p[3],reserved))
+            if reserved:
+                shop_history(cur, order_id, "zarezerwowano towar", f"{p[1]} x {qty}")
+        if lacking:
+            cur.execute("INSERT INTO shop_notifications(order_id,type,message) VALUES (%s,'brak towaru',%s)", (order_id, "Brak towaru: "+", ".join(lacking)))
+        else:
+            cur.execute("UPDATE shop_orders SET status='Towar zarezerwowany' WHERE id=%s", (order_id,))
+            cur.execute("INSERT INTO shop_notifications(order_id,type,message) VALUES (%s,'oczekuje na dokument','Zamówienie oczekuje na dokument sprzedaży')", (order_id,))
+        cur.execute("SELECT id,order_number,order_date,customer_name,delivery_address,phone,email,shipping_cost,payment_method,payment_status,status,sales_document_number,tracking_number,notes,nip FROM shop_orders WHERE id=%s", (order_id,))
+        order = cur.fetchone(); cur.execute("SELECT id,product_id,product_name,qty,price_netto,price_brutto,vat FROM shop_order_items WHERE order_id=%s", (order_id,)); items=cur.fetchall()
+        payload = create_shop_document_payload(order, items)
+        cur.execute("INSERT INTO shop_sales_documents(order_id,document_number,editable_data,docx,pdf,created_by) VALUES (%s,%s,%s,%s,%s,%s)", (order_id,payload['document_number'],json.dumps(payload),psycopg2.Binary(simple_docx_bytes(payload)),psycopg2.Binary(shop_pdf_bytes(payload)),session.get('user')))
+        ensure_shop_accounting_row(cur, order_id)
+        shop_history(cur, order_id, "wygenerowano dokument", payload['document_number'])
+        conn.commit(); cache.clear(); return redirect(f"/sklep/orders/{order_id}")
+    except ValueError as exc:
+        conn.rollback(); return str(exc), 400
+    except Exception:
+        conn.rollback(); logger.exception("Shop order creation failed"); return "Nie udało się utworzyć zamówienia.", 500
+    finally:
+        conn.close()
+
+
+@app.route('/sklep/orders/<int:order_id>')
+@login_required
+def shop_order_detail(order_id):
+    denied = require_shop_permission("view")
+    if denied: return denied
+    conn=db(); cur=conn.cursor()
+    cur.execute("SELECT * FROM shop_orders WHERE id=%s", (order_id,)); order=cur.fetchone()
+    cur.execute("SELECT * FROM shop_order_items WHERE order_id=%s ORDER BY id", (order_id,)); items=cur.fetchall()
+    cur.execute("SELECT id,document_number,editable_data,confirmed FROM shop_sales_documents WHERE order_id=%s", (order_id,)); document=cur.fetchone()
+    ensure_shop_accounting_row(cur, order_id)
+    conn.commit()
+    cur.execute("SELECT * FROM shop_accounting WHERE order_id=%s", (order_id,)); accounting=cur.fetchone()
+    cur.execute("SELECT user_email,action,details,created_at FROM shop_order_history WHERE order_id=%s ORDER BY created_at DESC", (order_id,)); history=cur.fetchall(); conn.close()
+    if not order: return "Nie znaleziono zamówienia.", 404
+    return render_template("shop_order.html", order=order, items=items, document=document, history=history, statuses=SHOP_STATUS_FLOW, accounting=accounting, payment_methods=ACCOUNTING_PAYMENT_METHODS, can_ship=order_can_be_shipped(accounting))
+
+
+@app.route('/sklep/orders/<int:order_id>/status', methods=['POST'])
+@login_required
+def shop_update_status(order_id):
+    status = request.form.get("status")
+    if status not in SHOP_STATUS_FLOW: return "Nieprawidłowy status.", 400
+    action = "warehouse" if status in {"W trakcie pakowania","Spakowane","Wysłane","Dostarczone","Zakończone"} else "shop_edit"
+    denied=require_shop_permission(action)
+    if denied: return denied
+    conn=db(); cur=conn.cursor()
+    try:
+        if status == "Wysłane":
+            ensure_shop_accounting_row(cur, order_id)
+            cur.execute("SELECT * FROM shop_accounting WHERE order_id=%s FOR UPDATE", (order_id,))
+            accounting = cur.fetchone()
+            if not order_can_be_shipped(accounting):
+                raise ValueError("Księgowość nie odblokowała wydania: wymagane opłacenie zamówienia albo pobranie oraz status gotowe do wysyłki.")
+            cur.execute("SELECT product_id,warehouse,qty,issued_qty FROM shop_order_items WHERE order_id=%s FOR UPDATE", (order_id,))
+            for pid, wh, qty, issued in cur.fetchall():
+                delta = qty - (issued or 0)
+                if delta > 0:
+                    cur.execute("UPDATE products SET qty=qty-%s WHERE id=%s AND warehouse=%s AND qty >= %s", (delta,pid,wh,delta))
+                    if cur.rowcount != 1: raise ValueError("Brak stanu magazynowego lub próba podwójnej sprzedaży.")
+                    cur.execute("UPDATE shop_order_items SET issued_qty=qty WHERE order_id=%s AND product_id=%s", (order_id,pid))
+            shop_history(cur, order_id, "wysłano zamówienie", "Towar zdjęty ze stanu")
+        cur.execute("UPDATE shop_orders SET status=%s,tracking_number=COALESCE(NULLIF(%s,''),tracking_number),updated_at=NOW() WHERE id=%s", (status,request.form.get('tracking_number',''),order_id))
+        shop_history(cur, order_id, "zmieniono status", status)
+        if status == "Dokument wystawiony": cur.execute("INSERT INTO shop_notifications(order_id,type,message) VALUES (%s,'gotowe do pakowania','Zamówienie gotowe do pakowania')", (order_id,))
+        if status == "Spakowane": cur.execute("INSERT INTO shop_notifications(order_id,type,message) VALUES (%s,'gotowe do wysyłki','Zamówienie gotowe do wysyłki')", (order_id,))
+        conn.commit(); cache.clear(); return redirect(f"/sklep/orders/{order_id}")
+    except ValueError as exc:
+        conn.rollback(); return str(exc), 400
+    finally: conn.close()
+
+
+@app.route('/sklep/orders/<int:order_id>/document', methods=['POST'])
+@login_required
+def shop_confirm_document(order_id):
+    denied=require_shop_permission("accounting")
+    if denied: return denied
+    number=(request.form.get('sales_document_number') or '').strip()
+    if not number: return "Podaj numer faktury lub paragonu.", 400
+    conn=db(); cur=conn.cursor()
+    cur.execute("UPDATE shop_orders SET sales_document_number=%s,status='Dokument wystawiony',document_confirmed=TRUE WHERE id=%s", (number,order_id))
+    cur.execute("UPDATE shop_sales_documents SET document_number=%s,confirmed=TRUE,confirmed_by=%s,confirmed_at=NOW() WHERE order_id=%s", (number,session.get('user'),order_id))
+    shop_history(cur, order_id, "wystawiono dokument", number)
+    conn.commit(); conn.close(); return redirect(f"/sklep/orders/{order_id}")
+
+
+@app.route('/sklep/documents/<int:doc_id>/<fmt>')
+@login_required
+def shop_download_document(doc_id, fmt):
+    if fmt not in {"pdf","docx"}: return "Nieprawidłowy format.", 400
+    conn=db(); cur=conn.cursor(); cur.execute(f"SELECT document_number,{fmt} FROM shop_sales_documents WHERE id=%s", (doc_id,)); row=cur.fetchone(); conn.close()
+    if not row: return "Nie znaleziono dokumentu.", 404
+    mimetype = "application/pdf" if fmt == "pdf" else "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    return Response(bytes(row[1]), mimetype=mimetype, headers={"Content-Disposition": f"attachment; filename={row[0]}.{fmt}"})
+
 @app.route('/historia')
 @login_required
 @cache.cached(timeout=30, query_string=True)

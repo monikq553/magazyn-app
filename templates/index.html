@@ -87,7 +87,12 @@ input {
 
 <!-- 🔍 WYSZUKIWARKA -->
 <div style="position:relative;">
-    <input type="text" id="search" class="search" placeholder="Szukaj produktu..." onkeyup="showSuggestions()">
+    <input type="text" id="search" class="search" placeholder="Szukaj produktu lub paczkę..." onkeyup="showSuggestions()">
+    <select id="packageFilter" onchange="filterTable()" style="margin-bottom:10px;">
+        <option value="">Z numerem i bez numeru paczki</option>
+        <option value="numbered">Tylko z numerem paczki</option>
+        <option value="unnumbered">Tylko bez numeru paczki</option>
+    </select>
 
     <div id="suggestions" style="
         position:absolute;
@@ -111,11 +116,12 @@ input {
 <th>Ilość</th>
 <th>Jedn.</th>
 <th>Brutto</th>
+<th>Paczki</th>
 <th>Akcja</th>
 </tr>
 
 {% for p in products %}
-<tr>
+<tr data-package-mode="{{ package_modes.get(p[0], 'empty') }}">
 
 <td>
     {% if session.get('role') == 'admin' %}<input type="checkbox" name="selected" value="{{p[0]}}">{% endif %}
@@ -132,6 +138,7 @@ input {
 <td>{{p[2]}}</td>
 <td>{{p[3]}}</td>
 <td>{{ (p[5]*(1+p[6]/100))|round(2) }} zł</td>
+<td>{% set mode = package_modes.get(p[0], 'empty') %}{% if mode == 'numbered' %}z numerem{% elif mode == 'unnumbered' %}bez numeru paczki{% elif mode == 'mixed' %}z numerem i bez numeru{% else %}brak stanu{% endif %}</td>
 
 <td style="display:flex; gap:5px;">
     {% if session.get('role') == 'admin' %}
@@ -237,11 +244,15 @@ function showSuggestions() {
 
 function filterTable() {
     let filter = document.getElementById("search").value.toLowerCase();
+    let packageFilter = document.getElementById("packageFilter").value;
     let rows = document.querySelectorAll("#productsTable tr");
 
     rows.forEach((row, i) => {
         if (i === 0) return;
-        row.style.display = row.innerText.toLowerCase().includes(filter) ? "" : "none";
+        const textMatches = row.innerText.toLowerCase().includes(filter);
+        const mode = row.dataset.packageMode || "empty";
+        const packageMatches = !packageFilter || mode === packageFilter || mode === "mixed";
+        row.style.display = (textMatches && packageMatches) ? "" : "none";
     });
 }
 

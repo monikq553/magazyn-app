@@ -59,7 +59,7 @@ button {
 
 <h2>{{ page_title or "Wydanie (WZ)" }}</h2>
 
-<form method="POST" action="{{ form_action or '/issue_doc' }}">
+<form method="POST" action="{{ form_action or '/issue_doc' }}" enctype="multipart/form-data">
 
 <!-- 🔥 DOKUMENT -->
 <input name="doc_number" placeholder="Numer dokumentu (np. WZ/01)">
@@ -147,6 +147,13 @@ button {
 </div>
 
 <button type="button" class="add" onclick="addItem()">Dodaj pozycję</button>
+
+<hr>
+
+<h3>Zdjęcia wydania</h3>
+<p class="info">Dodaj zdjęcia paczki, towaru, załadunku lub uszkodzeń. Działa na telefonie, tablecie i komputerze.</p>
+<input name="photos" type="file" accept="image/*" multiple>
+<input name="photo_note" placeholder="Opis zdjęć (opcjonalnie)">
 
 <hr>
 
