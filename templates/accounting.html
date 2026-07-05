@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Księgowość</h2>
+<div class="tiles" style="margin-bottom:16px;">
+  <div class="tile"><strong>Suma proform</strong><br>{{ '%.2f'|format(totals[0] or 0) }} zł</div>
+  <div class="tile"><strong>Zapłacono</strong><br>{{ '%.2f'|format(totals[1] or 0) }} zł</div>
+  <div class="tile"><strong>Pozostało</strong><br>{{ '%.2f'|format(totals[2] or 0) }} zł</div>
+  <div class="tile"><strong>Proformy</strong><br>{{ totals[3] or 0 }}</div>
+  <div class="tile"><strong>Opłacone / nieopłacone</strong><br>{{ totals[4] or 0 }} / {{ totals[5] or 0 }}</div>
+  <div class="tile"><strong>Faktura / bez faktury</strong><br>{{ totals[6] or 0 }} / {{ totals[7] or 0 }}</div>
+</div>
+<div class="card" style="margin-bottom:16px;">
+  <h3>Filtry</h3>
+  <form method="GET" action="/ksiegowosc" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;">
+    <input name="client" placeholder="Klient" value="{{ filters.client }}">
+    <input type="date" name="date" value="{{ filters.date }}">
+    <input name="salesperson" placeholder="Handlowiec" value="{{ filters.salesperson }}">
+    <select name="proforma_status"><option value="">Status proformy</option><option value="issued" {% if filters.proforma_status == 'issued' %}selected{% endif %}>Wystawiona</option><option value="not_issued" {% if filters.proforma_status == 'not_issued' %}selected{% endif %}>Niewystawiona</option></select>
+    <select name="payment_status"><option value="">Status płatności</option><option>Oczekuje na płatność</option><option>Płatność częściowa</option><option>Opłacone</option><option>Pobranie</option></select>
+    <select name="payment_method"><option value="">Sposób płatności</option>{% for m in payment_methods %}<option {% if filters.payment_method == m %}selected{% endif %}>{{ m }}</option>{% endfor %}</select>
+    <select name="document_status"><option value="">Faktura/paragon</option><option value="invoice" {% if filters.document_status == 'invoice' %}selected{% endif %}>Faktura</option><option value="receipt" {% if filters.document_status == 'receipt' %}selected{% endif %}>Paragon</option><option value="none" {% if filters.document_status == 'none' %}selected{% endif %}>Brak</option></select>
+    <input name="proforma_number" placeholder="Nr proformy" value="{{ filters.proforma_number }}">
+    <input name="invoice_number" placeholder="Nr faktury" value="{{ filters.invoice_number }}">
+    <input name="receipt_number" placeholder="Nr paragonu" value="{{ filters.receipt_number }}">
+    <button>Filtruj</button>
+  </form>
+</div>
+<div class="card" style="margin-bottom:16px;overflow:auto;">
+  <h3>Lista księgowa</h3>
+  <table width="100%"><tr><th>Zamówienie</th><th>Data</th><th>Klient</th><th>Handlowiec</th><th>Płatność</th><th>Sposób</th><th>Proforma</th><th>Faktura</th><th>Paragon</th><th>Kwota</th><th>Zapłacono</th><th>Do wydania</th></tr>
+  {% for o in orders %}<tr><td><a href="/sklep/orders/{{ o[0] }}">{{ o[1] }}</a></td><td>{{ o[2] }}</td><td>{{ o[3] }}</td><td>{{ o[10] or '—' }}</td><td>{{ o[4] }}</td><td>{{ o[6] or '—' }}</td><td>{{ o[7] or '—' }}</td><td>{{ o[8] or '—' }}</td><td>{{ o[9] or '—' }}</td><td>{{ '%.2f'|format(o[11] or 0) }}</td><td>{{ '%.2f'|format(o[12] or 0) }}</td><td>{{ 'Tak' if o[15] else 'Nie' }}</td></tr>{% endfor %}</table>
+</div>
+<div class="tiles" style="margin-bottom:16px;">
+  <div class="tile"><strong>Według handlowca</strong>{% for r in by_salesperson %}<br>{{ r[0] }}: {{ r[1] }} / {{ '%.2f'|format(r[2] or 0) }} zł{% endfor %}</div>
+  <div class="tile"><strong>Według płatności</strong>{% for r in by_payment %}<br>{{ r[0] }}: {{ r[1] }} / {{ '%.2f'|format(r[2] or 0) }} zł{% endfor %}</div>
+  <div class="tile"><strong>Według statusu</strong>{% for r in by_status %}<br>{{ r[0] }}: {{ r[1] }} / {{ '%.2f'|format(r[2] or 0) }} zł{% endfor %}</div>
+</div>
+{% set titles = {'waiting':'Oczekujące na płatność','paid_no_invoice':'Opłacone, oczekujące na fakturę','invoiced':'Z wystawioną fakturą','ready_warehouse':'Gotowe do przekazania magazynowi','unsettled':'Nierozliczone','finished':'Zakończone'} %}
+{% for key, title in titles.items() %}
+<div class="card" style="margin-bottom:12px;">
+  <h3>{{ title }} ({{ lists[key]|length }})</h3>
+  {% for o in lists[key][:10] %}<p><a href="/sklep/orders/{{ o[0] }}">{{ o[1] }}</a> · {{ o[3] }} · {{ o[4] }} · {{ o[10] or 'bez handlowca' }}</p>{% else %}<p>Brak.</p>{% endfor %}
+</div>
+{% endfor %}
+{% endblock %}

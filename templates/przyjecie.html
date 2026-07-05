@@ -118,7 +118,13 @@ button {
 {% endif %}
 
 <!-- 🔥 NUMER PACZKI -->
-<input name="package_number" maxlength="100" placeholder="Numer paczki (np. PZ-001)">
+<label style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+    <input type="hidden" name="has_package_number" value="0">
+    <input type="checkbox" style="width:auto;margin:0;" onchange="togglePackageNumber(this)">
+    Towar posiada numer paczki
+</label>
+<input name="package_number" maxlength="100" placeholder="Numer paczki (np. PZ-001)" readonly>
+<div class="info package-mode-info">Bez numeru paczki</div>
 
 <!-- 🔥 ILOŚĆ -->
 <input name="qty" type="number" min="0.001" step="0.001" placeholder="Ilość" required>
@@ -213,7 +219,27 @@ function addItem() {
     let div = document.createElement("div");
     div.classList.add("item");
     div.innerHTML = document.querySelector(".item").innerHTML;
+    div.querySelectorAll("input").forEach(input => {
+        if (input.type === "checkbox") input.checked = false;
+        else if (input.type !== "hidden") input.value = "";
+    });
+    const packageInput = div.querySelector("input[name='package_number']");
+    if (packageInput) packageInput.readOnly = true;
+    const modeInfo = div.querySelector(".package-mode-info");
+    if (modeInfo) modeInfo.textContent = "Bez numeru paczki";
     document.getElementById("items").appendChild(div);
+}
+
+function togglePackageNumber(checkbox) {
+    const item = checkbox.closest(".item");
+    const packageInput = item.querySelector("input[name='package_number']");
+    const modeInfo = item.querySelector(".package-mode-info");
+    const hidden = item.querySelector("input[name='has_package_number']");
+    hidden.value = checkbox.checked ? "1" : "0";
+    packageInput.readOnly = !checkbox.checked;
+    packageInput.required = checkbox.checked;
+    if (!checkbox.checked) packageInput.value = "";
+    modeInfo.textContent = checkbox.checked ? "Wymagany numer paczki" : "Bez numeru paczki";
 }
 
 // ❌ USUŃ ITEM
