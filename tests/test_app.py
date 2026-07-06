@@ -357,7 +357,13 @@ class InventoryFlowTests(unittest.TestCase):
         body = response.get_data(as_text=True)
         self.assertIn("Dodaj co najmniej jedną kompletną pozycję dokumentu.", body)
         self.assertIn('id="receiptForm"', body)
-        self.assertIn('id="saveReceipt" type="submit" disabled', body)
+        self.assertIn("novalidate", body)
+        self.assertIn('id="saveReceipt"', body)
+        self.assertIn('aria-disabled="true"', body)
+        self.assertNotIn('id="saveReceipt" type="submit" disabled', body)
+        self.assertIn('id="itemsSummary"', body)
+        self.assertIn("function receiptValidationErrors()", body)
+        self.assertIn("Nie można zapisać dokumentu:", body)
         for field_name in (
             "product_name", "product_id", "warehouse", "unit", "has_package_number",
             "package_number", "qty", "price_netto", "price_brutto",
