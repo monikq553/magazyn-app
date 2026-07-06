@@ -564,11 +564,16 @@ class InventoryFlowTests(unittest.TestCase):
     def test_backup_includes_all_relational_module_tables(self):
         expected = {
             "shop_order_history",
+            "shop_order_stage_history",
             "shop_notifications",
             "shop_sales_documents",
             "shop_accounting",
             "issue_doc_photos",
             "issue_doc_history",
+            "issue_imports",
+            "issue_import_rows",
+            "issue_import_effects",
+            "app_settings",
         }
         self.assertTrue(expected.issubset(BACKUP_TABLES))
 

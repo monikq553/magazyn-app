@@ -1,0 +1,174 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h2>Podgląd importu wydań: {{ run[1] }}</h2>
+
+{% if request.args.get('completed') or run[3] == 'completed' %}
+<div class="card" style="margin-bottom:16px;color:#166534;">
+  <strong>Import zakończony.</strong>
+  Wydania: {{ (run[5] or {}).get('issues', 0) }},
+  zaktualizowano: {{ (run[5] or {}).get('updated', 0) }},
+  pominięto: {{ (run[5] or {}).get('skipped', 0) }}.
+</div>
+{% endif %}
+{% if run[3] == 'undone' %}
+<div class="card" style="margin-bottom:16px;color:#92400e;">
+  Import został cofnięty {{ run[9] }} przez {{ run[10] }}.
+</div>
+{% endif %}
+{% if request.args.get('validation') == 'failed' %}
+<div class="card" style="margin-bottom:16px;color:#b91c1c;">
+  Import nie został wykonany. Popraw oznaczone wiersze i zapisz korekty.
+</div>
+{% endif %}
+{% if request.args.get('commit_error') %}
+<div class="card" style="margin-bottom:16px;color:#b91c1c;">
+  Import został wycofany. {{ (run[6] or ['Sprawdź dane i spróbuj ponownie.'])[0] }}
+</div>
+{% endif %}
+
+<div class="card" style="margin-bottom:18px;">
+  <p><strong>Użytkownik:</strong> {{ run[2] }} · <strong>Status:</strong> {{ run[3] }}</p>
+  <p>
+    Wydanie bez paczki:
+    <strong>{{ 'dozwolone z ogólnego stanu' if allow_general_stock else 'niedozwolone' }}</strong>.
+    Duplikaty są domyślnie pomijane.
+  </p>
+</div>
+
+{% if run[3] == 'draft' %}
+<form method="POST" action="/import-wydan/{{ run[0] }}/mapping">
+  <div class="card" style="margin-bottom:18px;overflow:auto;">
+    <h3>Rozpoznane arkusze i przypisanie kolumn</h3>
+    {% for sheet in run[4] or [] %}
+    {% set sheet_index = loop.index0 %}
+    <details style="margin-bottom:12px;" {% if not sheet.selected %}open{% endif %}>
+      <summary>
+        <strong>{{ sheet.name }}</strong> · {{ sheet.row_count }} wierszy ·
+        {{ 'wybrany' if sheet.selected else 'pominięty' }}
+      </summary>
+      <div style="padding:12px;">
+        <label>
+          <input type="checkbox" name="selected_{{ sheet_index }}" {% if sheet.selected %}checked{% endif %}>
+          Ten arkusz zawiera wydania
+        </label>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:8px;margin-top:10px;">
+          {% for field in fields %}
+          <label>{{ field_labels.get(field, field) }}
+            <select name="map_{{ sheet_index }}_{{ field }}">
+              <option value="">— brak —</option>
+              {% for column in sheet.columns %}
+              <option value="{{ column }}" {% if sheet.mapping.get(field) == column %}selected{% endif %}>{{ column }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          {% endfor %}
+        </div>
+      </div>
+    </details>
+    {% endfor %}
+    <button type="submit">Zapisz przypisanie kolumn</button>
+  </div>
+</form>
+
+<form method="POST" action="/import-wydan/{{ run[0] }}/prepare">
+  <div class="card" style="margin-bottom:18px;overflow:auto;">
+    <h3>Dane przed zapisem</h3>
+    {% for sheet_name, sheet_rows in rows|groupby(1) %}
+    <h4>{{ sheet_name }}</h4>
+    <table style="min-width:1280px;width:100%;border-collapse:collapse;">
+      <tr>
+        <th>Importuj</th><th>Wiersz</th><th>Dane</th>
+        <th>Paczka ręczna</th><th>Duplikat</th><th>Decyzja</th>
+        <th>Walidacja</th><th>Usuń</th>
+      </tr>
+      {% for row in sheet_rows %}
+      {% set data = row[4] or {} %}
+      <tr style="{% if row[8] %}background:#fff7ed;{% endif %}">
+        <td><input type="checkbox" name="included_{{ row[0] }}" {% if row[7] %}checked{% endif %}></td>
+        <td>{{ row[2] }}</td>
+        <td>
+          <div style="display:grid;grid-template-columns:repeat(3,minmax(170px,1fr));gap:6px;">
+            {% for field in fields %}
+            <label style="font-size:12px;">{{ field_labels.get(field, field) }}
+              {% if field == 'unit' %}
+              <select name="row_{{ row[0] }}_{{ field }}">
+                <option value="">—</option>
+                {% for unit in units %}<option {% if data.get(field)|string == unit %}selected{% endif %}>{{ unit }}</option>{% endfor %}
+              </select>
+              {% elif field == 'warehouse' %}
+              <select name="row_{{ row[0] }}_{{ field }}">
+                <option value="">—</option>
+                {% for warehouse in warehouses %}<option {% if data.get(field)|string == warehouse %}selected{% endif %}>{{ warehouse }}</option>{% endfor %}
+              </select>
+              {% else %}
+              <input name="row_{{ row[0] }}_{{ field }}" value="{{ data.get(field, '') }}" style="width:100%;">
+              {% endif %}
+            </label>
+            {% endfor %}
+          </div>
+        </td>
+        <td>
+          <select name="row_{{ row[0] }}_package_id" style="max-width:260px;">
+            <option value="">— z numeru / ogólny stan —</option>
+            {% for package in packages %}
+            <option value="{{ package[0] }}" {% if data.get('package_id')|string == package[0]|string %}selected{% endif %}>
+              {{ package[3] }} · {{ package[4] }} · {{ package[1] }} ({{ package[2] }} {{ package[5] }})
+            </option>
+            {% endfor %}
+          </select>
+        </td>
+        <td>{% if row[5] %}{{ row[5].get('label', 'istnieje') }}{% else %}—{% endif %}</td>
+        <td>
+          <select name="resolution_{{ row[0] }}">
+            <option value="skip" {% if row[6] == 'skip' %}selected{% endif %}>Pomiń</option>
+            <option value="update" {% if row[6] == 'update' %}selected{% endif %}>Aktualizuj</option>
+            <option value="new" {% if row[6] == 'new' %}selected{% endif %}>Dodaj jako nowe wydanie</option>
+          </select>
+        </td>
+        <td style="color:#b91c1c;">{{ (row[8] or [])|join(' ') }}</td>
+        <td>
+          <button type="submit"
+                  formaction="/import-wydan/{{ run[0] }}/rows/{{ row[0] }}/delete"
+                  formmethod="post"
+                  onclick="return confirm('Usunąć ten wiersz z podglądu?');">Usuń</button>
+        </td>
+      </tr>
+      {% endfor %}
+    </table>
+    {% endfor %}
+    <button type="submit">Zapisz korekty i ponownie sprawdź dane</button>
+  </div>
+</form>
+
+<div class="card" style="margin-bottom:18px;">
+  <h3>Dodaj nowy wiersz</h3>
+  <form method="POST" action="/import-wydan/{{ run[0] }}/rows"
+        style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;">
+    {% for field in fields %}
+      {% if field == 'unit' %}
+      <select name="{{ field }}"><option value="">Jednostka</option>{% for unit in units %}<option>{{ unit }}</option>{% endfor %}</select>
+      {% elif field == 'warehouse' %}
+      <select name="{{ field }}"><option value="">Magazyn</option>{% for warehouse in warehouses %}<option>{{ warehouse }}</option>{% endfor %}</select>
+      {% else %}
+      <input name="{{ field }}" placeholder="{{ field_labels.get(field, field) }}">
+      {% endif %}
+    {% endfor %}
+    <select name="package_id">
+      <option value="">Paczka ręczna — brak</option>
+      {% for package in packages %}
+      <option value="{{ package[0] }}">{{ package[3] }} · {{ package[4] }} · {{ package[1] }} ({{ package[2] }})</option>
+      {% endfor %}
+    </select>
+    <button type="submit">Dodaj wiersz</button>
+  </form>
+</div>
+
+<form method="POST" action="/import-wydan/{{ run[0] }}/confirm"
+      onsubmit="return confirm('Utworzyć dokumenty wydań i zmniejszyć stany magazynowe?');">
+  <button type="submit">Zatwierdź i wykonaj import wydań</button>
+</form>
+{% endif %}
+
+<p><a href="/import-wydan">Wróć do historii importów wydań</a></p>
+{% endblock %}

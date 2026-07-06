@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h2>Import wydania towaru z Excela</h2>
+
+{% if request.args.get('undone') %}
+<div class="card" style="margin-bottom:16px;color:#166534;">
+  Ostatni import #{{ request.args.get('undone') }} został cofnięty, a stany magazynowe odtworzone.
+</div>
+{% endif %}
+
+<div class="card" style="margin-bottom:18px;">
+  <h3>Wgraj skoroszyt</h3>
+  <form method="POST" action="/import-wydan/upload" enctype="multipart/form-data">
+    <input type="file" name="excel_file" accept=".xlsx" required>
+    <button type="submit">Rozpoznaj wydania i pokaż podgląd</button>
+  </form>
+  <p style="color:#6b7280;">
+    Wgranie pliku nie zmienia stanów magazynowych. Przed zatwierdzeniem możesz
+    poprawić każdą wartość, przypisać kolumny, wskazać paczkę, dodać albo usunąć wiersz.
+  </p>
+</div>
+
+{% if session.get('role') == 'admin' %}
+<div class="card" style="margin-bottom:18px;">
+  <h3>Ustawienia administratora</h3>
+  <form method="POST" action="/import-wydan/settings">
+    <label>
+      <input type="checkbox" name="allow_general_stock" {% if allow_general_stock %}checked{% endif %}>
+      Pozwól wydawać bez numeru paczki z ogólnego stanu magazynowego
+    </label>
+    <button type="submit">Zapisz ustawienie</button>
+  </form>
+  {% if latest_undo_id %}
+  <form method="POST" action="/import-wydan/undo-last"
+        onsubmit="return confirm('Cofnąć ostatni import #{{ latest_undo_id }} i odtworzyć stany magazynowe?');"
+        style="margin-top:12px;">
+    <button type="submit">Cofnij ostatni import #{{ latest_undo_id }}</button>
+  </form>
+  {% endif %}
+</div>
+{% endif %}
+
+<div class="card" style="overflow:auto;">
+  <h3>Historia importów</h3>
+  <p>
+    <a href="/import-wydan/history.xlsx">Eksport do Excel</a> ·
+    <a href="/import-wydan/history.pdf">Eksport do PDF</a>
+  </p>
+  <table width="100%">
+    <tr>
+      <th>Data</th><th>Plik</th><th>Użytkownik</th><th>Status</th>
+      <th>Wydania</th><th>Błędy</th><th>Pominięte</th><th>Zaktualizowane</th>
+    </tr>
+    {% for item in history %}
+    {% set summary = item[4] or {} %}
+    {% set errors = item[5] or [] %}
+    <tr>
+      <td>{{ item[6] }}</td>
+      <td><a href="/import-wydan/{{ item[0] }}">{{ item[1] }}</a></td>
+      <td>{{ item[2] }}</td>
+      <td>
+        {% if item[3] == 'completed' %}zakończony
+        {% elif item[3] == 'undone' %}cofnięty
+        {% else %}wersja robocza{% endif %}
+      </td>
+      <td>{{ summary.get('issues', 0) }}</td>
+      <td>{{ summary.get('errors', 0) + errors|length }}</td>
+      <td>{{ summary.get('skipped', 0) }}</td>
+      <td>{{ summary.get('updated', 0) }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="8">Brak importów wydań.</td></tr>
+    {% endfor %}
+  </table>
+</div>
+{% endblock %}
