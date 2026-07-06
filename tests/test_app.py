@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import app as warehouse_app
+from werkzeug.datastructures import MultiDict
 from backup_service import (
     BACKUP_FORMAT,
     BACKUP_TABLES,
@@ -69,6 +70,19 @@ class FakeCursor:
         self.rowcount = 0
         if normalized.startswith("select pg_advisory_xact_lock"):
             self.result = (None,)
+        elif normalized.startswith("select * from products order by"):
+            self.result = [
+                (
+                    product_id,
+                    product["name"],
+                    product["qty"],
+                    product["unit"],
+                    product["warehouse"],
+                    product["price"],
+                    product["vat"],
+                )
+                for product_id, product in self.store.products.items()
+            ]
         elif normalized.startswith("select name, unit, price_netto, vat from products"):
             product = self.store.products.get(params[0])
             if product:
@@ -104,7 +118,11 @@ class FakeCursor:
             self.store.docs[params[1]]["number"] = params[0]
             self.rowcount = 1
         elif normalized.startswith("update products set qty=qty+"):
-            qty, price, product_id = params
+            if len(params) == 4:
+                qty, unit, price, product_id = params
+                self.store.products[product_id]["unit"] = unit
+            else:
+                qty, price, product_id = params
             self.store.products[product_id]["qty"] += qty
             self.store.products[product_id]["price"] = price
             self.rowcount = 1
@@ -160,6 +178,9 @@ class FakeCursor:
 
     def fetchone(self):
         return self.result
+
+    def fetchall(self):
+        return list(self.result or [])
 
 
 class InventoryFlowTests(unittest.TestCase):
@@ -240,6 +261,134 @@ class InventoryFlowTests(unittest.TestCase):
         self.assertEqual(self.store.products[1]["qty"], 0)
         self.assertEqual(self.store.packages[1]["qty"], 0)
         self.assertEqual(self.store.packages[1]["status"], "issued")
+
+    def test_receipt_single_item_with_package_number(self):
+        response = self.post(
+            "/receive_doc",
+            {
+                "date": "2026-07-06",
+                "kontrahent": "Dostawca",
+                "product_name": "Deska",
+                "product_id": "1",
+                "warehouse": "Drewno",
+                "unit": "m3",
+                "has_package_number": "1",
+                "package_number": "PZ-PAK-1",
+                "qty": "3",
+                "price_netto": "100",
+                "price_brutto": "123",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(self.store.products[1]["qty"], 3)
+        self.assertEqual(self.store.products[1]["unit"], "m3")
+        self.assertEqual(self.store.products[1]["price"], 100)
+        self.assertEqual(self.store.packages[1]["number"], "PZ-PAK-1")
+
+    def test_receipt_single_item_without_package_number(self):
+        response = self.post(
+            "/receive_doc",
+            {
+                "date": "2026-07-06",
+                "kontrahent": "Dostawca",
+                "product_name": "Deska",
+                "product_id": "1",
+                "warehouse": "Drewno",
+                "unit": "m3",
+                "has_package_number": "0",
+                "package_number": "",
+                "qty": "2",
+                "price_netto": "100",
+                "price_brutto": "123",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(self.store.products[1]["qty"], 2)
+        self.assertEqual(self.store.packages, {})
+        self.assertIsNone(self.store.items[0][5])
+
+    def test_receipt_multiple_items(self):
+        response = self.post(
+            "/receive_doc",
+            MultiDict(
+                [
+                    ("date", "2026-07-06"),
+                    ("kontrahent", "Dostawca"),
+                    ("product_name", "Deska"),
+                    ("product_name", "Deska"),
+                    ("product_id", "1"),
+                    ("product_id", "1"),
+                    ("warehouse", "Drewno"),
+                    ("warehouse", "Drewno"),
+                    ("unit", "m3"),
+                    ("unit", "m3"),
+                    ("has_package_number", "1"),
+                    ("has_package_number", "0"),
+                    ("package_number", "PZ-MULTI-1"),
+                    ("package_number", ""),
+                    ("qty", "4"),
+                    ("qty", "6"),
+                    ("price_netto", "100"),
+                    ("price_netto", "100"),
+                    ("price_brutto", "123"),
+                    ("price_brutto", "123"),
+                ]
+            ),
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(self.store.products[1]["qty"], 10)
+        self.assertEqual(len(self.store.items), 2)
+        self.assertEqual(len(self.store.packages), 1)
+
+    def test_receipt_without_items_returns_form_with_message(self):
+        result = self.post(
+            "/receive_doc",
+            {
+                "date": "2026-07-06",
+                "kontrahent": "Dostawca",
+            },
+        )
+
+        response = warehouse_app.app.make_response(result)
+        self.assertEqual(response.status_code, 400)
+        body = response.get_data(as_text=True)
+        self.assertIn("Dodaj co najmniej jedną kompletną pozycję dokumentu.", body)
+        self.assertIn('id="receiptForm"', body)
+        self.assertIn('id="saveReceipt" type="submit" disabled', body)
+        for field_name in (
+            "product_name", "product_id", "warehouse", "unit", "has_package_number",
+            "package_number", "qty", "price_netto", "price_brutto",
+        ):
+            self.assertIn(f'name="{field_name}"', body)
+        self.assertIn("function updateSaveState()", body)
+
+    def test_receipt_checked_package_without_number_returns_form_with_message(self):
+        result = self.post(
+            "/receive_doc",
+            {
+                "date": "2026-07-06",
+                "kontrahent": "Dostawca",
+                "product_name": "Deska",
+                "product_id": "1",
+                "warehouse": "Drewno",
+                "unit": "m3",
+                "has_package_number": "1",
+                "package_number": "",
+                "qty": "3",
+                "price_netto": "100",
+                "price_brutto": "123",
+            },
+        )
+
+        response = warehouse_app.app.make_response(result)
+        self.assertEqual(response.status_code, 400)
+        body = response.get_data(as_text=True)
+        self.assertIn("wpisz numer paczki", body)
+        self.assertIn('value="Deska"', body)
+        self.assertIn("checked", body)
 
     def test_non_finite_and_negative_quantities_are_rejected(self):
         for value in ("0", "-1", "nan", "inf", ""):

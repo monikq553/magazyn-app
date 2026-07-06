@@ -44,6 +44,16 @@ from backup_service import (
     parse_backup,
     restore_database,
 )
+from general_import import (
+    ENTITY_FIELDS,
+    ENTITY_GROUPS,
+    ENTITY_LABELS,
+    FIELD_LABELS,
+    duplicate_identity,
+    normalize_row as normalize_import_row,
+    parse_workbook,
+    validate_row as validate_import_row,
+)
 
 load_dotenv()
 
@@ -873,6 +883,54 @@ def run_db_migrations():
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
     """)
+    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS can_import_warehouse BOOLEAN NOT NULL DEFAULT FALSE")
+    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS can_import_accounting BOOLEAN NOT NULL DEFAULT FALSE")
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS contractors(
+        id SERIAL PRIMARY KEY,
+        name TEXT NOT NULL,
+        nip TEXT,
+        email TEXT,
+        phone TEXT,
+        address TEXT,
+        active BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_contractors_name ON contractors(lower(name))")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_contractors_nip ON contractors(nip)")
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS general_imports(
+        id SERIAL PRIMARY KEY,
+        filename TEXT NOT NULL,
+        imported_by TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'draft',
+        detected_sheets JSONB NOT NULL DEFAULT '[]'::jsonb,
+        summary JSONB NOT NULL DEFAULT '{}'::jsonb,
+        errors JSONB NOT NULL DEFAULT '[]'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        completed_at TIMESTAMPTZ
+    );
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS general_import_rows(
+        id SERIAL PRIMARY KEY,
+        import_id INTEGER NOT NULL REFERENCES general_imports(id) ON DELETE CASCADE,
+        sheet_name TEXT NOT NULL,
+        row_number INTEGER NOT NULL,
+        entity_type TEXT NOT NULL,
+        source_data JSONB NOT NULL DEFAULT '{}'::jsonb,
+        normalized_data JSONB NOT NULL DEFAULT '{}'::jsonb,
+        duplicate_data JSONB,
+        resolution TEXT NOT NULL DEFAULT 'new',
+        included BOOLEAN NOT NULL DEFAULT TRUE,
+        validation_errors JSONB NOT NULL DEFAULT '[]'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_general_import_rows_import ON general_import_rows(import_id, id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_general_imports_created ON general_imports(created_at DESC)")
 
     conn.commit()
     conn.close()
@@ -1222,6 +1280,101 @@ def permission_required(permission):
     return outer
 
 
+def general_import_groups():
+    if session.get("role") == "admin":
+        return {"warehouse", "accounting"}
+    groups = set()
+    if session.get("role") == "warehouse" and session.get("can_import_warehouse"):
+        groups.add("warehouse")
+    if session.get("role") == "accounting" and session.get("can_import_accounting"):
+        groups.add("accounting")
+    return groups
+
+
+def import_access_error():
+    if not general_import_groups():
+        return "Brak uprawnień do importu ogólnego.", 403
+    return None
+
+
+def import_run_allowed(run):
+    return bool(
+        run
+        and (
+            session.get("role") == "admin"
+            or str(run[2] or "").casefold() == str(session.get("user") or "").casefold()
+        )
+    )
+
+
+def detect_import_duplicate(cur, entity_type, data):
+    if entity_type == "product":
+        cur.execute(
+            """
+            SELECT id,name,qty,unit,warehouse FROM products
+            WHERE lower(name)=lower(%s) AND warehouse=%s
+            ORDER BY id LIMIT 1
+            """,
+            (str(data.get("name") or "").strip(), str(data.get("warehouse") or "").strip()),
+        )
+    elif entity_type == "package":
+        cur.execute(
+            """
+            SELECT id,number,qty,warehouse FROM packages
+            WHERE lower(number)=lower(%s) AND warehouse=%s
+            ORDER BY id LIMIT 1
+            """,
+            (
+                str(data.get("package_number") or "").strip(),
+                str(data.get("warehouse") or "").strip(),
+            ),
+        )
+    elif entity_type in {"issue", "receipt", "document"}:
+        number = str(data.get("doc_number") or "").strip()
+        if not number:
+            return None
+        cur.execute(
+            "SELECT id,doc_number,date,kontrahent FROM issue_docs WHERE lower(doc_number)=lower(%s) LIMIT 1",
+            (number,),
+        )
+    elif entity_type == "contractor":
+        name = str(data.get("contractor") or "").strip()
+        nip = str(data.get("nip") or "").strip()
+        cur.execute(
+            """
+            SELECT id,name,nip FROM contractors
+            WHERE lower(name)=lower(%s)
+               OR (%s<>'' AND regexp_replace(COALESCE(nip,''),'[^0-9]','','g')=
+                   regexp_replace(%s,'[^0-9]','','g'))
+            ORDER BY id LIMIT 1
+            """,
+            (name, nip, nip),
+        )
+    elif entity_type in {"shop_order", "accounting"}:
+        cur.execute(
+            "SELECT id,order_number,customer_name,status FROM shop_orders WHERE lower(order_number)=lower(%s) LIMIT 1",
+            (str(data.get("order_number") or "").strip(),),
+        )
+    else:
+        return None
+    row = cur.fetchone()
+    if not row:
+        return None
+    return {"id": row[0], "label": " · ".join(str(value or "") for value in row[1:])}
+
+
+def unique_import_identifier(cur, table, column, requested, import_id, row_id):
+    requested = str(requested or "").strip()
+    candidate = requested or f"IMPORT/{import_id}/{row_id}"
+    cur.execute(
+        f"SELECT 1 FROM {table} WHERE lower({column})=lower(%s) LIMIT 1",
+        (candidate,),
+    )
+    if not cur.fetchone():
+        return candidate
+    return f"{candidate}-IMPORT-{import_id}-{row_id}"
+
+
 def log_action(action, entity_type=None, entity_id=None, details=None, conn=None):
     target_conn = conn or db()
     try:
@@ -1316,7 +1469,12 @@ def create_session():
         conn = db()
         cur = conn.cursor()
         cur.execute(
-            "SELECT role, status FROM users WHERE firebase_uid=%s OR lower(email)=lower(%s) FOR UPDATE",
+            """
+            SELECT role, status, can_import_warehouse, can_import_accounting
+            FROM users
+            WHERE firebase_uid=%s OR lower(email)=lower(%s)
+            FOR UPDATE
+            """,
             (uid, email),
         )
         row = cur.fetchone()
@@ -1333,6 +1491,8 @@ def create_session():
             display_name = (decoded.get("name") or firebase_user.display_name or "").strip()
             first_name, _, last_name = display_name.partition(" ")
             role = "admin"
+            can_import_warehouse = True
+            can_import_accounting = True
             cur.execute(
                 """
                 INSERT INTO users(firebase_uid, first_name, last_name, email, role, status)
@@ -1341,7 +1501,9 @@ def create_session():
                 (uid, first_name, last_name, email),
             )
         else:
-            role, status = row
+            role, status = row[:2]
+            can_import_warehouse = bool(row[2]) if len(row) > 2 else False
+            can_import_accounting = bool(row[3]) if len(row) > 3 else False
             if role == "employee":
                 role = "warehouse"
             if status != "active":
@@ -1374,6 +1536,8 @@ def create_session():
     session['user'] = email
     session['role'] = role
     session['uid'] = uid
+    session['can_import_warehouse'] = role == "admin" or can_import_warehouse
+    session['can_import_accounting'] = role == "admin" or can_import_accounting
     response = make_response(jsonify({"ok": True, "role": role}))
     response.set_cookie(
         "firebase_session",
@@ -1441,7 +1605,11 @@ def require_login_for_private_app():
             conn = db()
             cur = conn.cursor()
             cur.execute(
-                "SELECT role, status FROM users WHERE firebase_uid=%s AND lower(email)=lower(%s)",
+                """
+                SELECT role, status, can_import_warehouse, can_import_accounting
+                FROM users
+                WHERE firebase_uid=%s AND lower(email)=lower(%s)
+                """,
                 (uid, email),
             )
             account = cur.fetchone()
@@ -1462,6 +1630,12 @@ def require_login_for_private_app():
             session["user"] = email
             session["uid"] = uid
             session["role"] = account[0]
+            session["can_import_warehouse"] = (
+                account[0] == "admin" or (bool(account[2]) if len(account) > 2 else False)
+            )
+            session["can_import_accounting"] = (
+                account[0] == "admin" or (bool(account[3]) if len(account) > 3 else False)
+            )
             if request.endpoint == "login":
                 return redirect("/")
         else:
@@ -1653,7 +1827,8 @@ def users():
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT id, firebase_uid, first_name, last_name, email, role, status
+        SELECT id, firebase_uid, first_name, last_name, email, role, status,
+               can_import_warehouse, can_import_accounting
         FROM users ORDER BY lower(last_name), lower(first_name), lower(email)
         """
     )
@@ -1790,10 +1965,55 @@ def update_user_role(user_id):
             conn.close()
             return redirect('/users')
 
-    cur.execute("UPDATE users SET role=%s, updated_at=NOW() WHERE id=%s", (new_role, user_id))
+    cur.execute(
+        """
+        UPDATE users SET role=%s,
+            can_import_warehouse=CASE WHEN %s='warehouse' THEN can_import_warehouse ELSE FALSE END,
+            can_import_accounting=CASE WHEN %s='accounting' THEN can_import_accounting ELSE FALSE END,
+            updated_at=NOW()
+        WHERE id=%s
+        """,
+        (new_role, new_role, new_role, user_id),
+    )
     conn.commit()
     conn.close()
     return redirect('/users')
+
+
+@app.route('/users/<int:user_id>/import-permissions', methods=['POST'])
+@admin_required
+def update_user_import_permissions(user_id):
+    conn = db()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT role FROM users WHERE id=%s FOR UPDATE", (user_id,))
+        user = cur.fetchone()
+        if not user:
+            return "Nie znaleziono użytkownika.", 404
+        warehouse_allowed = (
+            user[0] == "warehouse"
+            and request.form.get("can_import_warehouse") == "on"
+        )
+        accounting_allowed = (
+            user[0] == "accounting"
+            and request.form.get("can_import_accounting") == "on"
+        )
+        cur.execute(
+            """
+            UPDATE users
+            SET can_import_warehouse=%s, can_import_accounting=%s, updated_at=NOW()
+            WHERE id=%s
+            """,
+            (warehouse_allowed, accounting_allowed, user_id),
+        )
+        conn.commit()
+        return redirect("/users")
+    except Exception:
+        conn.rollback()
+        logger.exception("Import permissions update failed.")
+        return "Nie udało się zapisać uprawnień importu.", 500
+    finally:
+        conn.close()
 
 
 def send_firebase_password_reset(email):
@@ -1915,7 +2135,14 @@ def magazyn(name):
             )
     conn.close()
 
-    return render_template("index.html", products=products, warehouse=name, package_modes=package_modes)
+    return render_template(
+        "index.html",
+        products=products,
+        warehouse=name,
+        package_modes=package_modes,
+        warehouses=WAREHOUSES,
+        units=sorted(UNITS),
+    )
 
 
 @app.route('/packages/<int:product_id>')
@@ -1927,7 +2154,7 @@ def packages_for_product(product_id):
     product = cur.fetchone()
     cur.execute(
         """
-        SELECT number, qty, status
+        SELECT id, number, qty, status, warehouse
         FROM packages
         WHERE product_id=%s
         ORDER BY CASE WHEN status='active' THEN 0 ELSE 1 END, id DESC
@@ -1935,7 +2162,7 @@ def packages_for_product(product_id):
         (product_id,),
     )
     packages = cur.fetchall()
-    numbered_qty = sum((row[1] or 0) for row in packages if row[2] == 'active')
+    numbered_qty = sum((row[2] or 0) for row in packages if row[3] == 'active')
     unnumbered_qty = max((product[0] if product else 0) - numbered_qty, 0)
     conn.close()
     return render_template("packages.html", packages=packages, unnumbered_qty=unnumbered_qty)
@@ -2260,18 +2487,101 @@ def normalized_optional_date(value, field_name):
     return value
 
 
+def submitted_receipt_rows(forced_warehouse=None):
+    fields = {
+        "product_id": request.form.getlist("product_id"),
+        "product_name": request.form.getlist("product_name"),
+        "qty": request.form.getlist("qty"),
+        "unit": request.form.getlist("unit"),
+        "warehouse": request.form.getlist("warehouse"),
+        "package_number": request.form.getlist("package_number"),
+        "has_package_number": request.form.getlist("has_package_number"),
+        "price_netto": request.form.getlist("price_netto"),
+        "price_brutto": request.form.getlist("price_brutto"),
+    }
+    row_count = max((len(values) for values in fields.values()), default=0)
+    rows = []
+    for index in range(row_count):
+        row = {
+            field: form_value(values, index)
+            for field, values in fields.items()
+        }
+        if forced_warehouse:
+            row["warehouse"] = forced_warehouse
+        row["has_package_number"] = row["has_package_number"] == "1"
+        rows.append(row)
+    return rows
+
+
+def render_receipt_form(error=None, forced_warehouse=None, status=200):
+    conn = db()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT * FROM products ORDER BY warehouse, lower(name), id")
+        products = cur.fetchall()
+    finally:
+        conn.close()
+    return (
+        render_template(
+            "przyjecie.html",
+            products=products,
+            forced_warehouse=forced_warehouse,
+            form_action=(
+                "/inwestycja-suwaj/receive_doc"
+                if forced_warehouse == INVESTMENT_WAREHOUSE else "/receive_doc"
+            ),
+            page_title=(
+                "Przyjęcie (PZ) – Inwestycja Suwaj"
+                if forced_warehouse == INVESTMENT_WAREHOUSE else "Przyjęcie (PZ)"
+            ),
+            form_error=error,
+            submitted_items=submitted_receipt_rows(forced_warehouse) if request.method == "POST" else [],
+            submitted_header={
+                "doc_number": request.form.get("doc_number", ""),
+                "date": request.form.get("date", ""),
+                "kontrahent": request.form.get("kontrahent", ""),
+            } if request.method == "POST" else {},
+        ),
+        status,
+    )
+
+
 def collect_document_items(forced_warehouse=None, issuing=False):
     product_ids = request.form.getlist("product_id")
+    product_names = request.form.getlist("product_name")
     quantities = request.form.getlist("qty")
+    unit_values = request.form.getlist("unit")
     warehouses = request.form.getlist("warehouse")
     package_values = request.form.getlist("package_id" if issuing else "package_number")
     has_package_values = request.form.getlist("has_package_number")
     netto_values = request.form.getlist("price_netto")
     brutto_values = request.form.getlist("price_brutto")
     items = []
-    for index, raw_product_id in enumerate(product_ids):
+    row_count = max(
+        len(product_ids), len(product_names), len(quantities), len(unit_values),
+        len(warehouses), len(package_values), len(has_package_values),
+        len(netto_values), len(brutto_values),
+    )
+    for index in range(row_count):
+        raw_product_id = form_value(product_ids, index)
         raw_product_id = (raw_product_id or "").strip()
+        package_value = form_value(package_values, index).strip()
+        marker = form_value(has_package_values, index)
+        row_started = any(
+            str(value or "").strip()
+            for value in (
+                form_value(product_names, index),
+                form_value(quantities, index),
+                package_value,
+                form_value(netto_values, index),
+                form_value(brutto_values, index),
+            )
+        ) or marker == "1"
         if not raw_product_id:
+            if row_started:
+                raise ValueError(
+                    f"Pozycja {index + 1}: wybierz produkt z listy podpowiedzi."
+                )
             continue
         try:
             product_id = int(raw_product_id)
@@ -2280,11 +2590,12 @@ def collect_document_items(forced_warehouse=None, issuing=False):
         warehouse = forced_warehouse or form_value(warehouses, index).strip()
         if warehouse not in WAREHOUSES:
             raise ValueError("Wybierz prawidłowy magazyn dla każdej pozycji.")
+        unit = form_value(unit_values, index).strip()
+        if unit and unit not in UNITS:
+            raise ValueError(f"Pozycja {index + 1}: wybierz prawidłową jednostkę.")
         qty = parse_positive_number(form_value(quantities, index))
         price_netto = parse_nonnegative_number(form_value(netto_values, index), "Cena netto")
         price_brutto = parse_nonnegative_number(form_value(brutto_values, index), "Cena brutto")
-        package_value = form_value(package_values, index).strip()
-        marker = form_value(has_package_values, index)
         has_package_number = marker == "1" or (not marker and bool(package_value))
         if not issuing and len(package_value) > 100:
             raise ValueError("Numer paczki może mieć maksymalnie 100 znaków.")
@@ -2295,6 +2606,7 @@ def collect_document_items(forced_warehouse=None, issuing=False):
         items.append({
             "product_id": product_id,
             "warehouse": warehouse,
+            "unit": unit,
             "qty": qty,
             "package": package_value,
             "has_package_number": has_package_number,
@@ -2312,12 +2624,16 @@ def create_receipt(forced_warehouse=None):
         items.sort(key=lambda item: (item["warehouse"], item["product_id"], item["package"].casefold()))
         date = normalized_document_date(request.form.get("date"))
     except ValueError as exc:
-        return str(exc), 400
+        return render_receipt_form(str(exc), forced_warehouse, 400)
     contractor = (request.form.get("kontrahent") or "").strip()
     if not contractor:
-        return "Dostawca jest wymagany.", 400
+        return render_receipt_form("Dostawca jest wymagany.", forced_warehouse, 400)
     if len(contractor) > 200:
-        return "Nazwa dostawcy może mieć maksymalnie 200 znaków.", 400
+        return render_receipt_form(
+            "Nazwa dostawcy może mieć maksymalnie 200 znaków.",
+            forced_warehouse,
+            400,
+        )
 
     conn = db()
     cur = conn.cursor()
@@ -2398,10 +2714,11 @@ def create_receipt(forced_warehouse=None):
         cur.execute("UPDATE issue_docs SET doc_number=%s WHERE id=%s", (doc_number, doc_id))
 
         for item, source, target_id in resolved:
+            item_unit = item["unit"] or source[1]
             if target_id:
                 cur.execute(
-                    "UPDATE products SET qty=qty+%s, price_netto=%s WHERE id=%s",
-                    (item["qty"], item["price_netto"], target_id),
+                    "UPDATE products SET qty=qty+%s, unit=%s, price_netto=%s WHERE id=%s",
+                    (item["qty"], item_unit, item["price_netto"], target_id),
                 )
             else:
                 cur.execute(
@@ -2409,7 +2726,7 @@ def create_receipt(forced_warehouse=None):
                     INSERT INTO products(name, qty, unit, warehouse, price_netto, vat)
                     VALUES (%s,%s,%s,%s,%s,%s) RETURNING id
                     """,
-                    (source[0], item["qty"], source[1], item["warehouse"],
+                    (source[0], item["qty"], item_unit, item["warehouse"],
                      item["price_netto"] or source[2] or 0, source[3] or 0),
                 )
                 target_id = cur.fetchone()[0]
@@ -2440,11 +2757,20 @@ def create_receipt(forced_warehouse=None):
         return redirect(f"/doc/{doc_id}")
     except ValueError as exc:
         close_with_rollback(conn)
-        return str(exc), 400
+        return render_receipt_form(str(exc), forced_warehouse, 400)
     except Exception:
         close_with_rollback(conn)
         logger.exception("Receipt creation failed.")
-        return "Nie udało się zapisać przyjęcia. Żadne stany nie zostały zmienione.", 500
+        message = "Nie udało się zapisać przyjęcia. Żadne stany nie zostały zmienione."
+        try:
+            return render_receipt_form(message, forced_warehouse, 500)
+        except Exception:
+            logger.exception("Receipt form recovery rendering failed.")
+            return render_template(
+                "error.html",
+                title="Nie udało się zapisać przyjęcia",
+                message=message,
+            ), 500
     finally:
         conn.close()
 
@@ -2599,15 +2925,7 @@ def create_issue(forced_warehouse=None):
 @app.route('/przyjecie')
 @login_required
 def przyjecie():
-    conn = db()
-    cur = conn.cursor()
-
-    cur.execute("SELECT * FROM products ORDER BY warehouse, lower(name), id")
-    products = cur.fetchall()
-
-    conn.close()
-
-    return render_template("przyjecie.html", products=products)
+    return render_receipt_form()
 
 
 # 📥 ZAPIS PRZYJĘCIA
@@ -2881,6 +3199,1040 @@ def import_excel():
     return redirect('/magazyny')
 
 
+def stage_general_import(cur, filename, sheets):
+    metadata = [
+        {
+            "name": sheet["name"],
+            "entity_type": sheet["entity_type"],
+            "columns": sheet["columns"],
+            "mapping": sheet["mapping"],
+            "row_count": len(sheet["rows"]),
+        }
+        for sheet in sheets
+    ]
+    cur.execute(
+        """
+        INSERT INTO general_imports(filename, imported_by, detected_sheets)
+        VALUES (%s,%s,%s::jsonb) RETURNING id
+        """,
+        (filename, session.get("user"), json.dumps(metadata, ensure_ascii=False)),
+    )
+    import_id = cur.fetchone()[0]
+    for sheet in sheets:
+        entity_type = sheet["entity_type"]
+        if entity_type == "ignored":
+            continue
+        for row in sheet["rows"]:
+            data = dict(row["normalized_data"])
+            errors = (
+                validate_import_row(entity_type, data, UNITS, WAREHOUSES)
+                if entity_type in ENTITY_FIELDS
+                else ["Wybierz typ danych i przypisz kolumny."]
+            )
+            duplicate = (
+                detect_import_duplicate(cur, entity_type, data)
+                if entity_type in ENTITY_FIELDS and not errors else None
+            )
+            resolution = "skip" if duplicate else "new"
+            cur.execute(
+                """
+                INSERT INTO general_import_rows(
+                    import_id,sheet_name,row_number,entity_type,source_data,
+                    normalized_data,duplicate_data,resolution,validation_errors
+                ) VALUES (%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s::jsonb,%s,%s::jsonb)
+                """,
+                (
+                    import_id,
+                    sheet["name"],
+                    row["row_number"],
+                    entity_type,
+                    json.dumps(row["source_data"], ensure_ascii=False),
+                    json.dumps(data, ensure_ascii=False),
+                    json.dumps(duplicate, ensure_ascii=False) if duplicate else None,
+                    resolution,
+                    json.dumps(errors, ensure_ascii=False),
+                ),
+            )
+    return import_id
+
+
+def import_run_query(cur, import_id, for_update=False):
+    cur.execute(
+        """
+        SELECT id,filename,imported_by,status,detected_sheets,summary,errors,
+               created_at,completed_at
+        FROM general_imports WHERE id=%s
+        """ + (" FOR UPDATE" if for_update else ""),
+        (import_id,),
+    )
+    return cur.fetchone()
+
+
+def import_rows_query(cur, import_id, for_update=False):
+    cur.execute(
+        """
+        SELECT id,sheet_name,row_number,entity_type,source_data,normalized_data,
+               duplicate_data,resolution,included,validation_errors
+        FROM general_import_rows
+        WHERE import_id=%s ORDER BY sheet_name,row_number,id
+        """ + (" FOR UPDATE" if for_update else ""),
+        (import_id,),
+    )
+    return cur.fetchall()
+
+
+def get_or_create_import_product(cur, data):
+    name = str(data.get("product_name") or data.get("name") or "").strip()
+    warehouse = str(data.get("warehouse") or "").strip()
+    unit = str(data.get("unit") or "szt").strip() or "szt"
+    cur.execute(
+        """
+        SELECT id,qty FROM products
+        WHERE lower(name)=lower(%s) AND warehouse=%s
+        ORDER BY id LIMIT 1 FOR UPDATE
+        """,
+        (name, warehouse),
+    )
+    product = cur.fetchone()
+    if product:
+        return product[0], product[1] or 0
+    cur.execute(
+        """
+        INSERT INTO products(name,qty,unit,warehouse,price_netto,vat)
+        VALUES (%s,0,%s,%s,%s,%s) RETURNING id
+        """,
+        (
+            name,
+            unit if unit in UNITS else "szt",
+            warehouse,
+            float(data.get("price_netto") or 0),
+            float(data.get("vat") or 0),
+        ),
+    )
+    return cur.fetchone()[0], 0
+
+
+def apply_import_product(cur, row, data):
+    duplicate = row[6] or {}
+    resolution = row[7]
+    values = (
+        str(data.get("name") or "").strip(),
+        float(data.get("qty") or 0),
+        str(data.get("unit") or "").strip(),
+        str(data.get("warehouse") or "").strip(),
+        float(data.get("price_netto") or 0),
+        float(data.get("vat") or 0),
+    )
+    if duplicate and resolution == "update":
+        cur.execute(
+            """
+            UPDATE products
+            SET name=%s,qty=%s,unit=%s,warehouse=%s,price_netto=%s,vat=%s
+            WHERE id=%s
+            """,
+            values + (duplicate["id"],),
+        )
+        if cur.rowcount == 1:
+            return "updated"
+    cur.execute(
+        """
+        INSERT INTO products(name,qty,unit,warehouse,price_netto,vat)
+        VALUES (%s,%s,%s,%s,%s,%s)
+        """,
+        values,
+    )
+    return "added"
+
+
+def apply_import_package(cur, row, data, product_snapshots, import_id):
+    duplicate = row[6] or {}
+    resolution = row[7]
+    product_id, _ = get_or_create_import_product(cur, data)
+    qty = float(data.get("qty") or 0)
+    package_number = str(data.get("package_number") or "").strip()
+    product_key = duplicate_identity(
+        "product",
+        {"name": data.get("product_name"), "warehouse": data.get("warehouse")},
+    )
+    update_total = product_key not in product_snapshots
+    if duplicate and resolution == "update":
+        cur.execute("SELECT qty,product_id FROM packages WHERE id=%s FOR UPDATE", (duplicate["id"],))
+        old = cur.fetchone()
+        if old:
+            old_qty = float(old[0] or 0)
+            old_product_id = old[1]
+            cur.execute(
+                """
+                UPDATE packages
+                SET product_id=%s,number=%s,qty=%s,warehouse=%s,initial_qty=%s,
+                    status=CASE WHEN %s>0 THEN 'active' ELSE 'issued' END,
+                    archived_at=CASE WHEN %s>0 THEN NULL ELSE NOW() END
+                WHERE id=%s
+                """,
+                (
+                    product_id, package_number, qty, data["warehouse"], qty,
+                    qty, qty, duplicate["id"],
+                ),
+            )
+            if update_total:
+                if old_product_id == product_id:
+                    delta = qty - old_qty
+                    cur.execute(
+                        "UPDATE products SET qty=qty+%s WHERE id=%s AND qty+%s>=0",
+                        (delta, product_id, delta),
+                    )
+                    if cur.rowcount != 1:
+                        raise ValueError("Aktualizacja paczki spowodowałaby ujemny stan produktu.")
+                else:
+                    cur.execute(
+                        "UPDATE products SET qty=qty-%s WHERE id=%s AND qty>=%s",
+                        (old_qty, old_product_id, old_qty),
+                    )
+                    if cur.rowcount != 1:
+                        raise ValueError("Nie można odpiąć paczki od poprzedniego produktu.")
+                    cur.execute(
+                        "UPDATE products SET qty=qty+%s WHERE id=%s",
+                        (qty, product_id),
+                    )
+            return "updated"
+    if duplicate and resolution == "new":
+        package_number = unique_import_identifier(
+            cur, "packages", "number", package_number, import_id, row[0]
+        )
+    cur.execute(
+        """
+        INSERT INTO packages(product_id,number,qty,warehouse,initial_qty,status)
+        VALUES (%s,%s,%s,%s,%s,%s)
+        """,
+        (
+            product_id, package_number, qty, data["warehouse"], qty,
+            "active" if qty > 0 else "issued",
+        ),
+    )
+    if update_total:
+        cur.execute("UPDATE products SET qty=qty+%s WHERE id=%s", (qty, product_id))
+    return "added"
+
+
+def apply_import_contractor(cur, row, data):
+    duplicate = row[6] or {}
+    values = (
+        str(data.get("contractor") or "").strip(),
+        str(data.get("nip") or "").strip() or None,
+        str(data.get("email") or "").strip() or None,
+        str(data.get("phone") or "").strip() or None,
+        str(data.get("address") or "").strip() or None,
+    )
+    if duplicate and row[7] == "update":
+        cur.execute(
+            """
+            UPDATE contractors
+            SET name=%s,nip=%s,email=%s,phone=%s,address=%s,updated_at=NOW()
+            WHERE id=%s
+            """,
+            values + (duplicate["id"],),
+        )
+        if cur.rowcount == 1:
+            return "updated"
+    cur.execute(
+        "INSERT INTO contractors(name,nip,email,phone,address) VALUES (%s,%s,%s,%s,%s)",
+        values,
+    )
+    return "added"
+
+
+def apply_import_document(cur, row, data, import_id, document_cache):
+    entity_type = row[3]
+    duplicate = row[6] or {}
+    resolution = row[7]
+    movement = str(
+        data.get("movement_type") or ("PZ" if entity_type == "receipt" else "WZ")
+    ).upper()
+    requested_number = str(data.get("doc_number") or "").strip()
+    cache_key = (movement, requested_number.casefold()) if requested_number else None
+    if duplicate and resolution == "update":
+        cur.execute(
+            """
+            UPDATE issue_docs
+            SET date=%s,kontrahent=%s,movement_type=%s
+            WHERE id=%s
+            """,
+            (data.get("date"), data.get("contractor"), movement, duplicate["id"]),
+        )
+        return "updated"
+    if cache_key and cache_key in document_cache:
+        doc_id = document_cache[cache_key]
+    else:
+        doc_number = requested_number
+        if duplicate and resolution == "new":
+            doc_number = unique_import_identifier(
+                cur, "issue_docs", "doc_number", doc_number, import_id, row[0]
+            )
+        cur.execute(
+            """
+            INSERT INTO issue_docs(date,kontrahent,warehouse,image,doc_number,movement_type)
+            VALUES (%s,%s,%s,'',%s,%s) RETURNING id
+            """,
+            (
+                data.get("date"),
+                str(data.get("contractor") or "").strip(),
+                str(data.get("warehouse") or "").strip(),
+                doc_number or "",
+                movement,
+            ),
+        )
+        doc_id = cur.fetchone()[0]
+        if not doc_number:
+            doc_number = f"{movement}-IMPORT/{import_id}/{doc_id}"
+            cur.execute("UPDATE issue_docs SET doc_number=%s WHERE id=%s", (doc_number, doc_id))
+        if cache_key:
+            document_cache[cache_key] = doc_id
+
+    if not str(data.get("product_name") or "").strip() or data.get("qty") in ("", None):
+        return "added"
+    product_id, product_qty = get_or_create_import_product(cur, data)
+    qty = float(data["qty"])
+    package_id = None
+    package_number = str(data.get("package_number") or "").strip() or None
+    if movement == "PZ":
+        cur.execute("UPDATE products SET qty=qty+%s WHERE id=%s", (qty, product_id))
+        if package_number:
+            package_number = unique_import_identifier(
+                cur, "packages", "number", package_number, import_id, row[0]
+            )
+            cur.execute(
+                """
+                INSERT INTO packages(product_id,number,qty,warehouse,initial_qty,status)
+                VALUES (%s,%s,%s,%s,%s,'active') RETURNING id
+                """,
+                (product_id, package_number, qty, data.get("warehouse"), qty),
+            )
+            package_id = cur.fetchone()[0]
+    else:
+        if product_qty + 1e-9 < qty:
+            raise ValueError(
+                f"Brak stanu produktu {data.get('product_name')} w magazynie {data.get('warehouse')}."
+            )
+        if package_number:
+            cur.execute(
+                """
+                SELECT id,qty FROM packages
+                WHERE product_id=%s AND warehouse=%s AND lower(number)=lower(%s)
+                  AND status='active'
+                ORDER BY id LIMIT 1 FOR UPDATE
+                """,
+                (product_id, data.get("warehouse"), package_number),
+            )
+            package = cur.fetchone()
+            if not package or float(package[1] or 0) + 1e-9 < qty:
+                raise ValueError(f"Brak wymaganej ilości w paczce {package_number}.")
+            package_id = package[0]
+            cur.execute(
+                """
+                UPDATE packages SET qty=qty-%s,
+                    status=CASE WHEN qty-%s<=0 THEN 'issued' ELSE 'active' END,
+                    archived_at=CASE WHEN qty-%s<=0 THEN NOW() ELSE NULL END
+                WHERE id=%s
+                """,
+                (qty, qty, qty, package_id),
+            )
+        cur.execute("UPDATE products SET qty=qty-%s WHERE id=%s", (qty, product_id))
+    cur.execute(
+        """
+        INSERT INTO issue_items(
+            doc_id,product_id,qty,warehouse,package_id,package_number,price_netto,price_brutto
+        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+        """,
+        (
+            doc_id, product_id, qty, data.get("warehouse"), package_id, package_number,
+            float(data.get("price_netto") or 0),
+            float(data.get("price_netto") or 0) * (1 + float(data.get("vat") or 0) / 100),
+        ),
+    )
+    return "added"
+
+
+def apply_import_shop_order(cur, row, data, import_id, order_cache=None):
+    order_cache = order_cache if order_cache is not None else {}
+    duplicate = row[6] or {}
+    order_number = str(data.get("order_number") or "").strip()
+    cache_key = order_number.casefold()
+    values = (
+        data.get("date"),
+        str(data.get("contractor") or "").strip(),
+        str(data.get("address") or "").strip(),
+        str(data.get("phone") or "").strip(),
+        str(data.get("email") or "").strip(),
+        float(data.get("shipping_cost") or 0),
+        str(data.get("payment_method") or "").strip(),
+        str(data.get("payment_status") or "Oczekuje na płatność").strip(),
+        str(data.get("status") or "Nowe zamówienie").strip(),
+        str(data.get("doc_number") or "").strip(),
+        str(data.get("tracking_number") or "").strip(),
+        str(data.get("nip") or "").strip(),
+    )
+    outcome = "added"
+    order_id = None
+    if duplicate and row[7] == "update":
+        cur.execute(
+            """
+            UPDATE shop_orders SET order_date=%s,customer_name=%s,delivery_address=%s,
+                phone=%s,email=%s,shipping_cost=%s,payment_method=%s,payment_status=%s,
+                status=%s,sales_document_number=%s,tracking_number=%s,nip=%s,updated_at=NOW()
+            WHERE id=%s
+            """,
+            values + (duplicate["id"],),
+        )
+        if cur.rowcount == 1:
+            order_id = duplicate["id"]
+            outcome = "updated"
+    if order_id is None and cache_key in order_cache:
+        order_id = order_cache[cache_key]
+    if order_id is None:
+        if duplicate and row[7] == "new":
+            order_number = unique_import_identifier(
+                cur, "shop_orders", "order_number", order_number, import_id, row[0]
+            )
+        cur.execute(
+            """
+            INSERT INTO shop_orders(
+                order_number,order_date,customer_name,delivery_address,phone,email,
+                shipping_cost,payment_method,payment_status,status,sales_document_number,
+                tracking_number,nip,created_by
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
+            """,
+            (order_number,) + values + (session.get("user"),),
+        )
+        order_id = cur.fetchone()[0]
+    order_cache[cache_key] = order_id
+    if str(data.get("product_name") or "").strip() and data.get("qty") not in ("", None):
+        product_id, _ = get_or_create_import_product(cur, data)
+        qty = float(data["qty"])
+        price = float(data.get("price_netto") or 0)
+        vat = float(data.get("vat") or 0)
+        cur.execute(
+            """
+            INSERT INTO shop_order_items(
+                order_id,product_id,product_name,qty,price_netto,price_brutto,vat,
+                warehouse,reserved_qty,issued_qty
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,0,0)
+            """,
+            (
+                order_id, product_id, data["product_name"], qty, price,
+                price * (1 + vat / 100), vat, data.get("warehouse") or "Inne",
+            ),
+        )
+    ensure_shop_accounting_row(cur, order_id)
+    return outcome
+
+
+def apply_import_accounting(cur, row, data):
+    duplicate = row[6] or detect_import_duplicate(cur, "accounting", data) or {}
+    if not duplicate:
+        raise ValueError(f"Nie znaleziono zamówienia {data.get('order_number')} dla księgowości.")
+    order_id = duplicate["id"]
+    ensure_shop_accounting_row(cur, order_id)
+    cur.execute(
+        """
+        UPDATE shop_accounting SET payment_method=%s,paid=%s,amount_paid=%s,
+            amount_due=%s,invoice_number=%s,receipt_number=%s,proforma_number=%s,
+            payment_received_date=CASE WHEN %s THEN NULLIF(%s,'')::date
+                                       ELSE payment_received_date END,
+            updated_by=%s,updated_at=NOW()
+        WHERE order_id=%s
+        """,
+        (
+            str(data.get("payment_method") or "").strip() or None,
+            bool(data.get("paid")),
+            float(data.get("amount_paid") or 0),
+            float(data.get("amount_due") or 0),
+            str(data.get("invoice_number") or "").strip(),
+            str(data.get("receipt_number") or "").strip(),
+            str(data.get("proforma_number") or "").strip(),
+            bool(data.get("date")),
+            str(data.get("date") or ""),
+            session.get("user"),
+            order_id,
+        ),
+    )
+    sync_accounting_payment_status(cur, order_id)
+    return "updated"
+
+
+@app.route('/kontrahenci')
+@login_required
+def contractors_page():
+    if session.get("role") not in {"admin", "warehouse", "accounting"}:
+        return "Brak uprawnień.", 403
+    conn = db()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id,name,nip,email,phone,address,active,created_at,updated_at
+        FROM contractors ORDER BY lower(name),id
+        """
+    )
+    contractors = cur.fetchall()
+    conn.close()
+    return render_template("contractors.html", contractors=contractors)
+
+
+@app.route('/kontrahenci/<int:contractor_id>/edit', methods=['POST'])
+@login_required
+def edit_contractor(contractor_id):
+    if session.get("role") not in {"admin", "warehouse", "accounting"}:
+        return "Brak uprawnień.", 403
+    name = (request.form.get("name") or "").strip()
+    if not name or len(name) > 200:
+        return "Nazwa kontrahenta jest wymagana i może mieć maksymalnie 200 znaków.", 400
+    values = (
+        name,
+        (request.form.get("nip") or "").strip()[:30] or None,
+        (request.form.get("email") or "").strip()[:254] or None,
+        (request.form.get("phone") or "").strip()[:50] or None,
+        (request.form.get("address") or "").strip()[:500] or None,
+        contractor_id,
+    )
+    conn = db()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            UPDATE contractors SET name=%s,nip=%s,email=%s,phone=%s,address=%s,
+                updated_at=NOW() WHERE id=%s
+            """,
+            values,
+        )
+        if cur.rowcount != 1:
+            return "Nie znaleziono kontrahenta.", 404
+        conn.commit()
+        return redirect("/kontrahenci")
+    except Exception:
+        conn.rollback()
+        logger.exception("Contractor update failed.")
+        return "Nie udało się zaktualizować kontrahenta.", 500
+    finally:
+        conn.close()
+
+
+@app.route('/import-ogolny')
+@login_required
+def general_import_page():
+    denied = import_access_error()
+    if denied:
+        return denied
+    conn = db()
+    cur = conn.cursor()
+    if session.get("role") == "admin":
+        cur.execute(
+            """
+            SELECT id,filename,imported_by,status,summary,errors,created_at,completed_at
+            FROM general_imports ORDER BY id DESC LIMIT 100
+            """
+        )
+    else:
+        cur.execute(
+            """
+            SELECT id,filename,imported_by,status,summary,errors,created_at,completed_at
+            FROM general_imports WHERE lower(imported_by)=lower(%s)
+            ORDER BY id DESC LIMIT 100
+            """,
+            (session.get("user"),),
+        )
+    history = cur.fetchall()
+    conn.close()
+    return render_template(
+        "general_import.html",
+        history=history,
+        allowed_groups=general_import_groups(),
+    )
+
+
+@app.route('/import-ogolny/upload', methods=['POST'])
+@login_required
+@limiter.limit("10 per hour")
+def general_import_upload():
+    denied = import_access_error()
+    if denied:
+        return denied
+    upload = request.files.get("excel_file")
+    if not upload or not upload.filename:
+        return "Wybierz plik Excel.", 400
+    if not upload.filename.lower().endswith(".xlsx"):
+        return "Dozwolony jest wyłącznie plik .xlsx.", 400
+    filename = secure_filename(upload.filename)[:200] or "import.xlsx"
+    try:
+        sheets = parse_workbook(upload.read())
+    except ValueError as exc:
+        logger.info("General Excel import rejected: %s", exc)
+        return f"Nie udało się odczytać pliku: {exc}", 400
+    except Exception:
+        logger.warning("General Excel import parsing failed.", exc_info=True)
+        return "Nie udało się odczytać pliku. Sprawdź, czy jest to prawidłowy plik .xlsx.", 400
+    staged_sheets = [sheet for sheet in sheets if sheet["entity_type"] != "ignored" and sheet["rows"]]
+    if not staged_sheets:
+        return "Plik nie zawiera danych możliwych do przygotowania.", 400
+    recognized = [sheet for sheet in staged_sheets if sheet["entity_type"] in ENTITY_FIELDS]
+    allowed_groups = general_import_groups()
+    forbidden = {
+        ENTITY_LABELS[sheet["entity_type"]]
+        for sheet in recognized
+        if ENTITY_GROUPS[sheet["entity_type"]] not in allowed_groups
+    }
+    if forbidden:
+        return (
+            "Plik zawiera dane bez wymaganych uprawnień: " + ", ".join(sorted(forbidden)),
+            403,
+        )
+    conn = db()
+    cur = conn.cursor()
+    try:
+        import_id = stage_general_import(cur, filename, sheets)
+        conn.commit()
+        return redirect(f"/import-ogolny/{import_id}")
+    except Exception:
+        conn.rollback()
+        logger.exception("General import staging failed.")
+        return "Nie udało się przygotować podglądu importu.", 500
+    finally:
+        conn.close()
+
+
+@app.route('/products/<int:product_id>/edit', methods=['POST'])
+@permission_required("inventory")
+def edit_product(product_id):
+    name = (request.form.get("name") or "").strip()
+    unit = (request.form.get("unit") or "").strip()
+    warehouse = (request.form.get("warehouse") or "").strip()
+    if not name or len(name) > 200 or unit not in UNITS or warehouse not in WAREHOUSES:
+        return "Nieprawidłowa nazwa, jednostka lub magazyn.", 400
+    try:
+        qty = parse_nonnegative_number(request.form.get("qty"), "Ilość")
+        price_netto = parse_nonnegative_number(request.form.get("price_netto"), "Cena netto")
+        vat = parse_nonnegative_number(request.form.get("vat"), "VAT")
+    except ValueError as exc:
+        return str(exc), 400
+    if vat > 100:
+        return "VAT nie może przekraczać 100%.", 400
+    conn = db()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT warehouse FROM products WHERE id=%s FOR UPDATE",
+            (product_id,),
+        )
+        existing = cur.fetchone()
+        if not existing:
+            return "Nie znaleziono produktu.", 404
+        cur.execute(
+            """
+            SELECT COALESCE(SUM(qty),0),COUNT(*)
+            FROM packages WHERE product_id=%s AND status='active'
+            """,
+            (product_id,),
+        )
+        package_qty, package_count = cur.fetchone()
+        if package_count and existing[0] != warehouse:
+            raise ValueError("Nie można zmienić magazynu produktu posiadającego paczki.")
+        if qty + 1e-9 < float(package_qty or 0):
+            raise ValueError("Stan produktu nie może być mniejszy niż suma aktywnych paczek.")
+        cur.execute(
+            """
+            SELECT 1 FROM products
+            WHERE id<>%s AND warehouse=%s AND lower(name)=lower(%s) LIMIT 1
+            """,
+            (product_id, warehouse, name),
+        )
+        if cur.fetchone():
+            raise ValueError("Taki produkt już istnieje w wybranym magazynie.")
+        cur.execute(
+            """
+            UPDATE products SET name=%s,qty=%s,unit=%s,warehouse=%s,price_netto=%s,vat=%s
+            WHERE id=%s
+            """,
+            (name, qty, unit, warehouse, price_netto, vat, product_id),
+        )
+        conn.commit()
+        cache.clear()
+        return redirect(f"/magazyn/{warehouse}")
+    except ValueError as exc:
+        conn.rollback()
+        return str(exc), 409
+    except Exception:
+        conn.rollback()
+        logger.exception("Product update failed.")
+        return "Nie udało się zaktualizować produktu.", 500
+    finally:
+        conn.close()
+
+
+@app.route('/packages/<int:package_id>/edit', methods=['POST'])
+@permission_required("inventory")
+def edit_package(package_id):
+    number = (request.form.get("number") or "").strip()
+    if not number or len(number) > 100:
+        return "Numer paczki jest wymagany i może mieć maksymalnie 100 znaków.", 400
+    try:
+        qty = parse_nonnegative_number(request.form.get("qty"), "Ilość")
+    except ValueError as exc:
+        return str(exc), 400
+    conn = db()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT product_id,qty,warehouse FROM packages WHERE id=%s FOR UPDATE",
+            (package_id,),
+        )
+        package = cur.fetchone()
+        if not package:
+            return "Nie znaleziono paczki.", 404
+        cur.execute(
+            """
+            SELECT 1 FROM packages
+            WHERE id<>%s AND warehouse=%s AND lower(number)=lower(%s) LIMIT 1
+            """,
+            (package_id, package[2], number),
+        )
+        if cur.fetchone():
+            raise ValueError("Paczka o takim numerze już istnieje w tym magazynie.")
+        delta = qty - float(package[1] or 0)
+        cur.execute(
+            """
+            UPDATE products SET qty=qty+%s
+            WHERE id=%s AND qty+%s>=0
+            """,
+            (delta, package[0], delta),
+        )
+        if cur.rowcount != 1:
+            raise ValueError("Zmiana paczki spowodowałaby ujemny stan produktu.")
+        cur.execute(
+            """
+            UPDATE packages SET number=%s,qty=%s,initial_qty=GREATEST(initial_qty,%s),
+                status=CASE WHEN %s>0 THEN 'active' ELSE 'issued' END,
+                archived_at=CASE WHEN %s>0 THEN NULL ELSE NOW() END
+            WHERE id=%s
+            """,
+            (number, qty, qty, qty, qty, package_id),
+        )
+        conn.commit()
+        cache.clear()
+        return ("", 204)
+    except ValueError as exc:
+        conn.rollback()
+        return str(exc), 409
+    except Exception:
+        conn.rollback()
+        logger.exception("Package update failed.")
+        return "Nie udało się zaktualizować paczki.", 500
+    finally:
+        conn.close()
+
+
+@app.route('/import-ogolny/<int:import_id>')
+@login_required
+def general_import_preview(import_id):
+    denied = import_access_error()
+    if denied:
+        return denied
+    conn = db()
+    cur = conn.cursor()
+    run = import_run_query(cur, import_id)
+    if not import_run_allowed(run):
+        conn.close()
+        return "Nie znaleziono importu.", 404
+    rows = import_rows_query(cur, import_id)
+    conn.close()
+    return render_template(
+        "general_import_preview.html",
+        run=run,
+        rows=rows,
+        entity_fields=ENTITY_FIELDS,
+        entity_groups=ENTITY_GROUPS,
+        entity_labels=ENTITY_LABELS,
+        field_labels=FIELD_LABELS,
+        units=sorted(UNITS),
+        warehouses=WAREHOUSES,
+        allowed_groups=general_import_groups(),
+    )
+
+
+@app.route('/import-ogolny/<int:import_id>/mapping', methods=['POST'])
+@login_required
+def general_import_mapping(import_id):
+    denied = import_access_error()
+    if denied:
+        return denied
+    conn = db()
+    cur = conn.cursor()
+    try:
+        run = import_run_query(cur, import_id, for_update=True)
+        if not import_run_allowed(run) or run[3] != "draft":
+            return "Import nie jest dostępny do edycji.", 409
+        metadata = list(run[4] or [])
+        allowed_groups = general_import_groups()
+        for index, sheet in enumerate(metadata):
+            entity_type = request.form.get(f"entity_{index}", sheet.get("entity_type", "unknown"))
+            if entity_type not in ENTITY_FIELDS:
+                sheet["entity_type"] = entity_type
+                sheet["mapping"] = {}
+                cur.execute(
+                    """
+                    UPDATE general_import_rows
+                    SET entity_type=%s,normalized_data='{}'::jsonb,
+                        validation_errors='["Wybierz typ danych i przypisz kolumny."]'::jsonb,
+                        duplicate_data=NULL,resolution='skip'
+                    WHERE import_id=%s AND sheet_name=%s
+                    """,
+                    (entity_type, import_id, sheet["name"]),
+                )
+                continue
+            if ENTITY_GROUPS[entity_type] not in allowed_groups:
+                return "Brak uprawnień do wybranego typu danych.", 403
+            mapping = {}
+            for field in ENTITY_FIELDS[entity_type]:
+                column = request.form.get(f"map_{index}_{field}", "").strip()
+                if column and column in sheet.get("columns", []):
+                    mapping[field] = column
+            sheet["entity_type"] = entity_type
+            sheet["mapping"] = mapping
+            cur.execute(
+                """
+                SELECT id,source_data FROM general_import_rows
+                WHERE import_id=%s AND sheet_name=%s FOR UPDATE
+                """,
+                (import_id, sheet["name"]),
+            )
+            for row_id, source_data in cur.fetchall():
+                data = normalize_import_row(entity_type, source_data or {}, mapping)
+                errors = validate_import_row(entity_type, data, UNITS, WAREHOUSES)
+                duplicate = detect_import_duplicate(cur, entity_type, data) if not errors else None
+                cur.execute(
+                    """
+                    UPDATE general_import_rows SET entity_type=%s,normalized_data=%s::jsonb,
+                        validation_errors=%s::jsonb,duplicate_data=%s::jsonb,
+                        resolution=%s
+                    WHERE id=%s
+                    """,
+                    (
+                        entity_type,
+                        json.dumps(data, ensure_ascii=False),
+                        json.dumps(errors, ensure_ascii=False),
+                        json.dumps(duplicate, ensure_ascii=False) if duplicate else None,
+                        "skip" if duplicate else "new",
+                        row_id,
+                    ),
+                )
+        cur.execute(
+            "UPDATE general_imports SET detected_sheets=%s::jsonb WHERE id=%s",
+            (json.dumps(metadata, ensure_ascii=False), import_id),
+        )
+        conn.commit()
+        return redirect(f"/import-ogolny/{import_id}?mapping=saved")
+    except Exception:
+        conn.rollback()
+        logger.exception("General import mapping update failed.")
+        return "Nie udało się zapisać mapowania kolumn.", 500
+    finally:
+        conn.close()
+
+
+@app.route('/import-ogolny/<int:import_id>/prepare', methods=['POST'])
+@login_required
+def general_import_prepare(import_id):
+    denied = import_access_error()
+    if denied:
+        return denied
+    conn = db()
+    cur = conn.cursor()
+    try:
+        run = import_run_query(cur, import_id, for_update=True)
+        if not import_run_allowed(run) or run[3] != "draft":
+            return "Import nie jest dostępny do edycji.", 409
+        rows = import_rows_query(cur, import_id, for_update=True)
+        allowed_groups = general_import_groups()
+        for row in rows:
+            row_id, _, _, entity_type = row[:4]
+            included = request.form.get(f"included_{row_id}") == "on"
+            if entity_type not in ENTITY_FIELDS:
+                cur.execute(
+                    "UPDATE general_import_rows SET included=%s WHERE id=%s",
+                    (included, row_id),
+                )
+                continue
+            if ENTITY_GROUPS.get(entity_type) not in allowed_groups:
+                return "Brak uprawnień do jednego z wierszy.", 403
+            data = dict(row[5] or {})
+            for field in ENTITY_FIELDS.get(entity_type, ()):
+                key = f"row_{row_id}_{field}"
+                if key in request.form:
+                    data[field] = request.form.get(key, "").strip()
+            errors = validate_import_row(entity_type, data, UNITS, WAREHOUSES)
+            duplicate = detect_import_duplicate(cur, entity_type, data) if not errors else None
+            resolution = request.form.get(f"resolution_{row_id}", row[7])
+            if resolution not in {"skip", "update", "new"}:
+                resolution = "skip" if duplicate else "new"
+            if resolution == "update" and not duplicate:
+                resolution = "new"
+            cur.execute(
+                """
+                UPDATE general_import_rows SET normalized_data=%s::jsonb,
+                    validation_errors=%s::jsonb,duplicate_data=%s::jsonb,
+                    resolution=%s,included=%s
+                WHERE id=%s
+                """,
+                (
+                    json.dumps(data, ensure_ascii=False),
+                    json.dumps(errors, ensure_ascii=False),
+                    json.dumps(duplicate, ensure_ascii=False) if duplicate else None,
+                    resolution,
+                    included,
+                    row_id,
+                ),
+            )
+        conn.commit()
+        return redirect(f"/import-ogolny/{import_id}?prepared=1")
+    except Exception:
+        conn.rollback()
+        logger.exception("General import preview update failed.")
+        return "Nie udało się zapisać korekt.", 500
+    finally:
+        conn.close()
+
+
+@app.route('/import-ogolny/<int:import_id>/confirm', methods=['POST'])
+@login_required
+@limiter.limit("5 per hour")
+def general_import_confirm(import_id):
+    denied = import_access_error()
+    if denied:
+        return denied
+    conn = db()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT pg_advisory_xact_lock(%s)", (88000000 + import_id,))
+        run = import_run_query(cur, import_id, for_update=True)
+        if not import_run_allowed(run) or run[3] != "draft":
+            return "Import został już zakończony albo nie istnieje.", 409
+        rows = import_rows_query(cur, import_id, for_update=True)
+        allowed_groups = general_import_groups()
+        validation_failed = False
+        for row in rows:
+            if not row[8]:
+                continue
+            data = dict(row[5] or {})
+            errors = validate_import_row(row[3], data, UNITS, WAREHOUSES)
+            if ENTITY_GROUPS.get(row[3]) not in allowed_groups:
+                errors.append("Brak uprawnień do tego typu danych.")
+            current_duplicate = (
+                detect_import_duplicate(cur, row[3], data)
+                if row[3] in ENTITY_FIELDS and not errors else None
+            )
+            staged_duplicate = row[6] or None
+            duplicate_changed = (
+                (current_duplicate or {}).get("id")
+                != (staged_duplicate or {}).get("id")
+            )
+            resolution = row[7]
+            if duplicate_changed:
+                errors.append(
+                    "Stan duplikatów zmienił się od czasu podglądu. "
+                    "Sprawdź wiersz i ponownie wybierz decyzję."
+                )
+                resolution = "skip"
+            cur.execute(
+                """
+                UPDATE general_import_rows
+                SET normalized_data=%s::jsonb,validation_errors=%s::jsonb,
+                    duplicate_data=%s::jsonb,resolution=%s
+                WHERE id=%s
+                """,
+                (
+                    json.dumps(data, ensure_ascii=False),
+                    json.dumps(errors, ensure_ascii=False),
+                    json.dumps(current_duplicate, ensure_ascii=False)
+                    if current_duplicate else None,
+                    resolution,
+                    row[0],
+                ),
+            )
+            validation_failed = validation_failed or bool(errors)
+        if validation_failed:
+            conn.commit()
+            return redirect(f"/import-ogolny/{import_id}?validation=failed")
+
+        counts = {"added": 0, "updated": 0, "skipped": 0, "errors": 0}
+        product_snapshots = {
+            duplicate_identity("product", row[5] or {})
+            for row in rows
+            if row[8] and row[3] == "product" and row[7] != "skip"
+        }
+        document_cache = {}
+        order_cache = {}
+        order = {
+            "contractor": 0, "product": 1, "package": 2, "receipt": 3,
+            "document": 3, "issue": 3, "shop_order": 4, "accounting": 5,
+        }
+        for row in sorted(rows, key=lambda item: (order.get(item[3], 99), item[0])):
+            if not row[8] or row[7] == "skip":
+                counts["skipped"] += 1
+                continue
+            data = dict(row[5] or {})
+            if row[3] == "product":
+                outcome = apply_import_product(cur, row, data)
+            elif row[3] == "package":
+                outcome = apply_import_package(cur, row, data, product_snapshots, import_id)
+            elif row[3] == "contractor":
+                outcome = apply_import_contractor(cur, row, data)
+            elif row[3] in {"issue", "receipt", "document"}:
+                outcome = apply_import_document(cur, row, data, import_id, document_cache)
+            elif row[3] == "shop_order":
+                outcome = apply_import_shop_order(
+                    cur, row, data, import_id, order_cache
+                )
+            elif row[3] == "accounting":
+                outcome = apply_import_accounting(cur, row, data)
+            else:
+                counts["skipped"] += 1
+                continue
+            counts[outcome] += 1
+        cur.execute(
+            """
+            UPDATE general_imports
+            SET status='completed',summary=%s::jsonb,errors='[]'::jsonb,completed_at=NOW()
+            WHERE id=%s
+            """,
+            (json.dumps(counts, ensure_ascii=False), import_id),
+        )
+        log_action("general_import.completed", "general_import", import_id, counts, conn)
+        conn.commit()
+        cache.clear()
+        return redirect(f"/import-ogolny/{import_id}?completed=1")
+    except ValueError as exc:
+        conn.rollback()
+        logger.warning("General import validation failed during commit.", exc_info=True)
+        error_conn = None
+        try:
+            error_conn = db()
+            error_cur = error_conn.cursor()
+            error_cur.execute(
+                "UPDATE general_imports SET errors=%s::jsonb WHERE id=%s",
+                (json.dumps([str(exc)], ensure_ascii=False), import_id),
+            )
+            error_conn.commit()
+        except Exception:
+            logger.exception("General import error history update failed.")
+        finally:
+            if error_conn:
+                error_conn.close()
+        return redirect(f"/import-ogolny/{import_id}?commit_error=1")
+    except Exception:
+        conn.rollback()
+        logger.exception("General import commit failed.")
+        return "Import nie został zapisany. Żadne dane nie zostały zmienione.", 500
+    finally:
+        conn.close()
+
+
 # 📤 WYDANIE
 @app.route('/wydanie')
 @login_required
@@ -2910,28 +4262,20 @@ def inwestycja_suwaj_magazyn():
     cur.execute("SELECT * FROM products WHERE warehouse=%s", (INVESTMENT_WAREHOUSE,))
     products = cur.fetchall()
     conn.close()
-    return render_template("index.html", products=products, warehouse=INVESTMENT_WAREHOUSE)
+    return render_template(
+        "index.html",
+        products=products,
+        warehouse=INVESTMENT_WAREHOUSE,
+        package_modes={},
+        warehouses=WAREHOUSES,
+        units=sorted(UNITS),
+    )
 
 
 @app.route('/inwestycja-suwaj/przyjecie')
 @login_required
 def inwestycja_suwaj_przyjecie():
-    conn = db()
-    cur = conn.cursor()
-
-    # pokazujemy wszystkie produkty, żeby można było dodać nowy asortyment do magazynu inwestycji
-    cur.execute("SELECT * FROM products ORDER BY warehouse, lower(name), id")
-    products = cur.fetchall()
-
-    conn.close()
-
-    return render_template(
-        "przyjecie.html",
-        products=products,
-        forced_warehouse=INVESTMENT_WAREHOUSE,
-        form_action="/inwestycja-suwaj/receive_doc",
-        page_title="📥 Przyjęcie (PZ) – Inwestycja Suwaj"
-    )
+    return render_receipt_form(forced_warehouse=INVESTMENT_WAREHOUSE)
 
 
 @app.route('/inwestycja-suwaj/receive_doc', methods=['POST'])

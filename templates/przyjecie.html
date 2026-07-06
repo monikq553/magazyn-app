@@ -59,17 +59,25 @@ button {
 
 <h2>{{ page_title or "Przyjęcie (PZ)" }}</h2>
 
+{% if form_error %}
+<div id="formError" role="alert" style="margin-bottom:16px;padding:12px;border:1px solid #fecaca;background:#fef2f2;color:#991b1b;border-radius:8px;">
+    {{ form_error }}
+</div>
+{% else %}
+<div id="formError" role="alert" style="display:none;margin-bottom:16px;padding:12px;border:1px solid #fecaca;background:#fef2f2;color:#991b1b;border-radius:8px;"></div>
+{% endif %}
+
 <form method="POST" action="/import_excel" enctype="multipart/form-data" style="margin-bottom:16px;">
     <input type="file" name="excel_file" accept=".xlsx" required>
     <button type="submit">Importuj Excel (.xlsx)</button>
 </form>
 
-<form method="POST" action="{{ form_action or '/receive_doc' }}">
+<form id="receiptForm" method="POST" action="{{ form_action or '/receive_doc' }}">
 
 <!-- 🔥 DOKUMENT -->
-<input name="doc_number" placeholder="Numer dokumentu (np. PZ/01)">
-<input type="date" name="date" required>
-<input name="kontrahent" placeholder="Dostawca" required>
+<input name="doc_number" value="{{ (submitted_header or {}).get('doc_number', '') }}" placeholder="Numer dokumentu (np. PZ/01)">
+<input type="date" name="date" value="{{ (submitted_header or {}).get('date', '') }}" required>
+<input name="kontrahent" value="{{ (submitted_header or {}).get('kontrahent', '') }}" placeholder="Dostawca" required>
 
 <hr>
 
@@ -77,15 +85,17 @@ button {
 
 <div id="items">
 
+{% set receipt_rows = submitted_items if submitted_items else [{}] %}
+{% for row in receipt_rows %}
 <div class="item">
 
 <!-- 🔍 PRODUKT -->
 <div style="position:relative;">
-    <input type="text" placeholder="Produkt..."
+    <input type="text" name="product_name" value="{{ row.get('product_name', '') }}" placeholder="Produkt..."
     onkeyup="searchProduct(this)"
     class="product-input">
 
-    <input type="hidden" name="product_id">
+    <input type="hidden" name="product_id" value="{{ row.get('product_id', '') }}">
 
     <div class="suggestions" style="
         position:absolute;
@@ -108,42 +118,40 @@ button {
 <input value="{{ forced_warehouse }}" disabled>
 {% else %}
 <select name="warehouse">
-<option>Drewno</option>
-<option>Farby</option>
-<option>Śruby i wkręty</option>
-<option>Pellet</option>
-<option>Golden Oak</option>
-<option>Inne</option>
+{% for warehouse_name in ["Drewno", "Farby", "Śruby i wkręty", "Pellet", "Golden Oak", "Inne"] %}
+<option {% if row.get('warehouse', 'Drewno') == warehouse_name %}selected{% endif %}>{{ warehouse_name }}</option>
+{% endfor %}
 </select>
 {% endif %}
 
 <!-- 🔥 NUMER PACZKI -->
 <label style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-    <input type="hidden" name="has_package_number" value="0">
-    <input type="checkbox" style="width:auto;margin:0;" onchange="togglePackageNumber(this)">
+    <input type="hidden" name="has_package_number" value="{{ '1' if row.get('has_package_number') else '0' }}">
+    <input type="checkbox" style="width:auto;margin:0;" onchange="togglePackageNumber(this)"
+           {% if row.get('has_package_number') %}checked{% endif %}>
     Towar posiada numer paczki
 </label>
-<input name="package_number" maxlength="100" placeholder="Numer paczki (np. PZ-001)" readonly>
-<div class="info package-mode-info">Bez numeru paczki</div>
+<input name="package_number" value="{{ row.get('package_number', '') }}" maxlength="100"
+       placeholder="Numer paczki (np. PZ-001)"
+       {% if row.get('has_package_number') %}required{% else %}readonly{% endif %}>
+<div class="info package-mode-info">{{ "Wymagany numer paczki" if row.get('has_package_number') else "Bez numeru paczki" }}</div>
 
 <!-- 🔥 ILOŚĆ -->
-<input name="qty" type="number" min="0.001" step="0.001" placeholder="Ilość" required>
-<input name="price_netto" type="number" min="0" step="0.01" placeholder="Cena netto">
-<input name="price_brutto" type="number" min="0" step="0.01" placeholder="Cena brutto">
+<input name="qty" value="{{ row.get('qty', '') }}" type="number" min="0.001" step="0.001" placeholder="Ilość" required>
+<input name="price_netto" value="{{ row.get('price_netto', '') }}" type="number" min="0" step="0.01" placeholder="Cena netto">
+<input name="price_brutto" value="{{ row.get('price_brutto', '') }}" type="number" min="0" step="0.01" placeholder="Cena brutto">
 
 <!-- 🔥 JEDNOSTKA -->
 <select name="unit">
-<option>m2</option>
-<option>m3</option>
-<option>szt</option>
-<option>l</option>
-<option>opak</option>
-<option>kg</option>
+{% for unit_name in ["m2", "m3", "szt", "l", "opak", "kg"] %}
+<option {% if row.get('unit', 'm2') == unit_name %}selected{% endif %}>{{ unit_name }}</option>
+{% endfor %}
 </select>
 
 <button type="button" onclick="removeItem(this)" style="background:red;">Usuń</button>
 
 </div>
+{% endfor %}
 
 </div>
 
@@ -151,7 +159,7 @@ button {
 
 <hr>
 
-<button>Dodaj do magazynu</button>
+<button id="saveReceipt" type="submit" disabled>Dodaj do magazynu</button>
 
 </form>
 
@@ -172,10 +180,11 @@ function searchProduct(input) {
     let info = input.closest(".item").querySelector(".info");
 
     box.innerHTML = "";
+    hidden.value = "";
 
     if (!value) {
         box.style.display = "none";
-        hidden.value = "";
+        updateSaveState();
         return;
     }
 
@@ -206,6 +215,7 @@ function searchProduct(input) {
             }
 
             box.style.display = "none";
+            updateSaveState();
         };
 
         box.appendChild(div);
@@ -221,13 +231,16 @@ function addItem() {
     div.innerHTML = document.querySelector(".item").innerHTML;
     div.querySelectorAll("input").forEach(input => {
         if (input.type === "checkbox") input.checked = false;
-        else if (input.type !== "hidden") input.value = "";
+        else if (input.name === "product_id") input.value = "";
+        else if (input.name === "has_package_number") input.value = "0";
+        else if (input.name !== "warehouse") input.value = "";
     });
     const packageInput = div.querySelector("input[name='package_number']");
     if (packageInput) packageInput.readOnly = true;
     const modeInfo = div.querySelector(".package-mode-info");
     if (modeInfo) modeInfo.textContent = "Bez numeru paczki";
     document.getElementById("items").appendChild(div);
+    updateSaveState();
 }
 
 function togglePackageNumber(checkbox) {
@@ -240,11 +253,40 @@ function togglePackageNumber(checkbox) {
     packageInput.required = checkbox.checked;
     if (!checkbox.checked) packageInput.value = "";
     modeInfo.textContent = checkbox.checked ? "Wymagany numer paczki" : "Bez numeru paczki";
+    updateSaveState();
 }
 
 // ❌ USUŃ ITEM
 function removeItem(btn) {
     btn.parentElement.remove();
+    updateSaveState();
+}
+
+function itemComplete(item) {
+    const productId = item.querySelector("input[name='product_id']").value.trim();
+    const qty = Number(item.querySelector("input[name='qty']").value);
+    const warehouse = item.querySelector("select[name='warehouse'], input[type='hidden'][name='warehouse']");
+    const unit = item.querySelector("select[name='unit']");
+    const packageChecked = item.querySelector("input[type='checkbox']").checked;
+    const packageNumber = item.querySelector("input[name='package_number']").value.trim();
+    const netto = item.querySelector("input[name='price_netto']").value;
+    const brutto = item.querySelector("input[name='price_brutto']").value;
+    const pricesValid = (!netto || Number(netto) >= 0) && (!brutto || Number(brutto) >= 0);
+    return Boolean(
+        productId && Number.isFinite(qty) && qty > 0 &&
+        warehouse && warehouse.value && unit && unit.value &&
+        pricesValid && (!packageChecked || packageNumber)
+    );
+}
+
+function receiptItemsValid() {
+    const items = Array.from(document.querySelectorAll("#items .item"));
+    return items.length > 0 && items.every(itemComplete);
+}
+
+function updateSaveState() {
+    const button = document.getElementById("saveReceipt");
+    if (button) button.disabled = !receiptItemsValid();
 }
 
 document.addEventListener("input", function(e){
@@ -269,6 +311,19 @@ document.addEventListener("input", function(e){
             nettoInput.value = (bruttoVal / (1 + VAT)).toFixed(2);
         }
     }
+    updateSaveState();
+});
+
+document.addEventListener("change", updateSaveState);
+document.addEventListener("DOMContentLoaded", updateSaveState);
+
+document.getElementById("receiptForm").addEventListener("submit", function(event) {
+    if (receiptItemsValid()) return;
+    event.preventDefault();
+    const error = document.getElementById("formError");
+    error.textContent = "Dodaj co najmniej jedną kompletną pozycję. Wybierz produkt z listy, podaj dodatnią ilość, a po zaznaczeniu paczki także jej numer.";
+    error.style.display = "block";
+    error.scrollIntoView({behavior: "smooth", block: "center"});
 });
 </script>
 

@@ -10,10 +10,22 @@
     </tr>
     {% for p in packages %}
     <tr>
-        <td style="padding:8px; border-bottom:1px solid #eee;">{{ p[0] }}</td>
-        <td>{{ p[1] }}</td>
-        <td>{{ 'aktywna' if p[2] == 'active' else 'wydana' if p[2] == 'issued' else 'anulowana' }}</td>
+        <td style="padding:8px; border-bottom:1px solid #eee;">{{ p[1] }}</td>
+        <td>{{ p[2] }}</td>
+        <td>{{ 'aktywna' if p[3] == 'active' else 'wydana' if p[3] == 'issued' else 'anulowana' }}</td>
     </tr>
+    {% if can('inventory') %}
+    <tr>
+        <td colspan="3">
+            <form method="POST" action="/packages/{{ p[0] }}/edit" onsubmit="return updatePackage(event, this);"
+                  style="display:flex;gap:6px;margin-bottom:8px;">
+                <input name="number" value="{{ p[1] }}" maxlength="100" required>
+                <input name="qty" value="{{ p[2] }}" type="number" min="0" step="any" required>
+                <button type="submit">Zapisz paczkę</button>
+            </form>
+        </td>
+    </tr>
+    {% endif %}
     {% endfor %}
 </table>
 {% else %}

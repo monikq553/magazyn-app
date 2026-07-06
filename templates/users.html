@@ -97,6 +97,18 @@ input, select {
             <button class="btn">Zmień rolę</button>
         </form>
 
+        {% if u[5] in ['warehouse', 'accounting'] %}
+        <form method="POST" action="/users/{{u[0]}}/import-permissions" style="display:flex;gap:8px;align-items:center;">
+            {% if u[5] == 'warehouse' %}
+            <label><input type="checkbox" name="can_import_warehouse" {% if u[7] %}checked{% endif %}> Import magazynowy</label>
+            {% endif %}
+            {% if u[5] == 'accounting' %}
+            <label><input type="checkbox" name="can_import_accounting" {% if u[8] %}checked{% endif %}> Import księgowy/sklepowy</label>
+            {% endif %}
+            <button class="btn">Zapisz import</button>
+        </form>
+        {% endif %}
+
         <form method="POST" action="/users/{{u[0]}}/reset-password">
             <button class="btn">Resetuj hasło</button>
         </form>

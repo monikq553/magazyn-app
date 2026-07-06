@@ -26,6 +26,9 @@ BACKUP_TABLES = (
     "shop_accounting",
     "issue_doc_photos",
     "issue_doc_history",
+    "contractors",
+    "general_imports",
+    "general_import_rows",
     "system_settings",
     "backup_runs",
 )
@@ -161,6 +164,9 @@ def restore_database(connection, payload):
         "shop_accounting",
         "issue_doc_photos",
         "issue_doc_history",
+        "contractors",
+        "general_imports",
+        "general_import_rows",
         "backup_runs",
     )
     for table_name in insert_order:

@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h2>Import ogólny z Excela</h2>
+
+<div class="card" style="margin-bottom:18px;">
+    <h3>Wgraj skoroszyt</h3>
+    <form method="POST" action="/import-ogolny/upload" enctype="multipart/form-data">
+        <input type="file" name="excel_file" accept=".xlsx" required>
+        <button type="submit">Rozpoznaj dane i pokaż podgląd</button>
+    </form>
+    <p style="color:#6b7280;">
+        Wgranie pliku nie zmienia danych. Najpierw otrzymasz podgląd, możliwość
+        poprawienia wierszy, usunięcia błędów i ręcznego przypisania kolumn.
+    </p>
+    <p>
+        Obsługiwane arkusze: Produkty, Paczki, Wydane produkty, Kontrahenci,
+        Przyjęcia, Dokumenty, Sklep internetowy i Księgowość.
+        Arkusze Podsumowanie oraz Instrukcja są pomijane.
+    </p>
+</div>
+
+<div class="card" style="overflow:auto;">
+    <h3>Historia importów</h3>
+    <table width="100%">
+        <tr>
+            <th>Data</th><th>Plik</th><th>Użytkownik</th><th>Status</th>
+            <th>Dodano</th><th>Zaktualizowano</th><th>Pominięto</th><th>Błędy</th>
+        </tr>
+        {% for item in history %}
+        {% set summary = item[4] or {} %}
+        {% set errors = item[5] or [] %}
+        <tr>
+            <td>{{ item[6] }}</td>
+            <td><a href="/import-ogolny/{{ item[0] }}">{{ item[1] }}</a></td>
+            <td>{{ item[2] }}</td>
+            <td>{{ 'zakończony' if item[3] == 'completed' else 'wersja robocza' }}</td>
+            <td>{{ summary.get('added', 0) }}</td>
+            <td>{{ summary.get('updated', 0) }}</td>
+            <td>{{ summary.get('skipped', 0) }}</td>
+            <td>{{ summary.get('errors', 0) + errors|length }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="8">Brak importów.</td></tr>
+        {% endfor %}
+    </table>
+</div>
+{% endblock %}
