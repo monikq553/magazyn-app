@@ -185,7 +185,8 @@ input:focus {
             {% if can('receive') %}<a href="/przyjecie">Przyjęcie</a>{% endif %}
             {% if can('issue') %}<a href="/wydanie">Wydanie</a>{% endif %}
             {% if can('inventory') %}<a href="/inwestycja-suwaj">Inwestycja Suwaj</a>{% endif %}
-            {% if can('shop') %}<a href="/shop/orders">Sklep internetowy</a>{% endif %}
+            {% if can('shop') %}<a href="/sklep">Sklep internetowy</a>{% endif %}
+            {% if can('accounting') %}<a href="/ksiegowosc">Księgowość</a>{% endif %}
             {% if can('history') %}<a href="/historia">Historia</a>{% endif %}
             {% if can('reports') %}<a href="/report">Raport dzienny</a>{% endif %}
             {% if session.get('role') == 'admin' %}

@@ -3,11 +3,24 @@ import logging
 import math
 import secrets
 import threading
-from flask import Flask, render_template, request, redirect, session, jsonify, Response, make_response
+from flask import (
+    Flask,
+    Response,
+    g,
+    has_request_context,
+    jsonify,
+    make_response,
+    redirect,
+    render_template,
+    request,
+    session,
+)
 from functools import wraps
 import psycopg2
 from psycopg2.pool import ThreadedConnectionPool
 from werkzeug.middleware.proxy_fix import ProxyFix
+from werkzeug.exceptions import HTTPException
+from werkzeug.utils import secure_filename
 from datetime import datetime, timedelta
 import json
 import io
@@ -41,7 +54,10 @@ app = Flask(__name__)
 IS_PRODUCTION = os.environ.get("RENDER", "").lower() == "true"
 configured_secret_key = os.environ.get("SECRET_KEY")
 if IS_PRODUCTION and not configured_secret_key:
-    raise RuntimeError("Brak wymaganej zmiennej środowiskowej SECRET_KEY.")
+    logger.critical(
+        "SECRET_KEY is missing. A temporary key is used; sessions will be invalidated "
+        "after every restart. Configure SECRET_KEY immediately."
+    )
 app.secret_key = configured_secret_key or secrets.token_hex(32)
 app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
@@ -101,6 +117,8 @@ ENDPOINT_PERMISSIONS = {
     "packages_for_product": "inventory",
     "package_lookup": "inventory",
     "add_product": "inventory",
+    "costs": "inventory",
+    "add_cost": "inventory",
     "przyjecie": "receive",
     "receive_doc": "receive",
     "import_excel": "receive",
@@ -114,7 +132,9 @@ ENDPOINT_PERMISSIONS = {
     "inwestycja_suwaj_issue_doc": "issue",
     "historia": "history",
     "doc_detail": "history",
-    "edit_doc": "history",
+    "view_issue_doc_photo": "history",
+    "add_issue_doc_photos": "issue",
+    "edit_doc": "issue",
     "report": "reports",
     "report_pdf": "reports",
     "shop_orders_page": "shop",
@@ -139,16 +159,31 @@ limiter.init_app(app)
 class PooledConn:
     def __init__(self, raw_conn):
         self._raw = raw_conn
+        self._closed = False
 
     def __getattr__(self, item):
         return getattr(self._raw, item)
 
     def close(self):
         global DB_POOL
-        if DB_POOL:
-            DB_POOL.putconn(self._raw)
-        else:
-            self._raw.close()
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._raw.rollback()
+        except Exception:
+            logger.warning("Database rollback before returning connection failed.", exc_info=True)
+        try:
+            if DB_POOL:
+                DB_POOL.putconn(self._raw)
+            else:
+                self._raw.close()
+        except Exception:
+            logger.warning("Returning database connection to the pool failed.", exc_info=True)
+            try:
+                self._raw.close()
+            except Exception:
+                logger.warning("Closing failed database connection failed.", exc_info=True)
 
 
 def init_db_pool():
@@ -158,7 +193,11 @@ def init_db_pool():
     dsn = os.environ.get("DATABASE_URL")
     if not dsn:
         raise RuntimeError("Brak wymaganej zmiennej środowiskowej DATABASE_URL.")
-    pool_size = max(2, int(os.environ.get("DB_POOL_SIZE", "5")))
+    try:
+        pool_size = max(2, int(os.environ.get("DB_POOL_SIZE", "5")))
+    except (TypeError, ValueError):
+        pool_size = 5
+        logger.warning("Invalid DB_POOL_SIZE; using 5.")
     candidates = [dsn]
     try:
         parsed = urlsplit(dsn)
@@ -243,32 +282,54 @@ def get_missing_firebase_web_envs():
         "FIREBASE_API_KEY": "apiKey",
         "FIREBASE_AUTH_DOMAIN": "authDomain",
         "FIREBASE_PROJECT_ID": "projectId",
-        "FIREBASE_STORAGE_BUCKET": "storageBucket",
-        "FIREBASE_MESSAGING_SENDER_ID": "messagingSenderId",
         "FIREBASE_APP_ID": "appId",
-        "FIREBASE_MEASUREMENT_ID": "measurementId",
     }
     return [env_key for env_key, cfg_key in key_map.items() if not FIREBASE_CONFIG.get(cfg_key)]
 
 
-if IS_PRODUCTION and get_missing_firebase_web_envs():
-    raise RuntimeError(
-        "Brak wymaganych zmiennych Firebase Web: "
-        + ", ".join(get_missing_firebase_web_envs())
+if get_missing_firebase_web_envs():
+    logger.error(
+        "Firebase Web configuration is incomplete: %s",
+        ", ".join(get_missing_firebase_web_envs()),
     )
+if not os.environ.get("DATABASE_URL"):
+    logger.error("DATABASE_URL is missing; database-backed pages will be unavailable.")
+if not ADMIN_EMAILS:
+    logger.warning(
+        "ADMIN_EMAILS is empty; automatic creation of the first administrator is disabled."
+    )
+if not FIREBASE_CONFIG.get("storageBucket"):
+    logger.warning("FIREBASE_STORAGE_BUCKET is missing; database backups are unavailable.")
+if not os.environ.get("BACKUP_ENCRYPTION_KEY"):
+    logger.warning("BACKUP_ENCRYPTION_KEY is missing; database backups are unavailable.")
 init_firebase_admin()
-if IS_PRODUCTION and not FIREBASE_ADMIN_READY:
-    raise RuntimeError(FIREBASE_ADMIN_ERROR or "Firebase Admin nie jest skonfigurowany.")
 
 
 # 🔥 DB
 def db():
     init_db_pool()
     raw = DB_POOL.getconn()
-    raw.autocommit = False
-    with raw.cursor() as cur:
-        cur.execute("SET statement_timeout = 15000")
-    return PooledConn(raw)
+    try:
+        raw.autocommit = False
+        with raw.cursor() as cur:
+            cur.execute("SET statement_timeout = 15000")
+        connection = PooledConn(raw)
+        if has_request_context():
+            connections = getattr(g, "_database_connections", None)
+            if connections is None:
+                connections = []
+                g._database_connections = connections
+            connections.append(connection)
+        return connection
+    except Exception:
+        DB_POOL.putconn(raw, close=True)
+        raise
+
+
+@app.teardown_request
+def close_request_database_connections(_error=None):
+    for connection in g.pop("_database_connections", []):
+        connection.close()
 
 
 # 🔥 INIT DB
@@ -323,8 +384,9 @@ def run_db_migrations():
                 )
             """)
         else:
-            # Jednorazowe usunięcie wcześniejszych kont zgodnie z migracją do Firebase.
-            cur.execute("DELETE FROM users")
+            # Tabela może już zawierać poprawne konta Firebase, np. po odtworzeniu
+            # starszej kopii bez wpisu w schema_migrations. Nie usuwaj ich ponownie.
+            logger.info("Existing Firebase-compatible users table preserved.")
         cur.execute(
             "INSERT INTO schema_migrations(name) VALUES ('firebase_users_v2')"
         )
@@ -455,8 +517,9 @@ def run_db_migrations():
     cur.execute("""
         UPDATE issue_docs
         SET movement_type=CASE
-            WHEN COALESCE(doc_number, '') LIKE 'PZ%' THEN 'PZ'
-            WHEN COALESCE(doc_number, '') LIKE 'WZ%' THEN 'WZ'
+            WHEN upper(COALESCE(doc_number, '')) LIKE 'PZ%' THEN 'PZ'
+            WHEN upper(COALESCE(doc_number, '')) LIKE 'RW%' THEN 'RW'
+            WHEN upper(COALESCE(doc_number, '')) LIKE 'WZ%' THEN 'WZ'
             ELSE movement_type
         END
         WHERE movement_type IS NULL
@@ -522,7 +585,10 @@ def run_db_migrations():
                 ADD CONSTRAINT issue_items_package_fk
                 FOREIGN KEY (package_id) REFERENCES packages(id) ON DELETE SET NULL NOT VALID;
             END IF;
-            UPDATE users SET role='warehouse' WHERE role='employee';
+            UPDATE users SET role='warehouse'
+            WHERE role IS NULL OR role NOT IN ('admin', 'warehouse', 'shop', 'accounting');
+            UPDATE users SET status='active'
+            WHERE status IS NULL OR status NOT IN ('active', 'blocked');
             IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname='users_role_valid') THEN
                 ALTER TABLE users DROP CONSTRAINT users_role_valid;
             END IF;
@@ -551,36 +617,6 @@ def run_db_migrations():
     cur.execute("CREATE INDEX IF NOT EXISTS idx_action_logs_actor ON action_logs(lower(actor_email))")
 
     cur.execute("""
-    CREATE TABLE IF NOT EXISTS shop_orders(
-        id SERIAL PRIMARY KEY,
-        number TEXT UNIQUE NOT NULL,
-        customer TEXT NOT NULL,
-        payment_status TEXT NOT NULL DEFAULT 'new',
-        warehouse_status TEXT NOT NULL DEFAULT 'new',
-        accounting_status TEXT NOT NULL DEFAULT 'new',
-        shipping_status TEXT NOT NULL DEFAULT 'new',
-        invoice_number TEXT,
-        tracking_number TEXT,
-        notes TEXT,
-        stage TEXT NOT NULL DEFAULT 'new',
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-    """)
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS shop_order_items(
-        id SERIAL PRIMARY KEY,
-        order_id INTEGER NOT NULL REFERENCES shop_orders(id) ON DELETE CASCADE,
-        product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE RESTRICT,
-        qty REAL NOT NULL CHECK (qty > 0),
-        reserved_qty REAL NOT NULL DEFAULT 0 CHECK (reserved_qty >= 0),
-        issued_qty REAL NOT NULL DEFAULT 0 CHECK (issued_qty >= 0)
-    );
-    """)
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_shop_orders_stage ON shop_orders(stage)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_shop_order_items_order ON shop_order_items(order_id)")
-
-    cur.execute("""
     CREATE TABLE IF NOT EXISTS backup_runs(
         id SERIAL PRIMARY KEY,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -596,7 +632,7 @@ def run_db_migrations():
     cur.execute("""
         ALTER TABLE users
         ADD CONSTRAINT users_role_valid
-        CHECK (role IN ('admin', 'employee', 'warehouse', 'shop', 'accounting'))
+        CHECK (role IN ('admin', 'warehouse', 'shop', 'accounting'))
     """)
     cur.execute("""
     CREATE TABLE IF NOT EXISTS shop_orders(
@@ -636,6 +672,107 @@ def run_db_migrations():
         issued_qty REAL NOT NULL DEFAULT 0
     );
     """)
+    # Reconcile databases created by the older, incompatible /shop/orders module.
+    # The legacy columns are retained as nullable so existing data can be migrated
+    # without destructive table replacement.
+    cur.execute("""
+        ALTER TABLE shop_orders
+            ADD COLUMN IF NOT EXISTS number TEXT,
+            ADD COLUMN IF NOT EXISTS customer TEXT,
+            ADD COLUMN IF NOT EXISTS warehouse_status TEXT,
+            ADD COLUMN IF NOT EXISTS accounting_status TEXT,
+            ADD COLUMN IF NOT EXISTS shipping_status TEXT,
+            ADD COLUMN IF NOT EXISTS invoice_number TEXT,
+            ADD COLUMN IF NOT EXISTS stage TEXT,
+            ADD COLUMN IF NOT EXISTS order_number TEXT,
+            ADD COLUMN IF NOT EXISTS order_date DATE,
+            ADD COLUMN IF NOT EXISTS customer_name TEXT,
+            ADD COLUMN IF NOT EXISTS delivery_address TEXT,
+            ADD COLUMN IF NOT EXISTS phone TEXT,
+            ADD COLUMN IF NOT EXISTS email TEXT,
+            ADD COLUMN IF NOT EXISTS shipping_cost REAL DEFAULT 0,
+            ADD COLUMN IF NOT EXISTS payment_method TEXT,
+            ADD COLUMN IF NOT EXISTS status TEXT,
+            ADD COLUMN IF NOT EXISTS sales_document_number TEXT,
+            ADD COLUMN IF NOT EXISTS nip TEXT,
+            ADD COLUMN IF NOT EXISTS document_confirmed BOOLEAN DEFAULT FALSE,
+            ADD COLUMN IF NOT EXISTS created_by TEXT,
+            ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW(),
+            ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW()
+    """)
+    cur.execute("ALTER TABLE shop_orders ALTER COLUMN number DROP NOT NULL")
+    cur.execute("ALTER TABLE shop_orders ALTER COLUMN customer DROP NOT NULL")
+    cur.execute("""
+        UPDATE shop_orders
+        SET order_number=COALESCE(NULLIF(order_number, ''), NULLIF(number, ''), 'LEGACY/' || id),
+            order_date=COALESCE(order_date, created_at::date, CURRENT_DATE),
+            customer_name=COALESCE(NULLIF(customer_name, ''), NULLIF(customer, ''), 'Nieznany klient'),
+            delivery_address=COALESCE(delivery_address, ''),
+            shipping_cost=COALESCE(shipping_cost, 0),
+            payment_status=COALESCE(NULLIF(payment_status, ''), 'Oczekuje na płatność'),
+            status=COALESCE(NULLIF(status, ''),
+                CASE stage
+                    WHEN 'sent' THEN 'Wysłane'
+                    WHEN 'completed' THEN 'Zakończone'
+                    WHEN 'cancelled' THEN 'Anulowane'
+                    WHEN 'packed' THEN 'Spakowane'
+                    WHEN 'document_created' THEN 'Dokument wystawiony'
+                    WHEN 'reserved' THEN 'Towar zarezerwowany'
+                    ELSE 'Nowe zamówienie'
+                END),
+            document_confirmed=COALESCE(document_confirmed, FALSE),
+            created_at=COALESCE(created_at, NOW()),
+            updated_at=COALESCE(updated_at, NOW())
+    """)
+    cur.execute("""
+        ALTER TABLE shop_orders
+            ALTER COLUMN order_number SET NOT NULL,
+            ALTER COLUMN order_date SET NOT NULL,
+            ALTER COLUMN customer_name SET NOT NULL,
+            ALTER COLUMN delivery_address SET NOT NULL,
+            ALTER COLUMN shipping_cost SET NOT NULL,
+            ALTER COLUMN payment_status SET NOT NULL,
+            ALTER COLUMN status SET NOT NULL,
+            ALTER COLUMN document_confirmed SET NOT NULL,
+            ALTER COLUMN created_at SET NOT NULL,
+            ALTER COLUMN updated_at SET NOT NULL
+    """)
+    cur.execute("""
+        ALTER TABLE shop_order_items
+            ADD COLUMN IF NOT EXISTS product_name TEXT,
+            ADD COLUMN IF NOT EXISTS price_netto REAL DEFAULT 0,
+            ADD COLUMN IF NOT EXISTS price_brutto REAL DEFAULT 0,
+            ADD COLUMN IF NOT EXISTS vat REAL DEFAULT 0,
+            ADD COLUMN IF NOT EXISTS warehouse TEXT,
+            ADD COLUMN IF NOT EXISTS reserved_qty REAL DEFAULT 0,
+            ADD COLUMN IF NOT EXISTS issued_qty REAL DEFAULT 0
+    """)
+    cur.execute("""
+        UPDATE shop_order_items i
+        SET product_name=COALESCE(NULLIF(i.product_name, ''), p.name, 'Nieznany produkt'),
+            warehouse=COALESCE(NULLIF(i.warehouse, ''), p.warehouse, 'Inne'),
+            price_netto=COALESCE(i.price_netto, p.price_netto, 0),
+            price_brutto=COALESCE(i.price_brutto,
+                COALESCE(p.price_netto, 0) * (1 + COALESCE(p.vat, 0) / 100), 0),
+            vat=COALESCE(i.vat, p.vat, 0),
+            reserved_qty=COALESCE(i.reserved_qty, 0),
+            issued_qty=COALESCE(i.issued_qty, 0)
+        FROM products p
+        WHERE p.id=i.product_id
+    """)
+    cur.execute("""
+        ALTER TABLE shop_order_items
+            ALTER COLUMN product_name SET NOT NULL,
+            ALTER COLUMN price_netto SET NOT NULL,
+            ALTER COLUMN price_brutto SET NOT NULL,
+            ALTER COLUMN vat SET NOT NULL,
+            ALTER COLUMN warehouse SET NOT NULL,
+            ALTER COLUMN reserved_qty SET NOT NULL,
+            ALTER COLUMN issued_qty SET NOT NULL
+    """)
+    cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_shop_orders_order_number ON shop_orders(order_number)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_shop_orders_stage ON shop_orders(stage)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_shop_order_items_order ON shop_order_items(order_id)")
     cur.execute("""
     CREATE TABLE IF NOT EXISTS shop_order_history(
         id SERIAL PRIMARY KEY,
@@ -800,8 +937,8 @@ MAX_ISSUE_PHOTO_BYTES = 5 * 1024 * 1024
 
 
 def is_issue_document(movement_type, doc_number):
-    movement = (movement_type or "").upper()
-    number = (doc_number or "").upper()
+    movement = str(movement_type or "").upper()
+    number = str(doc_number or "").upper()
     return movement in {"WZ", "RW"} or number.startswith("WZ") or number.startswith("RW")
 
 
@@ -817,6 +954,7 @@ def issue_doc_history(cur, doc_id, action, details=""):
 
 def clean_photo_filename(filename):
     filename = (filename or "zdjecie").rsplit("/", 1)[-1].rsplit("\\", 1)[-1].strip()
+    filename = "".join(char for char in filename if ord(char) >= 32 and char not in {'"', "'"})
     return filename[:180] or "zdjecie"
 
 
@@ -852,7 +990,6 @@ def save_issue_photos(cur, doc_id, uploads, note=""):
         issue_doc_history(cur, doc_id, "dodano zdjęcia", f"Liczba zdjęć: {saved}")
     return saved
 
-SHOP_ROLES = {"admin", "employee", "warehouse", "shop", "accounting"}
 SHOP_STATUS_FLOW = [
     "Nowe zamówienie", "Przyjęte", "Oczekuje na płatność", "Opłacone",
     "Towar zarezerwowany", "Dokument wystawiony", "W trakcie pakowania",
@@ -970,9 +1107,9 @@ def shop_history(cur, order_id, action, details=""):
 
 
 def create_shop_document_payload(order, items):
-    subtotal_net = sum((item[5] or 0) * (item[4] or 0) for item in items)
-    subtotal_gross = sum((item[6] or 0) * (item[4] or 0) for item in items)
-    shipping = order[8] or 0
+    subtotal_net = sum((item[4] or 0) * (item[3] or 0) for item in items)
+    subtotal_gross = sum((item[5] or 0) * (item[3] or 0) for item in items)
+    shipping = order[7] or 0
     return {
         "document_number": order[11] or f"DS/{order[0]}/{datetime.now().year}",
         "date": order[2],
@@ -983,8 +1120,8 @@ def create_shop_document_payload(order, items):
         "nip": order[14] or "",
         "items": [
             {
-                "name": item[3], "qty": item[4], "net": item[5], "vat": item[7],
-                "gross": item[6], "total_gross": (item[6] or 0) * (item[4] or 0),
+                "name": item[2], "qty": item[3], "net": item[4], "vat": item[6],
+                "gross": item[5], "total_gross": (item[5] or 0) * (item[3] or 0),
             }
             for item in items
         ],
@@ -1020,16 +1157,28 @@ def simple_docx_bytes(payload):
 
 
 def shop_pdf_bytes(payload):
+    from xml.sax.saxutils import escape
+
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4)
     styles = getSampleStyleSheet()
     story = [Paragraph("Dokument sprzedaży", styles["Title"]), Spacer(1, 12)]
     for key, label in [("document_number", "Numer"), ("date", "Data"), ("receipt_or_invoice", "Paragon/Faktura"), ("buyer", "Nabywca"), ("address", "Adres"), ("nip", "NIP")]:
-        story.append(Paragraph(f"<b>{label}:</b> {payload.get(key) or ''}", styles["Normal"]))
+        story.append(Paragraph(
+            f"<b>{label}:</b> {escape(str(payload.get(key) or ''))}",
+            styles["Normal"],
+        ))
     data = [["Produkt", "Ilość", "Netto", "VAT", "Brutto"]] + [[i["name"], i["qty"], f"{i['net']:.2f}", f"{i['vat']:.0f}%", f"{i['total_gross']:.2f}"] for i in payload["items"]]
     table = Table(data, repeatRows=1)
     table.setStyle(TableStyle([("BACKGROUND", (0,0), (-1,0), colors.lightgrey), ("GRID", (0,0), (-1,-1), 0.5, colors.grey)]))
-    story += [Spacer(1, 12), table, Spacer(1, 12), Paragraph(f"Wysyłka: {payload['shipping']:.2f}", styles["Normal"]), Paragraph(f"Razem brutto: {payload['total_gross']:.2f}", styles["Heading2"]), Paragraph(f"Uwagi: {payload['notes']}", styles["Normal"])]
+    story += [
+        Spacer(1, 12),
+        table,
+        Spacer(1, 12),
+        Paragraph(f"Wysyłka: {payload['shipping']:.2f}", styles["Normal"]),
+        Paragraph(f"Razem brutto: {payload['total_gross']:.2f}", styles["Heading2"]),
+        Paragraph(f"Uwagi: {escape(str(payload['notes']))}", styles["Normal"]),
+    ]
     doc.build(story)
     return buffer.getvalue()
 
@@ -1110,13 +1259,24 @@ def inject_permissions():
 def login():
     if 'user' in session:
         return redirect('/')
-    return render_template(
-        "login.html",
-        firebase_config=FIREBASE_CONFIG,
-        firebase_admin_ready=FIREBASE_ADMIN_READY,
-        firebase_admin_error=FIREBASE_ADMIN_ERROR,
-        missing_firebase_web_envs=get_missing_firebase_web_envs(),
-    )
+    try:
+        return render_template(
+            "login.html",
+            firebase_config=FIREBASE_CONFIG,
+            firebase_admin_ready=FIREBASE_ADMIN_READY,
+            firebase_admin_error=FIREBASE_ADMIN_ERROR,
+            missing_firebase_web_envs=get_missing_firebase_web_envs(),
+        )
+    except Exception:
+        logger.exception("Login page rendering failed.")
+        return (
+            "<!doctype html><html lang='pl'><meta charset='utf-8'>"
+            "<title>Logowanie niedostępne</title><body>"
+            "<h1>Logowanie jest chwilowo niedostępne</h1>"
+            "<p>Administrator został poinformowany. Spróbuj ponownie później.</p>"
+            "</body></html>",
+            503,
+        )
 
 
 @app.route('/register')
@@ -1145,48 +1305,66 @@ def create_session():
         if firebase_user.disabled:
             return jsonify({"ok": False, "error": "Konto jest zablokowane."}), 403
     except Exception:
+        logger.info("Firebase ID token rejected.", exc_info=True)
         return jsonify({"ok": False, "error": "Nieprawidłowy lub wygasły token"}), 401
     if not email or not uid:
         return jsonify({"ok": False, "error": "Brak danych użytkownika"}), 400
 
-    ensure_db_initialized()
-    conn = db()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT role, status FROM users WHERE firebase_uid=%s OR lower(email)=lower(%s) FOR UPDATE",
-        (uid, email),
-    )
-    row = cur.fetchone()
-    if not row:
-        if email not in ADMIN_EMAILS:
-            conn.close()
-            return jsonify({"ok": False, "error": "Brak konta. Skontaktuj się z administratorem."}), 403
-        display_name = (decoded.get("name") or firebase_user.display_name or "").strip()
-        first_name, _, last_name = display_name.partition(" ")
-        role = "admin"
+    conn = None
+    try:
+        ensure_db_initialized()
+        conn = db()
+        cur = conn.cursor()
         cur.execute(
-            """
-            INSERT INTO users(firebase_uid, first_name, last_name, email, role, status)
-            VALUES (%s,%s,%s,%s,'admin','active')
-            """,
-            (uid, first_name, last_name, email),
+            "SELECT role, status FROM users WHERE firebase_uid=%s OR lower(email)=lower(%s) FOR UPDATE",
+            (uid, email),
         )
-    else:
-        role, status = row
-        if role == "employee":
-            role = "warehouse"
-        if status != "active":
+        row = cur.fetchone()
+        if not row:
+            if email not in ADMIN_EMAILS:
+                if not ADMIN_EMAILS:
+                    logger.error(
+                        "Login rejected because ADMIN_EMAILS is empty and no application user exists."
+                    )
+                return jsonify({
+                    "ok": False,
+                    "error": "Brak konta. Skontaktuj się z administratorem.",
+                }), 403
+            display_name = (decoded.get("name") or firebase_user.display_name or "").strip()
+            first_name, _, last_name = display_name.partition(" ")
+            role = "admin"
+            cur.execute(
+                """
+                INSERT INTO users(firebase_uid, first_name, last_name, email, role, status)
+                VALUES (%s,%s,%s,%s,'admin','active')
+                """,
+                (uid, first_name, last_name, email),
+            )
+        else:
+            role, status = row
+            if role == "employee":
+                role = "warehouse"
+            if status != "active":
+                return jsonify({"ok": False, "error": "Konto jest zablokowane."}), 403
+            cur.execute(
+                """
+                UPDATE users SET firebase_uid=%s, email=%s, role=%s, updated_at=NOW()
+                WHERE firebase_uid=%s OR lower(email)=lower(%s)
+                """,
+                (uid, email, role, uid, email),
+            )
+        conn.commit()
+    except Exception:
+        if conn:
+            conn.rollback()
+        logger.exception("Application session database synchronization failed.")
+        return jsonify({
+            "ok": False,
+            "error": "Baza danych jest chwilowo niedostępna. Spróbuj ponownie później.",
+        }), 503
+    finally:
+        if conn:
             conn.close()
-            return jsonify({"ok": False, "error": "Konto jest zablokowane."}), 403
-        cur.execute(
-            """
-            UPDATE users SET firebase_uid=%s, email=%s, updated_at=NOW()
-            WHERE firebase_uid=%s OR lower(email)=lower(%s)
-            """,
-            (uid, email, uid, email),
-        )
-    conn.commit()
-    conn.close()
     expires = timedelta(days=5)
     try:
         firebase_cookie = auth.create_session_cookie(id_token, expires_in=expires)
@@ -1252,20 +1430,34 @@ def require_login_for_private_app():
         try:
             decoded = auth.verify_session_cookie(firebase_cookie, check_revoked=True)
         except Exception:
+            logger.info("Firebase session cookie rejected.", exc_info=True)
             decoded = None
 
     if decoded:
         uid = decoded.get("uid")
         email = (decoded.get("email") or "").strip().lower()
-        ensure_db_initialized()
-        conn = db()
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT role, status FROM users WHERE firebase_uid=%s AND lower(email)=lower(%s)",
-            (uid, email),
-        )
-        account = cur.fetchone()
-        conn.close()
+        try:
+            ensure_db_initialized()
+            conn = db()
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT role, status FROM users WHERE firebase_uid=%s AND lower(email)=lower(%s)",
+                (uid, email),
+            )
+            account = cur.fetchone()
+            conn.close()
+        except Exception:
+            logger.exception("Authenticated account lookup failed.")
+            if request.path.startswith("/api/") or request.is_json:
+                return jsonify({
+                    "ok": False,
+                    "error": "Baza danych jest chwilowo niedostępna.",
+                }), 503
+            return render_template(
+                "error.html",
+                title="Aplikacja chwilowo niedostępna",
+                message="Nie udało się połączyć z bazą danych. Spróbuj ponownie później.",
+            ), 503
         if account and account[1] == "active":
             session["user"] = email
             session["uid"] = uid
@@ -1384,6 +1576,38 @@ def add_private_cache_headers(response):
     return response
 
 
+@app.errorhandler(psycopg2.Error)
+def handle_database_error(error):
+    logger.exception("Unhandled database error.", exc_info=error)
+    if request.path.startswith("/api/") or request.is_json:
+        return jsonify({
+            "ok": False,
+            "error": "Baza danych jest chwilowo niedostępna.",
+        }), 503
+    return render_template(
+        "error.html",
+        title="Aplikacja chwilowo niedostępna",
+        message="Nie udało się wykonać operacji na bazie danych. Spróbuj ponownie później.",
+    ), 503
+
+
+@app.errorhandler(Exception)
+def handle_unexpected_error(error):
+    if isinstance(error, HTTPException):
+        return error
+    logger.exception("Unhandled application error.", exc_info=error)
+    if request.path.startswith("/api/") or request.is_json:
+        return jsonify({
+            "ok": False,
+            "error": "Wystąpił nieoczekiwany błąd. Spróbuj ponownie później.",
+        }), 500
+    return render_template(
+        "error.html",
+        title="Nie udało się wykonać operacji",
+        message="Wystąpił nieoczekiwany błąd. Spróbuj ponownie później.",
+    ), 500
+
+
 @app.route('/')
 @login_required
 def home():
@@ -1414,6 +1638,12 @@ def dashboard_page():
 @cache.cached(timeout=30)
 def magazyny():
     return render_template("magazyny.html", warehouses=WAREHOUSES)
+
+
+@app.route('/magazyn')
+@login_required
+def magazyn_redirect():
+    return redirect('/magazyn/Wszystko')
 
 
 @app.route('/users')
@@ -1452,12 +1682,11 @@ def add_user():
     try:
         try:
             firebase_user = auth.get_user_by_email(email)
-            if firebase_user.disabled:
-                firebase_user = auth.update_user(
-                    firebase_user.uid,
-                    disabled=False,
-                    display_name=f"{first_name} {last_name}",
-                )
+            firebase_user = auth.update_user(
+                firebase_user.uid,
+                disabled=False,
+                display_name=f"{first_name} {last_name}",
+            )
         except auth.UserNotFoundError:
             firebase_user = auth.create_user(
                 email=email,
@@ -1634,6 +1863,10 @@ def toggle_user_block(user_id):
         conn.commit()
     except Exception:
         conn.rollback()
+        try:
+            auth.update_user(uid, disabled=(status == "blocked"))
+        except Exception:
+            logger.exception("Firebase block-state compensation failed.")
         logger.exception("User block toggle failed.")
         return "Nie udało się zmienić statusu konta.", 502
     finally:
@@ -1987,105 +2220,20 @@ def add_cost():
     return redirect('/costs')
 
 
-SHOP_ORDER_STAGES = {
-    "new", "accepted", "reserved", "document_created", "packed",
-    "sent", "completed", "cancelled",
-}
-
-
 @app.route('/shop/orders')
 @login_required
 def shop_orders_page():
-    conn = db()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT id, number, customer, payment_status, warehouse_status,
-               accounting_status, shipping_status, invoice_number,
-               tracking_number, stage, notes, created_at
-        FROM shop_orders ORDER BY id DESC LIMIT 200
-        """
-    )
-    orders = cur.fetchall()
-    cur.execute("SELECT id, name, qty, unit, warehouse FROM products ORDER BY warehouse, lower(name), id")
-    products = cur.fetchall()
-    conn.close()
-    return render_template("shop_orders.html", orders=orders, products=products, stages=SHOP_ORDER_STAGES)
+    return redirect("/sklep")
 
 
 @app.route('/shop/orders/add', methods=['POST'])
 @login_required
 def add_shop_order():
-    number = (request.form.get("number") or "").strip()
-    customer = (request.form.get("customer") or "").strip()
-    product_id = request.form.get("product_id")
-    if not number or len(number) > 100:
-        return "Numer zamówienia jest wymagany (maksymalnie 100 znaków).", 400
-    if not customer or len(customer) > 200:
-        return "Klient jest wymagany (maksymalnie 200 znaków).", 400
-    try:
-        product_id = int(product_id)
-        qty = parse_positive_number(request.form.get("qty"), "Ilość")
-    except (TypeError, ValueError) as exc:
-        return str(exc), 400
-    notes = (request.form.get("notes") or "").strip()
-    conn = db()
-    cur = conn.cursor()
-    try:
-        cur.execute("SELECT id, qty FROM products WHERE id=%s FOR UPDATE", (product_id,))
-        product = cur.fetchone()
-        if not product:
-            raise ValueError("Produkt nie istnieje.")
-        cur.execute(
-            """
-            SELECT COALESCE(SUM(oi.reserved_qty - oi.issued_qty), 0)
-            FROM shop_order_items oi
-            JOIN shop_orders o ON o.id=oi.order_id
-            WHERE oi.product_id=%s AND o.stage NOT IN ('sent','completed','cancelled')
-            """,
-            (product_id,),
-        )
-        reserved = cur.fetchone()[0] or 0
-        available = product[1] - reserved
-        if available + 1e-9 < qty:
-            raise ValueError(f"Brak dostępnego stanu. Dostępne po rezerwacjach: {available}.")
-        cur.execute(
-            """
-            INSERT INTO shop_orders(number, customer, payment_status, warehouse_status,
-                                    accounting_status, shipping_status, invoice_number,
-                                    tracking_number, notes, stage)
-            VALUES (%s,%s,%s,'reserved','new','new',%s,%s,%s,'reserved')
-            RETURNING id
-            """,
-            (
-                number, customer,
-                request.form.get("payment_status") or "new",
-                (request.form.get("invoice_number") or "").strip() or None,
-                (request.form.get("tracking_number") or "").strip() or None,
-                notes,
-            ),
-        )
-        order_id = cur.fetchone()[0]
-        cur.execute(
-            """
-            INSERT INTO shop_order_items(order_id, product_id, qty, reserved_qty)
-            VALUES (%s,%s,%s,%s)
-            """,
-            (order_id, product_id, qty, qty),
-        )
-        log_action("shop_order.created_reserved", "shop_order", order_id, {"number": number, "qty": qty}, conn)
-        conn.commit()
-        cache.clear()
-    except ValueError as exc:
-        conn.rollback()
-        return str(exc), 400
-    except Exception:
-        conn.rollback()
-        logger.exception("Shop order creation failed.")
-        return "Nie udało się utworzyć zamówienia.", 500
-    finally:
-        conn.close()
-    return redirect("/shop/orders")
+    return (
+        "Ten formularz został wycofany po ujednoliceniu modułu sklepu. "
+        "Otwórz moduł Sklep internetowy i ponów operację.",
+        409,
+    )
 
 
 def form_value(values, index, default=""):
@@ -2098,6 +2246,17 @@ def normalized_document_date(value):
         datetime.strptime(value, "%Y-%m-%d")
     except ValueError:
         raise ValueError("Nieprawidłowa data dokumentu.")
+    return value
+
+
+def normalized_optional_date(value, field_name):
+    value = (value or "").strip()
+    if not value:
+        return ""
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        raise ValueError(f"{field_name}: nieprawidłowa data.")
     return value
 
 
@@ -2125,7 +2284,8 @@ def collect_document_items(forced_warehouse=None, issuing=False):
         price_netto = parse_nonnegative_number(form_value(netto_values, index), "Cena netto")
         price_brutto = parse_nonnegative_number(form_value(brutto_values, index), "Cena brutto")
         package_value = form_value(package_values, index).strip()
-        has_package_number = form_value(has_package_values, index) == "1"
+        marker = form_value(has_package_values, index)
+        has_package_number = marker == "1" or (not marker and bool(package_value))
         if not issuing and len(package_value) > 100:
             raise ValueError("Numer paczki może mieć maksymalnie 100 znaków.")
         if not issuing and has_package_number and not package_value:
@@ -2163,6 +2323,7 @@ def create_receipt(forced_warehouse=None):
     cur = conn.cursor()
     try:
         resolved = []
+        request_packages = set()
         for item in items:
             cur.execute(
                 "SELECT name, unit, price_netto, vat FROM products WHERE id=%s",
@@ -2186,6 +2347,12 @@ def create_receipt(forced_warehouse=None):
             target = cur.fetchone()
             target_id = target[0] if target else None
             if item["package"]:
+                package_key = (item["warehouse"].casefold(), item["package"].casefold())
+                if package_key in request_packages:
+                    raise ValueError(
+                        f"Paczka {item['package']} została podana więcej niż raz."
+                    )
+                request_packages.add(package_key)
                 cur.execute(
                     "SELECT pg_advisory_xact_lock(hashtext(%s))",
                     (f"package:{item['warehouse']}:{item['package'].casefold()}",),
@@ -2525,6 +2692,7 @@ def process_excel_import(upload):
     try:
         dataframe = pd.read_excel(io.BytesIO(upload.read()), engine="openpyxl")
     except Exception:
+        logger.warning("Excel file parsing failed.", exc_info=True)
         return "Nie udało się odczytać pliku Excel.", 400
     required = {"name", "qty", "unit", "warehouse"}
     if not required.issubset(dataframe.columns):
@@ -3076,7 +3244,7 @@ def doc_detail(id):
         WHERE i.doc_id=%s
     """, (id,))
     items = cur.fetchall()
-    issue_document = is_issue_document(doc[7] if len(doc) > 7 else None, doc[5])
+    issue_document = is_issue_document(doc[6] if len(doc) > 6 else None, doc[5])
     photos = []
     history = []
     if issue_document:
@@ -3212,8 +3380,11 @@ def void_document(document_id):
             return redirect("/historia")
         if document[2]:
             return redirect(f"/doc/{document_id}")
+        document_number = str(document[1] or "").upper()
         movement_type = document[0] or (
-            "WZ" if str(document[1] or "").startswith("WZ") else "PZ"
+            "RW" if document_number.startswith("RW")
+            else "WZ" if document_number.startswith("WZ")
+            else "PZ"
         )
         cur.execute(
             """
@@ -3336,17 +3507,19 @@ def backup_bucket():
 
 def perform_database_backup(created_by):
     guard_conn = db()
-    guard_cur = guard_conn.cursor()
-    guard_cur.execute("SELECT pg_try_advisory_lock(67431031)")
-    if not guard_cur.fetchone()[0]:
-        guard_conn.close()
-        raise RuntimeError("Inna kopia zapasowa jest już wykonywana.")
     try:
+        guard_cur = guard_conn.cursor()
+        guard_cur.execute("SELECT pg_try_advisory_lock(67431031)")
+        if not guard_cur.fetchone()[0]:
+            raise RuntimeError("Inna kopia zapasowa jest już wykonywana.")
         return _perform_database_backup(created_by)
     finally:
         try:
-            guard_cur.execute("SELECT pg_advisory_unlock(67431031)")
-            guard_conn.commit()
+            if "guard_cur" in locals():
+                guard_cur.execute("SELECT pg_advisory_unlock(67431031)")
+                guard_conn.commit()
+        except Exception:
+            logger.warning("Database backup advisory lock cleanup failed.", exc_info=True)
         finally:
             guard_conn.close()
 
@@ -3354,17 +3527,19 @@ def perform_database_backup(created_by):
 def _perform_database_backup(created_by):
     ensure_db_initialized()
     log_conn = db()
-    log_cur = log_conn.cursor()
-    log_cur.execute(
-        """
-        INSERT INTO backup_runs(created_by, status)
-        VALUES (%s, 'running') RETURNING id
-        """,
-        (created_by,),
-    )
-    run_id = log_cur.fetchone()[0]
-    log_conn.commit()
-    log_conn.close()
+    try:
+        log_cur = log_conn.cursor()
+        log_cur.execute(
+            """
+            INSERT INTO backup_runs(created_by, status)
+            VALUES (%s, 'running') RETURNING id
+            """,
+            (created_by,),
+        )
+        run_id = log_cur.fetchone()[0]
+        log_conn.commit()
+    finally:
+        log_conn.close()
     try:
         export_conn = db()
         try:
@@ -3388,17 +3563,19 @@ def _perform_database_backup(created_by):
             content_type="application/octet-stream",
         )
         update_conn = db()
-        update_cur = update_conn.cursor()
-        update_cur.execute(
-            """
-            UPDATE backup_runs
-            SET status='completed', object_name=%s, size_bytes=%s, checksum=%s
-            WHERE id=%s
-            """,
-            (object_name, len(encrypted), checksum, run_id),
-        )
-        update_conn.commit()
-        update_conn.close()
+        try:
+            update_cur = update_conn.cursor()
+            update_cur.execute(
+                """
+                UPDATE backup_runs
+                SET status='completed', object_name=%s, size_bytes=%s, checksum=%s
+                WHERE id=%s
+                """,
+                (object_name, len(encrypted), checksum, run_id),
+            )
+            update_conn.commit()
+        finally:
+            update_conn.close()
         return {
             "id": run_id,
             "object_name": object_name,
@@ -3409,13 +3586,15 @@ def _perform_database_backup(created_by):
         logger.exception("Database backup failed.")
         try:
             error_conn = db()
-            error_cur = error_conn.cursor()
-            error_cur.execute(
-                "UPDATE backup_runs SET status='failed', error=%s WHERE id=%s",
-                (str(exc)[:1000], run_id),
-            )
-            error_conn.commit()
-            error_conn.close()
+            try:
+                error_cur = error_conn.cursor()
+                error_cur.execute(
+                    "UPDATE backup_runs SET status='failed', error=%s WHERE id=%s",
+                    (str(exc)[:1000], run_id),
+                )
+                error_conn.commit()
+            finally:
+                error_conn.close()
         except Exception:
             logger.exception("Backup failure logging failed.")
         raise
@@ -3457,6 +3636,7 @@ def create_manual_backup():
     try:
         perform_database_backup(session.get("user") or "administrator")
     except Exception:
+        logger.exception("Manual database backup failed.")
         return "Nie udało się utworzyć kopii zapasowej.", 500
     return redirect("/admin/backups?created=1")
 
@@ -3620,6 +3800,14 @@ def update_order_accounting(order_id):
             raise ValueError("Nieprawidłowy sposób płatności.")
         amount_paid = parse_nonnegative_number(request.form.get("amount_paid"), "Kwota zapłacona")
         amount_due = parse_nonnegative_number(request.form.get("amount_due"), "Kwota pozostała do zapłaty")
+        document_issue_date = normalized_optional_date(
+            request.form.get("document_issue_date"),
+            "Data wystawienia dokumentu",
+        )
+        payment_received_date = normalized_optional_date(
+            request.form.get("payment_received_date"),
+            "Data otrzymania płatności",
+        )
         salesperson = (request.form.get("salesperson") or "").strip()[:200]
         cur.execute(
             """
@@ -3642,7 +3830,7 @@ def update_order_accounting(order_id):
                 bool_values["document_to_warehouse"], bool_values["ready_to_ship"],
                 bool_values["settled"], request.form.get("proforma_number", "").strip(),
                 request.form.get("invoice_number", "").strip(), request.form.get("receipt_number", "").strip(),
-                request.form.get("document_issue_date", ""), request.form.get("payment_received_date", ""),
+                document_issue_date, payment_received_date,
                 amount_paid, amount_due, request.form.get("accounting_notes", "").strip(),
                 salesperson, session.get("user"), order_id,
             ),
@@ -3707,9 +3895,27 @@ def shop_create_order():
     conn = db(); cur = conn.cursor()
     try:
         order_number = (request.form.get("order_number") or f"SK/{datetime.now().strftime('%Y%m%d%H%M%S')}").strip()
+        customer_name = (request.form.get("customer_name") or "").strip()
+        delivery_address = (request.form.get("delivery_address") or "").strip()
+        if not order_number or len(order_number) > 100:
+            raise ValueError("Numer zamówienia jest wymagany i może mieć maksymalnie 100 znaków.")
+        if not customer_name or len(customer_name) > 200:
+            raise ValueError("Nazwa klienta jest wymagana i może mieć maksymalnie 200 znaków.")
+        if not delivery_address or len(delivery_address) > 500:
+            raise ValueError("Adres dostawy jest wymagany i może mieć maksymalnie 500 znaków.")
         order_date = normalized_document_date(request.form.get("date"))
         shipping = parse_nonnegative_number(request.form.get("shipping_cost"), "Koszt wysyłki")
-        cur.execute("INSERT INTO shop_orders(order_number,order_date,customer_name,delivery_address,phone,email,shipping_cost,payment_method,payment_status,status,sales_document_number,tracking_number,notes,nip,created_by) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'Nowe zamówienie',%s,%s,%s,%s,%s) RETURNING id", (order_number,order_date,request.form.get("customer_name",""),request.form.get("delivery_address",""),request.form.get("phone",""),request.form.get("email",""),shipping,request.form.get("payment_method",""),request.form.get("payment_status","Oczekuje na płatność"),request.form.get("sales_document_number",""),request.form.get("tracking_number",""),request.form.get("notes",""),request.form.get("nip",""),session.get("user")))
+        cur.execute(
+            "SELECT pg_advisory_xact_lock(hashtext(%s))",
+            (f"shop-order:{order_number.casefold()}",),
+        )
+        cur.execute(
+            "SELECT 1 FROM shop_orders WHERE lower(order_number)=lower(%s)",
+            (order_number,),
+        )
+        if cur.fetchone():
+            raise ValueError("Zamówienie o takim numerze już istnieje.")
+        cur.execute("INSERT INTO shop_orders(order_number,order_date,customer_name,delivery_address,phone,email,shipping_cost,payment_method,payment_status,status,sales_document_number,tracking_number,notes,nip,created_by) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'Nowe zamówienie',%s,%s,%s,%s,%s) RETURNING id", (order_number,order_date,customer_name,delivery_address,request.form.get("phone",""),request.form.get("email",""),shipping,request.form.get("payment_method",""),request.form.get("payment_status","Oczekuje na płatność"),request.form.get("sales_document_number",""),request.form.get("tracking_number",""),request.form.get("notes",""),request.form.get("nip",""),session.get("user")))
         order_id = cur.fetchone()[0]
         shop_history(cur, order_id, "utworzono zamówienie", order_number)
         lacking = []
@@ -3719,7 +3925,17 @@ def shop_create_order():
             cur.execute("SELECT id,name,qty,warehouse,price_netto,vat FROM products WHERE id=%s FOR UPDATE", (pid,))
             p = cur.fetchone()
             if not p: raise ValueError("Wybrany produkt nie istnieje.")
-            available = p[2]
+            cur.execute(
+                """
+                SELECT COALESCE(SUM(i.reserved_qty-i.issued_qty), 0)
+                FROM shop_order_items i
+                JOIN shop_orders o ON o.id=i.order_id
+                WHERE i.product_id=%s
+                  AND o.status NOT IN ('Anulowane', 'Zakończone')
+                """,
+                (pid,),
+            )
+            available = p[2] - (cur.fetchone()[0] or 0)
             if available + 1e-9 < qty: lacking.append(f"{p[1]} ({available})")
             reserved = qty if available + 1e-9 >= qty else 0
             cur.execute("INSERT INTO shop_order_items(order_id,product_id,product_name,qty,price_netto,price_brutto,vat,warehouse,reserved_qty) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)", (order_id,pid,p[1],qty,p[4] or 0,(p[4] or 0)*(1+(p[5] or 0)/100),p[5] or 0,p[3],reserved))
@@ -3751,14 +3967,33 @@ def shop_order_detail(order_id):
     denied = require_shop_permission("view")
     if denied: return denied
     conn=db(); cur=conn.cursor()
-    cur.execute("SELECT * FROM shop_orders WHERE id=%s", (order_id,)); order=cur.fetchone()
-    cur.execute("SELECT * FROM shop_order_items WHERE order_id=%s ORDER BY id", (order_id,)); items=cur.fetchall()
+    cur.execute(
+        """
+        SELECT id,order_number,order_date,customer_name,delivery_address,phone,email,
+               shipping_cost,payment_method,payment_status,status,sales_document_number,
+               tracking_number,notes,nip,document_confirmed,created_by,created_at,updated_at
+        FROM shop_orders WHERE id=%s
+        """,
+        (order_id,),
+    )
+    order=cur.fetchone()
+    if not order:
+        conn.close()
+        return "Nie znaleziono zamówienia.", 404
+    cur.execute(
+        """
+        SELECT id,order_id,product_id,product_name,qty,price_netto,price_brutto,vat,
+               warehouse,reserved_qty,issued_qty
+        FROM shop_order_items WHERE order_id=%s ORDER BY id
+        """,
+        (order_id,),
+    )
+    items=cur.fetchall()
     cur.execute("SELECT id,document_number,editable_data,confirmed FROM shop_sales_documents WHERE order_id=%s", (order_id,)); document=cur.fetchone()
     ensure_shop_accounting_row(cur, order_id)
     conn.commit()
     cur.execute("SELECT * FROM shop_accounting WHERE order_id=%s", (order_id,)); accounting=cur.fetchone()
     cur.execute("SELECT user_email,action,details,created_at FROM shop_order_history WHERE order_id=%s ORDER BY created_at DESC", (order_id,)); history=cur.fetchall(); conn.close()
-    if not order: return "Nie znaleziono zamówienia.", 404
     return render_template("shop_order.html", order=order, items=items, document=document, history=history, statuses=SHOP_STATUS_FLOW, accounting=accounting, payment_methods=ACCOUNTING_PAYMENT_METHODS, can_ship=order_can_be_shipped(accounting))
 
 
@@ -3772,6 +4007,10 @@ def shop_update_status(order_id):
     if denied: return denied
     conn=db(); cur=conn.cursor()
     try:
+        cur.execute("SELECT status FROM shop_orders WHERE id=%s FOR UPDATE", (order_id,))
+        current_order = cur.fetchone()
+        if not current_order:
+            raise ValueError("Nie znaleziono zamówienia.")
         if status == "Wysłane":
             ensure_shop_accounting_row(cur, order_id)
             cur.execute("SELECT * FROM shop_accounting WHERE order_id=%s FOR UPDATE", (order_id,))
@@ -3786,6 +4025,26 @@ def shop_update_status(order_id):
                     if cur.rowcount != 1: raise ValueError("Brak stanu magazynowego lub próba podwójnej sprzedaży.")
                     cur.execute("UPDATE shop_order_items SET issued_qty=qty WHERE order_id=%s AND product_id=%s", (order_id,pid))
             shop_history(cur, order_id, "wysłano zamówienie", "Towar zdjęty ze stanu")
+        elif status == "Anulowane":
+            cur.execute(
+                """
+                SELECT product_id,warehouse,issued_qty
+                FROM shop_order_items WHERE order_id=%s FOR UPDATE
+                """,
+                (order_id,),
+            )
+            for pid, warehouse, issued_qty in cur.fetchall():
+                if issued_qty and issued_qty > 0:
+                    cur.execute(
+                        "UPDATE products SET qty=qty+%s WHERE id=%s AND warehouse=%s",
+                        (issued_qty, pid, warehouse),
+                    )
+                    if cur.rowcount != 1:
+                        raise ValueError("Nie można odtworzyć stanu anulowanego zamówienia.")
+            cur.execute(
+                "UPDATE shop_order_items SET issued_qty=0 WHERE order_id=%s",
+                (order_id,),
+            )
         cur.execute("UPDATE shop_orders SET status=%s,tracking_number=COALESCE(NULLIF(%s,''),tracking_number),updated_at=NOW() WHERE id=%s", (status,request.form.get('tracking_number',''),order_id))
         shop_history(cur, order_id, "zmieniono status", status)
         if status == "Dokument wystawiony": cur.execute("INSERT INTO shop_notifications(order_id,type,message) VALUES (%s,'gotowe do pakowania','Zamówienie gotowe do pakowania')", (order_id,))
@@ -3793,7 +4052,12 @@ def shop_update_status(order_id):
         conn.commit(); cache.clear(); return redirect(f"/sklep/orders/{order_id}")
     except ValueError as exc:
         conn.rollback(); return str(exc), 400
-    finally: conn.close()
+    except Exception:
+        conn.rollback()
+        logger.exception("Shop order status update failed.")
+        return "Nie udało się zmienić statusu zamówienia.", 500
+    finally:
+        conn.close()
 
 
 @app.route('/sklep/orders/<int:order_id>/document', methods=['POST'])
@@ -3804,20 +4068,39 @@ def shop_confirm_document(order_id):
     number=(request.form.get('sales_document_number') or '').strip()
     if not number: return "Podaj numer faktury lub paragonu.", 400
     conn=db(); cur=conn.cursor()
-    cur.execute("UPDATE shop_orders SET sales_document_number=%s,status='Dokument wystawiony',document_confirmed=TRUE WHERE id=%s", (number,order_id))
-    cur.execute("UPDATE shop_sales_documents SET document_number=%s,confirmed=TRUE,confirmed_by=%s,confirmed_at=NOW() WHERE order_id=%s", (number,session.get('user'),order_id))
-    shop_history(cur, order_id, "wystawiono dokument", number)
-    conn.commit(); conn.close(); return redirect(f"/sklep/orders/{order_id}")
+    try:
+        cur.execute("UPDATE shop_orders SET sales_document_number=%s,status='Dokument wystawiony',document_confirmed=TRUE WHERE id=%s", (number,order_id))
+        if cur.rowcount != 1:
+            raise ValueError("Nie znaleziono zamówienia.")
+        cur.execute("UPDATE shop_sales_documents SET document_number=%s,confirmed=TRUE,confirmed_by=%s,confirmed_at=NOW() WHERE order_id=%s", (number,session.get('user'),order_id))
+        if cur.rowcount != 1:
+            raise ValueError("Nie znaleziono dokumentu sprzedaży.")
+        shop_history(cur, order_id, "wystawiono dokument", number)
+        conn.commit()
+        return redirect(f"/sklep/orders/{order_id}")
+    except ValueError as exc:
+        conn.rollback()
+        return str(exc), 404
+    except Exception:
+        conn.rollback()
+        logger.exception("Shop sales document confirmation failed.")
+        return "Nie udało się zatwierdzić dokumentu sprzedaży.", 500
+    finally:
+        conn.close()
 
 
 @app.route('/sklep/documents/<int:doc_id>/<fmt>')
 @login_required
 def shop_download_document(doc_id, fmt):
+    denied = require_shop_permission("view")
+    if denied:
+        return denied
     if fmt not in {"pdf","docx"}: return "Nieprawidłowy format.", 400
     conn=db(); cur=conn.cursor(); cur.execute(f"SELECT document_number,{fmt} FROM shop_sales_documents WHERE id=%s", (doc_id,)); row=cur.fetchone(); conn.close()
-    if not row: return "Nie znaleziono dokumentu.", 404
+    if not row or row[1] is None: return "Nie znaleziono dokumentu.", 404
     mimetype = "application/pdf" if fmt == "pdf" else "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-    return Response(bytes(row[1]), mimetype=mimetype, headers={"Content-Disposition": f"attachment; filename={row[0]}.{fmt}"})
+    filename = secure_filename(str(row[0] or "dokument")) or "dokument"
+    return Response(bytes(row[1]), mimetype=mimetype, headers={"Content-Disposition": f'attachment; filename="{filename}.{fmt}"'})
 
 @app.route('/historia')
 @login_required
@@ -3841,7 +4124,10 @@ def historia():
 @login_required
 @cache.cached(timeout=30, query_string=True)
 def report():
-    selected_date = request.args.get("date") or datetime.now().strftime("%Y-%m-%d")
+    try:
+        selected_date = normalized_document_date(request.args.get("date"))
+    except ValueError as exc:
+        return str(exc), 400
     conn = db()
     cur = conn.cursor()
     cur.execute(
@@ -3863,7 +4149,10 @@ def report():
 @app.route('/report/pdf')
 @login_required
 def report_pdf():
-    selected_date = request.args.get("date") or datetime.now().strftime("%Y-%m-%d")
+    try:
+        selected_date = normalized_document_date(request.args.get("date"))
+    except ValueError as exc:
+        return str(exc), 400
     conn = db()
     cur = conn.cursor()
     cur.execute(

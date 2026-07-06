@@ -12,6 +12,12 @@
         Nie pamiętam hasła
     </button>
     <p id="error" style="color:#dc2626; margin-top:10px;"></p>
+    {% if firebase_admin_error or missing_firebase_web_envs %}
+    <p style="color:#92400e; margin-top:10px;">
+        Logowanie jest chwilowo niedostępne z powodu niepełnej konfiguracji.
+        Skontaktuj się z administratorem.
+    </p>
+    {% endif %}
 </div>
 
 <script type="module">
@@ -20,12 +26,13 @@ import { getAuth, signInWithEmailAndPassword, sendPasswordResetEmail, setPersist
 
 const firebaseConfig = {{ firebase_config|tojson }};
 
-const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
 const firebaseAdminReady = {{ "true" if firebase_admin_ready else "false" }};
+const firebaseWebReady = {{ "false" if missing_firebase_web_envs else "true" }};
+const firebaseApp = firebaseWebReady ? initializeApp(firebaseConfig) : null;
+const auth = firebaseApp ? getAuth(firebaseApp) : null;
 document.getElementById("submitBtn").addEventListener("click", async () => {
-  if (!firebaseAdminReady) {
-    document.getElementById("error").textContent = "Logowanie jest wyłączone do czasu konfiguracji backendu Firebase.";
+  if (!firebaseAdminReady || !firebaseWebReady || !auth) {
+    document.getElementById("error").textContent = "Logowanie jest wyłączone do czasu poprawienia konfiguracji Firebase.";
     return;
   }
   const email = document.getElementById("email").value.trim();
@@ -61,6 +68,10 @@ document.getElementById("submitBtn").addEventListener("click", async () => {
 document.getElementById("resetBtn").addEventListener("click", async () => {
   const email = document.getElementById("email").value.trim();
   const err = document.getElementById("error");
+  if (!firebaseWebReady || !auth) {
+    err.textContent = "Reset hasła jest wyłączony do czasu poprawienia konfiguracji Firebase.";
+    return;
+  }
   if (!email) {
     err.textContent = "Wpisz adres e-mail.";
     return;
