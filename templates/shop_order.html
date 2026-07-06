@@ -1,6 +1,16 @@
 {% extends "base.html" %}
 {% block content %}
 <h2>Zamówienie {{ order[1] }}</h2>
+{% if request.args.get('created') %}
+<div class="card" style="margin-bottom:16px;color:#166534;">
+  Zamówienie zostało zapisane. Możesz teraz wygenerować dokument sprzedaży.
+</div>
+{% endif %}
+{% if request.args.get('document') == 'generated' %}
+<div class="card" style="margin-bottom:16px;color:#166534;">
+  Dokument sprzedaży został wygenerowany i zapisany przy zamówieniu.
+</div>
+{% endif %}
 <div class="card" style="margin-bottom:16px;">
   <p><strong>Klient:</strong> {{ order[3] }} · {{ order[6] }} · {{ order[5] }}</p>
   <p><strong>Adres:</strong> {{ order[4] }} {% if order[14] %}· NIP: {{ order[14] }}{% endif %}</p>
@@ -59,6 +69,11 @@
 </div>
 <div class="card" style="margin-bottom:16px;">
   <h3>Dokument sprzedaży</h3>
+  {% if session.get('role') in ['admin','shop','accounting'] %}
+  <form method="POST" action="/sklep/orders/{{ order[0] }}/document/generate" style="margin-bottom:12px;">
+    <button>{{ 'Wygeneruj dokument ponownie' if document else 'Wygeneruj dokument sprzedaży' }}</button>
+  </form>
+  {% endif %}
   {% if document %}
     <p>Numer: {{ document[1] }} · {{ 'zatwierdzony' if document[3] else 'do edycji/zatwierdzenia' }}</p>
     <form method="POST" action="/sklep/orders/{{ order[0] }}/document" style="display:flex;gap:8px;">
@@ -66,6 +81,8 @@
       <button>Zatwierdź dokument</button>
     </form>
     <p><a href="/sklep/documents/{{ document[0] }}/pdf">Pobierz PDF</a> · <a href="/sklep/documents/{{ document[0] }}/docx">Pobierz DOCX</a></p>
+  {% else %}
+    <p>Dokument nie został jeszcze wygenerowany.</p>
   {% endif %}
 </div>
 <div class="card"><h3>Historia zmian</h3>{% for h in history %}<p>{{ h[3] }} · <strong>{{ h[1] }}</strong> · {{ h[0] }} · {{ h[2] }}</p>{% endfor %}</div>

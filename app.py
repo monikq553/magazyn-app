@@ -29,9 +29,20 @@ from urllib import request as urlrequest
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from dotenv import load_dotenv
 from reportlab.lib.pagesizes import A4
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+from reportlab.platypus import (
+    Image as ReportLabImage,
+    Paragraph,
+    SimpleDocTemplate,
+    Spacer,
+    Table,
+    TableStyle,
+)
 from reportlab.lib import colors
-from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.enums import TA_RIGHT
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import mm
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 import firebase_admin
 from firebase_admin import credentials, auth, storage
 from flask_limiter import Limiter
@@ -702,8 +713,11 @@ def run_db_migrations():
             ADD COLUMN IF NOT EXISTS email TEXT,
             ADD COLUMN IF NOT EXISTS shipping_cost REAL DEFAULT 0,
             ADD COLUMN IF NOT EXISTS payment_method TEXT,
+            ADD COLUMN IF NOT EXISTS payment_status TEXT DEFAULT 'Oczekuje na płatność',
             ADD COLUMN IF NOT EXISTS status TEXT,
             ADD COLUMN IF NOT EXISTS sales_document_number TEXT,
+            ADD COLUMN IF NOT EXISTS tracking_number TEXT,
+            ADD COLUMN IF NOT EXISTS notes TEXT,
             ADD COLUMN IF NOT EXISTS nip TEXT,
             ADD COLUMN IF NOT EXISTS document_confirmed BOOLEAN DEFAULT FALSE,
             ADD COLUMN IF NOT EXISTS created_by TEXT,
@@ -883,6 +897,30 @@ def run_db_migrations():
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
     """)
+    cur.execute("""
+        ALTER TABLE shop_sales_documents
+            ADD COLUMN IF NOT EXISTS document_number TEXT,
+            ADD COLUMN IF NOT EXISTS editable_data JSONB DEFAULT '{}'::jsonb,
+            ADD COLUMN IF NOT EXISTS docx BYTEA,
+            ADD COLUMN IF NOT EXISTS pdf BYTEA,
+            ADD COLUMN IF NOT EXISTS confirmed BOOLEAN DEFAULT FALSE,
+            ADD COLUMN IF NOT EXISTS created_by TEXT,
+            ADD COLUMN IF NOT EXISTS confirmed_by TEXT,
+            ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW(),
+            ADD COLUMN IF NOT EXISTS confirmed_at TIMESTAMPTZ
+    """)
+    cur.execute(
+        """
+        UPDATE shop_sales_documents
+        SET document_number=COALESCE(NULLIF(document_number,''), 'DS/' || order_id),
+            editable_data=COALESCE(editable_data, '{}'::jsonb),
+            confirmed=COALESCE(confirmed, FALSE),
+            created_at=COALESCE(created_at, NOW())
+        """
+    )
+    cur.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_shop_sales_documents_order ON shop_sales_documents(order_id)"
+    )
     cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS can_import_warehouse BOOLEAN NOT NULL DEFAULT FALSE")
     cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS can_import_accounting BOOLEAN NOT NULL DEFAULT FALSE")
     cur.execute("""
@@ -1169,76 +1207,420 @@ def create_shop_document_payload(order, items):
     subtotal_gross = sum((item[5] or 0) * (item[3] or 0) for item in items)
     shipping = order[7] or 0
     return {
-        "document_number": order[11] or f"DS/{order[0]}/{datetime.now().year}",
+        "document_number": order[11] or f"DS/{order[1]}",
+        "order_number": order[1],
         "date": order[2],
         "receipt_or_invoice": order[11] or "Do uzupełnienia",
         "seller": "Primadera",
         "buyer": order[3],
         "address": order[4],
+        "phone": order[5] or "",
+        "email": order[6] or "",
+        "payment_method": order[8] or "",
+        "payment_status": order[9] or "",
         "nip": order[14] or "",
         "items": [
             {
                 "name": item[2], "qty": item[3], "net": item[4], "vat": item[6],
-                "gross": item[5], "total_gross": (item[5] or 0) * (item[3] or 0),
+                "gross": item[5],
+                "total_net": (item[4] or 0) * (item[3] or 0),
+                "total_gross": (item[5] or 0) * (item[3] or 0),
             }
             for item in items
         ],
         "shipping": shipping,
         "total_net": subtotal_net,
+        "subtotal_gross": subtotal_gross,
         "total_gross": subtotal_gross + shipping,
         "notes": order[13] or "",
     }
 
 
 def simple_docx_bytes(payload):
-    import zipfile
-    from xml.sax.saxutils import escape
-    lines = [
-        "Dokument sprzedaży", f"Numer: {payload['document_number']}", f"Data: {payload['date']}",
-        f"Paragon/Faktura: {payload['receipt_or_invoice']}", f"Sprzedawca: {payload['seller']}",
-        f"Nabywca: {payload['buyer']}", f"Adres: {payload['address']}", f"NIP: {payload['nip']}",
-        "Produkty:",
+    from docx import Document
+    from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_TABLE_ALIGNMENT
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+    from docx.shared import Mm, Pt, RGBColor
+
+    logo_path = os.path.join(app.root_path, "static", "primadera-logo.png")
+    if not os.path.isfile(logo_path):
+        raise FileNotFoundError("Brak logo Primadera.")
+
+    document = Document()
+    section = document.sections[0]
+    section.page_width = Mm(210)
+    section.page_height = Mm(297)
+    section.top_margin = Mm(15)
+    section.bottom_margin = Mm(15)
+    section.left_margin = Mm(16)
+    section.right_margin = Mm(16)
+
+    normal = document.styles["Normal"]
+    normal.font.name = "Arial"
+    normal.font.size = Pt(9.5)
+    normal.paragraph_format.space_after = Pt(4)
+
+    def set_cell_shading(cell, fill):
+        properties = cell._tc.get_or_add_tcPr()
+        shading = properties.find(qn("w:shd"))
+        if shading is None:
+            shading = OxmlElement("w:shd")
+            properties.append(shading)
+        shading.set(qn("w:fill"), fill)
+
+    def set_cell_text(cell, value, bold=False, color=None, align=None):
+        cell.text = ""
+        paragraph = cell.paragraphs[0]
+        if align is not None:
+            paragraph.alignment = align
+        paragraph.paragraph_format.space_after = Pt(0)
+        run = paragraph.add_run(str(value or ""))
+        run.font.name = "Arial"
+        run.font.size = Pt(8.5)
+        run.bold = bold
+        if color:
+            run.font.color.rgb = RGBColor(*color)
+        cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+
+    logo = document.add_paragraph()
+    logo.paragraph_format.space_after = Pt(4)
+    logo.add_run().add_picture(logo_path, width=Mm(76))
+    title = document.add_paragraph()
+    title.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    title.paragraph_format.space_after = Pt(10)
+    title_run = title.add_run("DOKUMENT SPRZEDAŻY")
+    title_run.font.name = "Arial"
+    title_run.font.size = Pt(18)
+    title_run.bold = True
+    title_run.font.color.rgb = RGBColor(24, 92, 67)
+
+    metadata = document.add_table(rows=4, cols=2)
+    metadata.alignment = WD_TABLE_ALIGNMENT.CENTER
+    metadata.autofit = False
+    labels = [
+        ("Numer dokumentu", payload["document_number"]),
+        ("Numer zamówienia", payload["order_number"]),
+        ("Data", payload["date"]),
+        ("Płatność", " / ".join(filter(None, [payload["payment_method"], payload["payment_status"]]))),
     ]
+    for row, (label, value) in zip(metadata.rows, labels):
+        row.cells[0].width = Mm(42)
+        row.cells[1].width = Mm(132)
+        set_cell_text(row.cells[0], label, bold=True, color=(24, 92, 67))
+        set_cell_text(row.cells[1], value)
+
+    document.add_paragraph()
+    buyer_heading = document.add_paragraph()
+    buyer_heading.paragraph_format.space_after = Pt(3)
+    heading_run = buyer_heading.add_run("NABYWCA")
+    heading_run.bold = True
+    heading_run.font.name = "Arial"
+    heading_run.font.size = Pt(11)
+    heading_run.font.color.rgb = RGBColor(24, 92, 67)
+    buyer_lines = [
+        payload["buyer"],
+        payload["address"],
+        f"NIP: {payload['nip']}" if payload["nip"] else "",
+        " · ".join(filter(None, [payload["phone"], payload["email"]])),
+    ]
+    buyer = document.add_paragraph("\n".join(line for line in buyer_lines if line))
+    buyer.paragraph_format.space_after = Pt(10)
+
+    products = document.add_table(rows=1, cols=6)
+    products.alignment = WD_TABLE_ALIGNMENT.CENTER
+    products.style = "Table Grid"
+    products.autofit = False
+    widths = [Mm(62), Mm(17), Mm(25), Mm(17), Mm(25), Mm(28)]
+    headers = ["Produkt", "Ilość", "Netto/szt.", "VAT", "Brutto/szt.", "Wartość brutto"]
+    for cell, header, width in zip(products.rows[0].cells, headers, widths):
+        cell.width = width
+        set_cell_shading(cell, "185C43")
+        set_cell_text(cell, header, bold=True, color=(255, 255, 255), align=WD_ALIGN_PARAGRAPH.CENTER)
     for item in payload["items"]:
-        lines.append(f"{item['name']} | ilość {item['qty']} | netto {item['net']:.2f} | VAT {item['vat']:.0f}% | brutto {item['total_gross']:.2f}")
-    lines += [f"Wysyłka: {payload['shipping']:.2f}", f"Razem brutto: {payload['total_gross']:.2f}", f"Uwagi: {payload['notes']}"]
-    paragraphs = "".join(f"<w:p><w:r><w:t>{escape(str(line))}</w:t></w:r></w:p>" for line in lines)
-    document_xml = f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{paragraphs}<w:sectPr/></w:body></w:document>'''
-    content_types = '''<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'''
-    rels = '''<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'''
+        row = products.add_row()
+        values = [
+            item["name"],
+            f"{item['qty']:g}",
+            f"{item['net']:.2f} zł",
+            f"{item['vat']:.0f}%",
+            f"{item['gross']:.2f} zł",
+            f"{item['total_gross']:.2f} zł",
+        ]
+        for index, (cell, value, width) in enumerate(zip(row.cells, values, widths)):
+            cell.width = width
+            set_cell_text(
+                cell,
+                value,
+                align=WD_ALIGN_PARAGRAPH.LEFT if index == 0 else WD_ALIGN_PARAGRAPH.RIGHT,
+            )
+
+    totals = document.add_table(rows=4, cols=2)
+    totals.alignment = WD_TABLE_ALIGNMENT.RIGHT
+    totals.autofit = False
+    total_rows = [
+        ("Razem netto", payload["total_net"]),
+        ("Razem brutto produktów", payload["subtotal_gross"]),
+        ("Wysyłka", payload["shipping"]),
+        ("RAZEM BRUTTO", payload["total_gross"]),
+    ]
+    for index, (row, (label, value)) in enumerate(zip(totals.rows, total_rows)):
+        row.cells[0].width = Mm(55)
+        row.cells[1].width = Mm(35)
+        highlight = index == len(total_rows) - 1
+        if highlight:
+            set_cell_shading(row.cells[0], "F58220")
+            set_cell_shading(row.cells[1], "F58220")
+        set_cell_text(
+            row.cells[0], label, bold=True,
+            color=(255, 255, 255) if highlight else (24, 92, 67),
+            align=WD_ALIGN_PARAGRAPH.RIGHT,
+        )
+        set_cell_text(
+            row.cells[1], f"{value:.2f} zł", bold=True,
+            color=(255, 255, 255) if highlight else None,
+            align=WD_ALIGN_PARAGRAPH.RIGHT,
+        )
+
+    if payload["notes"]:
+        notes = document.add_paragraph()
+        notes.paragraph_format.space_before = Pt(8)
+        notes.add_run("Uwagi: ").bold = True
+        notes.add_run(str(payload["notes"]))
+
     buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("[Content_Types].xml", content_types)
-        zf.writestr("_rels/.rels", rels)
-        zf.writestr("word/document.xml", document_xml)
+    document.save(buffer)
     return buffer.getvalue()
+
+
+def shop_pdf_fonts():
+    regular_candidates = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        r"C:\Windows\Fonts\arial.ttf",
+    ]
+    bold_candidates = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        r"C:\Windows\Fonts\arialbd.ttf",
+    ]
+    regular = next((path for path in regular_candidates if os.path.isfile(path)), None)
+    bold = next((path for path in bold_candidates if os.path.isfile(path)), None)
+    if regular and bold:
+        if "ShopSans" not in pdfmetrics.getRegisteredFontNames():
+            pdfmetrics.registerFont(TTFont("ShopSans", regular))
+            pdfmetrics.registerFont(TTFont("ShopSans-Bold", bold))
+        return "ShopSans", "ShopSans-Bold"
+    return "Helvetica", "Helvetica-Bold"
 
 
 def shop_pdf_bytes(payload):
     from xml.sax.saxutils import escape
 
+    logo_path = os.path.join(app.root_path, "static", "primadera-logo.png")
+    if not os.path.isfile(logo_path):
+        raise FileNotFoundError("Brak logo Primadera.")
+    body_font, bold_font = shop_pdf_fonts()
     buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=A4)
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        leftMargin=16 * mm,
+        rightMargin=16 * mm,
+        topMargin=14 * mm,
+        bottomMargin=14 * mm,
+        title=f"Dokument sprzedaży {payload['document_number']}",
+        author="Primadera",
+    )
     styles = getSampleStyleSheet()
-    story = [Paragraph("Dokument sprzedaży", styles["Title"]), Spacer(1, 12)]
-    for key, label in [("document_number", "Numer"), ("date", "Data"), ("receipt_or_invoice", "Paragon/Faktura"), ("buyer", "Nabywca"), ("address", "Adres"), ("nip", "NIP")]:
-        story.append(Paragraph(
-            f"<b>{label}:</b> {escape(str(payload.get(key) or ''))}",
-            styles["Normal"],
-        ))
-    data = [["Produkt", "Ilość", "Netto", "VAT", "Brutto"]] + [[i["name"], i["qty"], f"{i['net']:.2f}", f"{i['vat']:.0f}%", f"{i['total_gross']:.2f}"] for i in payload["items"]]
-    table = Table(data, repeatRows=1)
-    table.setStyle(TableStyle([("BACKGROUND", (0,0), (-1,0), colors.lightgrey), ("GRID", (0,0), (-1,-1), 0.5, colors.grey)]))
-    story += [
-        Spacer(1, 12),
-        table,
-        Spacer(1, 12),
-        Paragraph(f"Wysyłka: {payload['shipping']:.2f}", styles["Normal"]),
-        Paragraph(f"Razem brutto: {payload['total_gross']:.2f}", styles["Heading2"]),
-        Paragraph(f"Uwagi: {escape(str(payload['notes']))}", styles["Normal"]),
+    normal = ParagraphStyle(
+        "ShopNormal",
+        parent=styles["Normal"],
+        fontName=body_font,
+        fontSize=9,
+        leading=12,
+        textColor=colors.HexColor("#222222"),
+    )
+    small = ParagraphStyle(
+        "ShopSmall",
+        parent=normal,
+        fontSize=8,
+        leading=10,
+    )
+    heading = ParagraphStyle(
+        "ShopHeading",
+        parent=styles["Heading1"],
+        fontName=bold_font,
+        fontSize=17,
+        leading=21,
+        textColor=colors.HexColor("#185C43"),
+        alignment=TA_RIGHT,
+        spaceAfter=8,
+    )
+    logo = ReportLabImage(logo_path, width=76 * mm, height=17.1 * mm)
+    header = Table(
+        [[logo, Paragraph("DOKUMENT SPRZEDAŻY", heading)]],
+        colWidths=[85 * mm, 83 * mm],
+    )
+    header.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN", (1, 0), (1, 0), "RIGHT"),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+    ]))
+    metadata = [
+        [Paragraph("<b>Numer dokumentu</b>", normal), Paragraph(escape(str(payload["document_number"])), normal)],
+        [Paragraph("<b>Numer zamówienia</b>", normal), Paragraph(escape(str(payload["order_number"])), normal)],
+        [Paragraph("<b>Data</b>", normal), Paragraph(escape(str(payload["date"])), normal)],
+        [
+            Paragraph("<b>Płatność</b>", normal),
+            Paragraph(
+                escape(" / ".join(filter(None, [payload["payment_method"], payload["payment_status"]]))),
+                normal,
+            ),
+        ],
     ]
+    metadata_table = Table(metadata, colWidths=[42 * mm, 126 * mm])
+    metadata_table.setStyle(TableStyle([
+        ("FONTNAME", (0, 0), (0, -1), bold_font),
+        ("TEXTCOLOR", (0, 0), (0, -1), colors.HexColor("#185C43")),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    buyer_lines = [
+        f"<b>NABYWCA</b><br/>{escape(str(payload['buyer']))}",
+        escape(str(payload["address"])),
+        f"NIP: {escape(str(payload['nip']))}" if payload["nip"] else "",
+        escape(" · ".join(filter(None, [payload["phone"], payload["email"]]))),
+    ]
+    story = [
+        header,
+        metadata_table,
+        Spacer(1, 7 * mm),
+        Paragraph("<br/>".join(line for line in buyer_lines if line), normal),
+        Spacer(1, 6 * mm),
+    ]
+    data = [[
+        Paragraph('<font color="#FFFFFF"><b>Produkt</b></font>', small),
+        Paragraph('<font color="#FFFFFF"><b>Ilość</b></font>', small),
+        Paragraph('<font color="#FFFFFF"><b>Netto/szt.</b></font>', small),
+        Paragraph('<font color="#FFFFFF"><b>VAT</b></font>', small),
+        Paragraph('<font color="#FFFFFF"><b>Brutto/szt.</b></font>', small),
+        Paragraph('<font color="#FFFFFF"><b>Wartość brutto</b></font>', small),
+    ]]
+    for item in payload["items"]:
+        data.append([
+            Paragraph(escape(str(item["name"])), small),
+            Paragraph(f"{item['qty']:g}", small),
+            Paragraph(f"{item['net']:.2f} zł", small),
+            Paragraph(f"{item['vat']:.0f}%", small),
+            Paragraph(f"{item['gross']:.2f} zł", small),
+            Paragraph(f"{item['total_gross']:.2f} zł", small),
+        ])
+    table = Table(
+        data,
+        repeatRows=1,
+        colWidths=[57 * mm, 16 * mm, 24 * mm, 16 * mm, 25 * mm, 30 * mm],
+    )
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#185C43")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#B8C8C0")),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN", (1, 1), (-1, -1), "RIGHT"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 5),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+    ]))
+    totals_data = [
+        [Paragraph("Razem netto", normal), Paragraph(f"{payload['total_net']:.2f} zł", normal)],
+        [Paragraph("Razem brutto produktów", normal), Paragraph(f"{payload['subtotal_gross']:.2f} zł", normal)],
+        [Paragraph("Wysyłka", normal), Paragraph(f"{payload['shipping']:.2f} zł", normal)],
+        [
+            Paragraph('<font color="#FFFFFF"><b>RAZEM BRUTTO</b></font>', normal),
+            Paragraph(
+                f'<font color="#FFFFFF"><b>{payload["total_gross"]:.2f} zł</b></font>',
+                normal,
+            ),
+        ],
+    ]
+    totals = Table(totals_data, colWidths=[55 * mm, 35 * mm], hAlign="RIGHT")
+    totals.setStyle(TableStyle([
+        ("ALIGN", (0, 0), (-1, -1), "RIGHT"),
+        ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#F58220")),
+        ("TEXTCOLOR", (0, -1), (-1, -1), colors.white),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+    ]))
+    story += [
+        table,
+        Spacer(1, 5 * mm),
+        totals,
+    ]
+    if payload["notes"]:
+        story += [
+            Spacer(1, 5 * mm),
+            Paragraph(f"<b>Uwagi:</b> {escape(str(payload['notes']))}", normal),
+        ]
     doc.build(story)
     return buffer.getvalue()
+
+
+def load_shop_document_data(cur, order_id):
+    cur.execute(
+        """
+        SELECT id,order_number,order_date,customer_name,delivery_address,phone,email,
+               shipping_cost,payment_method,payment_status,status,sales_document_number,
+               tracking_number,notes,nip
+        FROM shop_orders WHERE id=%s
+        """,
+        (order_id,),
+    )
+    order = cur.fetchone()
+    if not order:
+        raise ValueError("Nie znaleziono zamówienia.")
+    cur.execute(
+        """
+        SELECT id,product_id,product_name,qty,price_netto,price_brutto,vat
+        FROM shop_order_items WHERE order_id=%s ORDER BY id
+        """,
+        (order_id,),
+    )
+    items = cur.fetchall()
+    if not items:
+        raise ValueError("Zamówienie nie zawiera produktów.")
+    return order, items
+
+
+def generate_shop_sales_document(cur, order_id, created_by):
+    order, items = load_shop_document_data(cur, order_id)
+    payload = create_shop_document_payload(order, items)
+    docx = simple_docx_bytes(payload)
+    pdf = shop_pdf_bytes(payload)
+    cur.execute(
+        """
+        INSERT INTO shop_sales_documents(
+            order_id,document_number,editable_data,docx,pdf,created_by
+        ) VALUES (%s,%s,%s::jsonb,%s,%s,%s)
+        ON CONFLICT (order_id) DO UPDATE SET
+            document_number=EXCLUDED.document_number,
+            editable_data=EXCLUDED.editable_data,
+            docx=EXCLUDED.docx,
+            pdf=EXCLUDED.pdf,
+            created_by=EXCLUDED.created_by,
+            created_at=NOW()
+        RETURNING id,document_number
+        """,
+        (
+            order_id,
+            payload["document_number"],
+            json.dumps(payload, ensure_ascii=False, default=str),
+            psycopg2.Binary(docx),
+            psycopg2.Binary(pdf),
+            created_by,
+        ),
+    )
+    return cur.fetchone(), payload
 
 
 # 🔒 LOGIN REQUIRED
@@ -5205,9 +5587,12 @@ def shop_orders():
     denied = require_shop_permission("view")
     if denied:
         return denied
-    q = (request.args.get("q") or "").strip()
-    status = (request.args.get("status") or "").strip()
-    conn = db(); cur = conn.cursor()
+    return render_shop_dashboard()
+
+
+def shop_dashboard_data(cur, q="", status=""):
+    q = (q or "").strip()
+    status = (status or "").strip()
     params = []
     where = []
     if q:
@@ -5217,16 +5602,71 @@ def shop_orders():
     if status:
         where.append("o.status=%s"); params.append(status)
     sql_where = (" WHERE " + " AND ".join(where)) if where else ""
-    cur.execute(f"SELECT o.id,o.order_number,o.order_date,o.customer_name,o.status,o.payment_status,o.sales_document_number,o.tracking_number,COALESCE(SUM(i.qty*i.price_brutto),0)+o.shipping_cost AS total FROM shop_orders o LEFT JOIN shop_order_items i ON i.order_id=o.id{sql_where} GROUP BY o.id ORDER BY o.order_date DESC,o.id DESC", tuple(params))
+    cur.execute(
+        f"""
+        SELECT o.id,o.order_number,o.order_date,o.customer_name,o.status,
+               o.payment_status,o.sales_document_number,o.tracking_number,
+               COALESCE(SUM(i.qty*i.price_brutto),0)+o.shipping_cost AS total,
+               sd.id,sd.document_number
+        FROM shop_orders o
+        LEFT JOIN shop_order_items i ON i.order_id=o.id
+        LEFT JOIN shop_sales_documents sd ON sd.order_id=o.id
+        {sql_where}
+        GROUP BY o.id,sd.id
+        ORDER BY o.order_date DESC,o.id DESC
+        """,
+        tuple(params),
+    )
     orders = cur.fetchall()
     cur.execute("SELECT type,message,created_at FROM shop_notifications WHERE resolved=FALSE ORDER BY created_at DESC LIMIT 8")
     notifications = cur.fetchall()
-    cur.execute("SELECT COUNT(*), COALESCE(SUM(i.qty*i.price_brutto),0), COUNT(*) FILTER (WHERE o.status NOT IN ('Zakończone','Anulowane')), COUNT(*) FILTER (WHERE o.status='Zakończone'), COUNT(*) FILTER (WHERE o.status='Anulowane') FROM shop_orders o LEFT JOIN shop_order_items i ON i.order_id=o.id")
+    cur.execute(
+        """
+        SELECT COUNT(*),COALESCE(SUM(order_total),0),
+               COUNT(*) FILTER (WHERE status NOT IN ('Zakończone','Anulowane')),
+               COUNT(*) FILTER (WHERE status='Zakończone'),
+               COUNT(*) FILTER (WHERE status='Anulowane')
+        FROM (
+            SELECT o.id,o.status,
+                   COALESCE(SUM(i.qty*i.price_brutto),0)+o.shipping_cost AS order_total
+            FROM shop_orders o
+            LEFT JOIN shop_order_items i ON i.order_id=o.id
+            GROUP BY o.id
+        ) totals
+        """
+    )
     reports = cur.fetchone()
     cur.execute("SELECT id,name,qty,unit,warehouse,price_netto,vat FROM products ORDER BY warehouse,lower(name),id")
     products = cur.fetchall()
-    conn.close()
-    return render_template("shop.html", orders=orders, notifications=notifications, reports=reports, products=products, statuses=SHOP_STATUS_FLOW, role_labels=SHOP_ROLE_LABELS)
+    return orders, notifications, reports, products
+
+
+def render_shop_dashboard(form_error=None, status_code=200, form_data=None):
+    q = (request.args.get("q") or "").strip()
+    selected_status = (request.args.get("status") or "").strip()
+    conn = db()
+    cur = conn.cursor()
+    try:
+        orders, notifications, reports, products = shop_dashboard_data(
+            cur, q, selected_status
+        )
+    finally:
+        conn.close()
+    return (
+        render_template(
+            "shop.html",
+            orders=orders,
+            notifications=notifications,
+            reports=reports,
+            products=products,
+            statuses=SHOP_STATUS_FLOW,
+            role_labels=SHOP_ROLE_LABELS,
+            payment_methods=ACCOUNTING_PAYMENT_METHODS,
+            form_error=form_error,
+            form_data=form_data,
+        ),
+        status_code,
+    )
 
 
 @app.route('/sklep/orders', methods=['POST'])
@@ -5234,21 +5674,63 @@ def shop_orders():
 def shop_create_order():
     denied = require_shop_permission("shop_edit")
     if denied: return denied
-    product_ids = request.form.getlist("product_id"); qtys = request.form.getlist("qty")
-    if not any(product_ids): return "Dodaj co najmniej jeden produkt.", 400
-    conn = db(); cur = conn.cursor()
+    product_ids = request.form.getlist("product_id")
+    qtys = request.form.getlist("qty")
     try:
-        order_number = (request.form.get("order_number") or f"SK/{datetime.now().strftime('%Y%m%d%H%M%S')}").strip()
+        prepared_items = []
+        for index in range(max(len(product_ids), len(qtys))):
+            pid_raw = form_value(product_ids, index).strip()
+            qty_raw = form_value(qtys, index).strip()
+            if not pid_raw and not qty_raw:
+                continue
+            if not pid_raw:
+                raise ValueError(f"Pozycja {index + 1}: wybierz produkt.")
+            if not qty_raw:
+                raise ValueError(f"Pozycja {index + 1}: podaj ilość.")
+            try:
+                product_id = int(pid_raw)
+            except ValueError:
+                raise ValueError(f"Pozycja {index + 1}: nieprawidłowy produkt.")
+            prepared_items.append((product_id, parse_positive_number(qty_raw)))
+        if not prepared_items:
+            raise ValueError("Dodaj co najmniej jeden produkt.")
+
+        order_number = (
+            request.form.get("order_number")
+            or f"SK/{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
+        ).strip()
         customer_name = (request.form.get("customer_name") or "").strip()
         delivery_address = (request.form.get("delivery_address") or "").strip()
+        email = (request.form.get("email") or "").strip()
+        phone = (request.form.get("phone") or "").strip()
+        nip = (request.form.get("nip") or "").strip()
+        payment_method = (request.form.get("payment_method") or "").strip()
+        payment_status = (
+            request.form.get("payment_status") or "Oczekuje na płatność"
+        ).strip()
         if not order_number or len(order_number) > 100:
             raise ValueError("Numer zamówienia jest wymagany i może mieć maksymalnie 100 znaków.")
         if not customer_name or len(customer_name) > 200:
             raise ValueError("Nazwa klienta jest wymagana i może mieć maksymalnie 200 znaków.")
         if not delivery_address or len(delivery_address) > 500:
             raise ValueError("Adres dostawy jest wymagany i może mieć maksymalnie 500 znaków.")
+        if email and ("@" not in email or len(email) > 254):
+            raise ValueError("Podaj prawidłowy adres e-mail klienta.")
+        if len(phone) > 50 or len(nip) > 30:
+            raise ValueError("Telefon lub NIP jest zbyt długi.")
+        if payment_method and payment_method not in ACCOUNTING_PAYMENT_METHODS:
+            raise ValueError("Wybierz prawidłowy sposób płatności.")
+        if payment_status not in {"Oczekuje na płatność", "Opłacone"}:
+            raise ValueError("Wybierz prawidłowy status płatności.")
         order_date = normalized_document_date(request.form.get("date"))
-        shipping = parse_nonnegative_number(request.form.get("shipping_cost"), "Koszt wysyłki")
+        shipping = parse_nonnegative_number(
+            request.form.get("shipping_cost"), "Koszt wysyłki"
+        )
+    except ValueError as exc:
+        return render_shop_dashboard(str(exc), 400, request.form)
+
+    conn = db(); cur = conn.cursor()
+    try:
         cur.execute(
             "SELECT pg_advisory_xact_lock(hashtext(%s))",
             (f"shop-order:{order_number.casefold()}",),
@@ -5259,16 +5741,34 @@ def shop_create_order():
         )
         if cur.fetchone():
             raise ValueError("Zamówienie o takim numerze już istnieje.")
-        cur.execute("INSERT INTO shop_orders(order_number,order_date,customer_name,delivery_address,phone,email,shipping_cost,payment_method,payment_status,status,sales_document_number,tracking_number,notes,nip,created_by) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'Nowe zamówienie',%s,%s,%s,%s,%s) RETURNING id", (order_number,order_date,customer_name,delivery_address,request.form.get("phone",""),request.form.get("email",""),shipping,request.form.get("payment_method",""),request.form.get("payment_status","Oczekuje na płatność"),request.form.get("sales_document_number",""),request.form.get("tracking_number",""),request.form.get("notes",""),request.form.get("nip",""),session.get("user")))
+        cur.execute(
+            """
+            INSERT INTO shop_orders(
+                order_number,order_date,customer_name,delivery_address,phone,email,
+                shipping_cost,payment_method,payment_status,status,sales_document_number,
+                tracking_number,notes,nip,created_by
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'Nowe zamówienie',%s,%s,%s,%s,%s)
+            RETURNING id
+            """,
+            (
+                order_number, order_date, customer_name, delivery_address, phone,
+                email, shipping, payment_method, payment_status,
+                request.form.get("sales_document_number", "").strip(),
+                request.form.get("tracking_number", "").strip(),
+                request.form.get("notes", "").strip(), nip, session.get("user"),
+            ),
+        )
         order_id = cur.fetchone()[0]
         shop_history(cur, order_id, "utworzono zamówienie", order_number)
         lacking = []
-        for pid_raw, qty_raw in zip(product_ids, qtys):
-            if not pid_raw: continue
-            pid = int(pid_raw); qty = parse_positive_number(qty_raw)
+        for pid, qty in prepared_items:
             cur.execute("SELECT id,name,qty,warehouse,price_netto,vat FROM products WHERE id=%s FOR UPDATE", (pid,))
             p = cur.fetchone()
             if not p: raise ValueError("Wybrany produkt nie istnieje.")
+            price_netto = parse_nonnegative_number(p[4], f"Cena produktu {p[1]}")
+            vat = parse_nonnegative_number(p[5], f"VAT produktu {p[1]}")
+            if vat > 100:
+                raise ValueError(f"Produkt {p[1]} ma nieprawidłową stawkę VAT.")
             cur.execute(
                 """
                 SELECT COALESCE(SUM(i.reserved_qty-i.issued_qty), 0)
@@ -5282,7 +5782,18 @@ def shop_create_order():
             available = p[2] - (cur.fetchone()[0] or 0)
             if available + 1e-9 < qty: lacking.append(f"{p[1]} ({available})")
             reserved = qty if available + 1e-9 >= qty else 0
-            cur.execute("INSERT INTO shop_order_items(order_id,product_id,product_name,qty,price_netto,price_brutto,vat,warehouse,reserved_qty) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)", (order_id,pid,p[1],qty,p[4] or 0,(p[4] or 0)*(1+(p[5] or 0)/100),p[5] or 0,p[3],reserved))
+            cur.execute(
+                """
+                INSERT INTO shop_order_items(
+                    order_id,product_id,product_name,qty,price_netto,price_brutto,
+                    vat,warehouse,reserved_qty
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                """,
+                (
+                    order_id, pid, p[1], qty, price_netto,
+                    price_netto * (1 + vat / 100), vat, p[3], reserved,
+                ),
+            )
             if reserved:
                 shop_history(cur, order_id, "zarezerwowano towar", f"{p[1]} x {qty}")
         if lacking:
@@ -5290,17 +5801,40 @@ def shop_create_order():
         else:
             cur.execute("UPDATE shop_orders SET status='Towar zarezerwowany' WHERE id=%s", (order_id,))
             cur.execute("INSERT INTO shop_notifications(order_id,type,message) VALUES (%s,'oczekuje na dokument','Zamówienie oczekuje na dokument sprzedaży')", (order_id,))
-        cur.execute("SELECT id,order_number,order_date,customer_name,delivery_address,phone,email,shipping_cost,payment_method,payment_status,status,sales_document_number,tracking_number,notes,nip FROM shop_orders WHERE id=%s", (order_id,))
-        order = cur.fetchone(); cur.execute("SELECT id,product_id,product_name,qty,price_netto,price_brutto,vat FROM shop_order_items WHERE order_id=%s", (order_id,)); items=cur.fetchall()
-        payload = create_shop_document_payload(order, items)
-        cur.execute("INSERT INTO shop_sales_documents(order_id,document_number,editable_data,docx,pdf,created_by) VALUES (%s,%s,%s,%s,%s,%s)", (order_id,payload['document_number'],json.dumps(payload),psycopg2.Binary(simple_docx_bytes(payload)),psycopg2.Binary(shop_pdf_bytes(payload)),session.get('user')))
         ensure_shop_accounting_row(cur, order_id)
-        shop_history(cur, order_id, "wygenerowano dokument", payload['document_number'])
-        conn.commit(); cache.clear(); return redirect(f"/sklep/orders/{order_id}")
+        conn.commit()
+        cache.clear()
+        return redirect(f"/sklep/orders/{order_id}?created=1")
     except ValueError as exc:
-        conn.rollback(); return str(exc), 400
+        conn.rollback()
+        return render_shop_dashboard(str(exc), 400, request.form)
+    except psycopg2.errors.UndefinedColumn:
+        conn.rollback()
+        logger.exception("Shop database schema is incomplete.")
+        return render_shop_dashboard(
+            "Baza sklepu nie ma wszystkich wymaganych kolumn. "
+            "Uruchomiono migrację przy wdrożeniu; odśwież stronę i spróbuj ponownie.",
+            503,
+            request.form,
+        )
+    except psycopg2.IntegrityError:
+        conn.rollback()
+        logger.exception("Shop order integrity validation failed.")
+        return render_shop_dashboard(
+            "Nie można zapisać zamówienia: numer zamówienia lub dane produktu "
+            "kolidują z istniejącymi danymi.",
+            409,
+            request.form,
+        )
     except Exception:
-        conn.rollback(); logger.exception("Shop order creation failed"); return "Nie udało się utworzyć zamówienia.", 500
+        conn.rollback()
+        logger.exception("Shop order creation failed")
+        return render_shop_dashboard(
+            "Nie udało się zapisać zamówienia z powodu błędu bazy danych. "
+            "Żadne dane nie zostały zapisane.",
+            500,
+            request.form,
+        )
     finally:
         conn.close()
 
@@ -5416,6 +5950,7 @@ def shop_confirm_document(order_id):
         cur.execute("UPDATE shop_orders SET sales_document_number=%s,status='Dokument wystawiony',document_confirmed=TRUE WHERE id=%s", (number,order_id))
         if cur.rowcount != 1:
             raise ValueError("Nie znaleziono zamówienia.")
+        generate_shop_sales_document(cur, order_id, session.get("user"))
         cur.execute("UPDATE shop_sales_documents SET document_number=%s,confirmed=TRUE,confirmed_by=%s,confirmed_at=NOW() WHERE order_id=%s", (number,session.get('user'),order_id))
         if cur.rowcount != 1:
             raise ValueError("Nie znaleziono dokumentu sprzedaży.")
@@ -5429,6 +5964,49 @@ def shop_confirm_document(order_id):
         conn.rollback()
         logger.exception("Shop sales document confirmation failed.")
         return "Nie udało się zatwierdzić dokumentu sprzedaży.", 500
+    finally:
+        conn.close()
+
+
+@app.route('/sklep/orders/<int:order_id>/document/generate', methods=['POST'])
+@login_required
+def shop_generate_document(order_id):
+    if not (can_shop("shop_edit") or can_shop("accounting")):
+        return "Brak uprawnień do generowania dokumentu sprzedaży.", 403
+    conn = db()
+    cur = conn.cursor()
+    try:
+        _document, payload = generate_shop_sales_document(
+            cur, order_id, session.get("user")
+        )
+        shop_history(cur, order_id, "wygenerowano dokument", payload["document_number"])
+        cur.execute(
+            """
+            INSERT INTO shop_notifications(order_id,type,message)
+            VALUES (%s,'dokument wygenerowany',%s)
+            """,
+            (order_id, f"Dokument {payload['document_number']} jest gotowy do pobrania."),
+        )
+        conn.commit()
+        cache.clear()
+        return redirect(f"/sklep/orders/{order_id}?document=generated")
+    except ValueError as exc:
+        conn.rollback()
+        return render_template(
+            "error.html",
+            title="Nie można wygenerować dokumentu",
+            message=str(exc),
+        ), 400
+    except Exception:
+        conn.rollback()
+        logger.exception("Shop sales document generation failed.")
+        return render_template(
+            "error.html",
+            title="Nie udało się wygenerować dokumentu",
+            message=(
+                "Dane zamówienia pozostały bez zmian. Sprawdź produkty i spróbuj ponownie."
+            ),
+        ), 500
     finally:
         conn.close()
 
