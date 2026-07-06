@@ -13,30 +13,51 @@
 </div>
 <div class="card" style="margin-bottom:16px;">
   <h3>Nowe zamówienie</h3>
+  {% if form_error %}
+  <div role="alert" style="padding:12px;margin-bottom:12px;border:1px solid #fecaca;background:#fef2f2;color:#991b1b;border-radius:8px;">
+    {{ form_error }}
+  </div>
+  {% endif %}
+  {% set fd = form_data or {} %}
+  {% set selected_products = form_data.getlist('product_id') if form_data else [] %}
+  {% set selected_qtys = form_data.getlist('qty') if form_data else [] %}
   <form method="POST" action="/sklep/orders" style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;">
-    <input name="order_number" placeholder="Numer zamówienia (auto)">
-    <input type="date" name="date">
-    <input name="customer_name" placeholder="Klient" required>
-    <input name="delivery_address" placeholder="Adres dostawy" required>
-    <input name="phone" placeholder="Telefon">
-    <input name="email" type="email" placeholder="E-mail">
-    <input name="nip" placeholder="NIP">
-    <input name="shipping_cost" placeholder="Koszt wysyłki" value="0">
-    <input name="payment_method" placeholder="Sposób płatności">
-    <select name="payment_status"><option>Oczekuje na płatność</option><option>Opłacone</option></select>
-    <input name="sales_document_number" placeholder="Nr faktury/paragonu">
-    <input name="tracking_number" placeholder="Nr listu przewozowego">
-    <input name="notes" placeholder="Uwagi" style="grid-column:1/-1;">
+    <input name="order_number" value="{{ fd.get('order_number','') }}" placeholder="Numer zamówienia (auto)">
+    <input type="date" name="date" value="{{ fd.get('date','') }}">
+    <input name="customer_name" value="{{ fd.get('customer_name','') }}" placeholder="Klient" required>
+    <input name="delivery_address" value="{{ fd.get('delivery_address','') }}" placeholder="Adres dostawy" required>
+    <input name="phone" value="{{ fd.get('phone','') }}" placeholder="Telefon">
+    <input name="email" value="{{ fd.get('email','') }}" type="email" placeholder="E-mail">
+    <input name="nip" value="{{ fd.get('nip','') }}" placeholder="NIP">
+    <input name="shipping_cost" type="number" min="0" step="0.01" placeholder="Koszt wysyłki" value="{{ fd.get('shipping_cost','0') }}">
+    <select name="payment_method">
+      <option value="">Sposób płatności</option>
+      {% for method in payment_methods %}
+      <option {% if fd.get('payment_method') == method %}selected{% endif %}>{{ method }}</option>
+      {% endfor %}
+    </select>
+    <select name="payment_status">
+      <option {% if fd.get('payment_status','Oczekuje na płatność') == 'Oczekuje na płatność' %}selected{% endif %}>Oczekuje na płatność</option>
+      <option {% if fd.get('payment_status') == 'Opłacone' %}selected{% endif %}>Opłacone</option>
+    </select>
+    <input name="sales_document_number" value="{{ fd.get('sales_document_number','') }}" placeholder="Nr faktury/paragonu">
+    <input name="tracking_number" value="{{ fd.get('tracking_number','') }}" placeholder="Nr listu przewozowego">
+    <input name="notes" value="{{ fd.get('notes','') }}" placeholder="Uwagi" style="grid-column:1/-1;">
     <div style="grid-column:1/-1;">
       <strong>Produkty</strong>
-      {% for i in range(3) %}
+      {% for i in range([3, selected_products|length]|max) %}
       <div style="display:flex;gap:8px;margin-top:8px;">
-        <select name="product_id"><option value="">-- produkt --</option>{% for p in products %}<option value="{{ p[0] }}">{{ p[4] }} · {{ p[1] }} ({{ p[2] }} {{ p[3] }})</option>{% endfor %}</select>
-        <input name="qty" placeholder="Ilość">
+        <select name="product_id">
+          <option value="">-- produkt --</option>
+          {% for p in products %}
+          <option value="{{ p[0] }}" {% if selected_products|length > i and selected_products[i]|string == p[0]|string %}selected{% endif %}>{{ p[4] }} · {{ p[1] }} ({{ p[2] }} {{ p[3] }})</option>
+          {% endfor %}
+        </select>
+        <input name="qty" type="number" min="0.001" step="any" value="{{ selected_qtys[i] if selected_qtys|length > i else '' }}" placeholder="Ilość">
       </div>
       {% endfor %}
     </div>
-    <button>Utwórz, sprawdź stan i wygeneruj dokument</button>
+    <button>Utwórz zamówienie i sprawdź stan</button>
   </form>
 </div>
 <div class="card">
@@ -45,7 +66,25 @@
     <select name="status"><option value="">Wszystkie statusy</option>{% for s in statuses %}<option {% if request.args.get('status') == s %}selected{% endif %}>{{ s }}</option>{% endfor %}</select>
     <button>Szukaj</button>
   </form>
-  <table width="100%"><tr><th>Numer</th><th>Data</th><th>Klient</th><th>Status</th><th>Płatność</th><th>Dokument</th><th>Paczka</th><th>Wartość</th></tr>
-  {% for o in orders %}<tr><td><a href="/sklep/orders/{{ o[0] }}">{{ o[1] }}</a></td><td>{{ o[2] }}</td><td>{{ o[3] }}</td><td>{{ o[4] }}</td><td>{{ o[5] }}</td><td>{{ o[6] or '' }}</td><td>{{ o[7] or '' }}</td><td>{{ '%.2f'|format(o[8] or 0) }}</td></tr>{% endfor %}</table>
+  <table width="100%"><tr><th>Numer</th><th>Data</th><th>Klient</th><th>Status</th><th>Płatność</th><th>Dokument</th><th>Paczka</th><th>Wartość</th><th>Akcja</th></tr>
+  {% for o in orders %}
+  <tr>
+    <td><a href="/sklep/orders/{{ o[0] }}">{{ o[1] }}</a></td><td>{{ o[2] }}</td>
+    <td>{{ o[3] }}</td><td>{{ o[4] }}</td><td>{{ o[5] }}</td>
+    <td>{{ o[10] or o[6] or '' }}</td><td>{{ o[7] or '' }}</td>
+    <td>{{ '%.2f'|format(o[8] or 0) }}</td>
+    <td>
+      {% if session.get('role') in ['admin','shop','accounting'] %}
+      <form method="POST" action="/sklep/orders/{{ o[0] }}/document/generate" style="display:inline;">
+        <button>{{ 'Generuj ponownie' if o[9] else 'Generuj dokument' }}</button>
+      </form>
+      {% endif %}
+      {% if o[9] %}
+      <a href="/sklep/documents/{{ o[9] }}/pdf">PDF</a>
+      <a href="/sklep/documents/{{ o[9] }}/docx">DOCX</a>
+      {% endif %}
+    </td>
+  </tr>
+  {% endfor %}</table>
 </div>
 {% endblock %}
