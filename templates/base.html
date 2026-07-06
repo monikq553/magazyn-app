@@ -195,8 +195,10 @@ input:focus {
             {% if can('reports') %}<a href="/report">Raport dzienny</a>{% endif %}
             {% if session.get('role') == 'admin' %}
             <a href="/users">Użytkownicy</a>
+            <a href="/admin/security-history">Historia bezpieczeństwa</a>
             <a href="/admin/backups">Kopie zapasowe</a>
             {% endif %}
+            <a href="/change-password">Zmień hasło</a>
             <form method="POST" action="/logout">
                 <button type="submit">Wyloguj</button>
             </form>

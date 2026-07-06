@@ -20,55 +20,62 @@
     {% endif %}
 </div>
 
-<script type="module">
-import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-app.js";
-import { getAuth, signInWithEmailAndPassword, sendPasswordResetEmail, setPersistence, browserLocalPersistence } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js";
-
-const firebaseConfig = {{ firebase_config|tojson }};
-
+<script>
 const firebaseAdminReady = {{ "true" if firebase_admin_ready else "false" }};
 const firebaseWebReady = {{ "false" if missing_firebase_web_envs else "true" }};
-const firebaseApp = firebaseWebReady ? initializeApp(firebaseConfig) : null;
-const auth = firebaseApp ? getAuth(firebaseApp) : null;
-document.getElementById("submitBtn").addEventListener("click", async () => {
-  if (!firebaseAdminReady || !firebaseWebReady || !auth) {
+const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
+
+async function submitLogin() {
+  if (!firebaseAdminReady || !firebaseWebReady) {
     document.getElementById("error").textContent = "Logowanie jest wyłączone do czasu poprawienia konfiguracji Firebase.";
     return;
   }
   const email = document.getElementById("email").value.trim();
   const password = document.getElementById("password").value;
   const err = document.getElementById("error");
+  const button = document.getElementById("submitBtn");
   err.textContent = "";
+  err.style.color = "#dc2626";
+  button.disabled = true;
   try {
-    await setPersistence(auth, browserLocalPersistence);
-    const cred = await signInWithEmailAndPassword(auth, email, password);
-    const token = await cred.user.getIdToken();
-    const res = await fetch("/auth/session", {
+    const loginResponse = await fetch("/auth/password-login", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-CSRF-Token": document.querySelector('meta[name="csrf-token"]').content
+        "X-CSRF-Token": csrfToken
       },
-      body: JSON.stringify({ idToken: token })
+      body: JSON.stringify({email, password})
     });
-    if (!res.ok) {
-      let msg = "Nie udało się utworzyć sesji.";
-      try {
-        const payload = await res.json();
-        if (payload && payload.error) msg = payload.error;
-      } catch (_) {}
-      throw new Error(msg);
+    const loginResult = await loginResponse.json();
+    if (!loginResponse.ok || !loginResult.ok) {
+      throw new Error(loginResult.error || "Nie udało się zalogować.");
     }
-    window.location.href = "/";
+    const sessionResponse = await fetch("/auth/session", {
+      method: "POST",
+      headers: {"Content-Type": "application/json", "X-CSRF-Token": csrfToken},
+      body: JSON.stringify({idToken: loginResult.idToken})
+    });
+    const sessionResult = await sessionResponse.json();
+    if (!sessionResponse.ok || !sessionResult.ok) {
+      throw new Error(sessionResult.error || "Nie udało się utworzyć sesji.");
+    }
+    window.location.href = sessionResult.redirect || "/";
   } catch (e) {
     err.textContent = e?.message || "Błąd logowania.";
+  } finally {
+    button.disabled = false;
   }
+}
+
+document.getElementById("submitBtn").addEventListener("click", submitLogin);
+document.getElementById("password").addEventListener("keydown", event => {
+  if (event.key === "Enter") submitLogin();
 });
 
 document.getElementById("resetBtn").addEventListener("click", async () => {
   const email = document.getElementById("email").value.trim();
   const err = document.getElementById("error");
-  if (!firebaseWebReady || !auth) {
+  if (!firebaseWebReady) {
     err.textContent = "Reset hasła jest wyłączony do czasu poprawienia konfiguracji Firebase.";
     return;
   }
@@ -77,9 +84,15 @@ document.getElementById("resetBtn").addEventListener("click", async () => {
     return;
   }
   try {
-    await sendPasswordResetEmail(auth, email);
+    const response = await fetch("/auth/forgot-password", {
+      method: "POST",
+      headers: {"Content-Type": "application/json", "X-CSRF-Token": csrfToken},
+      body: JSON.stringify({email})
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "Nie udało się wysłać wiadomości.");
     err.style.color = "#166534";
-    err.textContent = "Wysłaliśmy wiadomość do ustawienia nowego hasła.";
+    err.textContent = result.message;
   } catch (e) {
     err.style.color = "#dc2626";
     err.textContent = e?.message || "Nie udało się wysłać wiadomości.";
