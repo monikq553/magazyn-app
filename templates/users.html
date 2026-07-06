@@ -54,11 +54,12 @@ input, select {
         <input name="first_name" placeholder="Imię" maxlength="100" required>
         <input name="last_name" placeholder="Nazwisko" maxlength="100" required>
         <input name="email" type="email" placeholder="E-mail" maxlength="254" required>
-        
+
         <select name="role">
             <option value="warehouse">Magazynier</option>
             <option value="shop">Obsługa sklepu internetowego</option>
             <option value="accounting">Księgowość</option>
+            <option value="sales">Handlowiec</option>
             <option value="admin">Administrator</option>
         </select>
 
@@ -92,6 +93,7 @@ input, select {
                 <option value="warehouse" {% if u[5] == 'warehouse' %}selected{% endif %}>Magazynier</option>
                 <option value="shop" {% if u[5] == 'shop' %}selected{% endif %}>Obsługa sklepu</option>
                 <option value="accounting" {% if u[5] == 'accounting' %}selected{% endif %}>Księgowość</option>
+                <option value="sales" {% if u[5] == 'sales' %}selected{% endif %}>Handlowiec</option>
                 <option value="admin" {% if u[5] == 'admin' %}selected{% endif %}>Administrator</option>
             </select>
             <button class="btn">Zmień rolę</button>

@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Dashboard handlowca</h2>
+<div class="tiles" style="margin-bottom:16px;">
+  <div class="tile"><strong>Moje zamówienia</strong><br>{{ order_counts[0] or 0 }}</div>
+  <div class="tile"><strong>Oczekujące</strong><br>{{ order_counts[1] or 0 }}</div>
+  <div class="tile"><strong>W realizacji</strong><br>{{ order_counts[2] or 0 }}</div>
+  <div class="tile"><strong>Zakończone</strong><br>{{ order_counts[3] or 0 }}</div>
+</div>
+
+<div class="card" style="margin-bottom:16px;">
+  <h3>Szybkie wyszukiwanie magazynu</h3>
+  <form method="GET" action="/magazyn/Wszystko" onsubmit="return searchInventory(event)">
+    <input id="inventory-query" placeholder="Produkt lub numer paczki" style="width:min(520px,100%);">
+    <button type="submit">Szukaj</button>
+  </form>
+  <p id="package-result" role="status"></p>
+</div>
+
+<div class="card" style="margin-bottom:16px;">
+  <h3>Powiadomienia</h3>
+  {% for notification in notifications %}
+  <p><a href="/sklep/orders/{{ notification[3] }}"><strong>{{ notification[0] }}</strong>: {{ notification[1] }}</a> <small>{{ notification[2] }}</small></p>
+  {% else %}<p>Brak nowych powiadomień.</p>{% endfor %}
+</div>
+
+<div class="card" style="margin-bottom:16px;overflow:auto;">
+  <h3>Moje ostatnie zamówienia</h3>
+  <table width="100%"><tr><th>Numer</th><th>Data</th><th>Klient</th><th>Status</th></tr>
+  {% for order in my_orders %}
+  <tr><td><a href="/sklep/orders/{{ order[0] }}">{{ order[1] }}</a></td><td>{{ order[2] }}</td><td>{{ order[3] }}</td><td>{{ order[4] }}</td></tr>
+  {% else %}<tr><td colspan="4">Brak przypisanych zamówień.</td></tr>{% endfor %}
+  </table>
+</div>
+
+<div class="tiles">
+  <div class="card">
+    <h3>Produkty z niskim stanem</h3>
+    {% for product in low_stock %}
+    <p><a href="/magazyn/{{ product[4] }}">{{ product[1] }}</a>: {{ product[2] }} {{ product[3] }} · {{ product[4] }}</p>
+    {% else %}<p>Brak produktów z niskim stanem.</p>{% endfor %}
+  </div>
+  <div class="card">
+    <h3>Ostatnio dodane produkty</h3>
+    {% for product in recent_products %}
+    <p><a href="/magazyn/{{ product[4] }}">{{ product[1] }}</a>: {{ product[2] }} {{ product[3] }} · {{ product[4] }}</p>
+    {% else %}<p>Brak produktów.</p>{% endfor %}
+  </div>
+</div>
+
+<script>
+async function searchInventory(event) {
+  event.preventDefault();
+  const query = document.getElementById('inventory-query').value.trim();
+  if (!query) return false;
+  const response = await fetch('/api/packages/lookup?number=' + encodeURIComponent(query));
+  if (response.ok) {
+    const result = await response.json();
+    location.href = '/magazyn/' + encodeURIComponent(result.package.warehouse);
+    return false;
+  }
+  location.href = '/magazyn/Wszystko?q=' + encodeURIComponent(query);
+  return false;
+}
+</script>
+{% endblock %}

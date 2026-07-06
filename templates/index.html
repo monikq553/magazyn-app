@@ -67,7 +67,7 @@ input {
 <div class="box">
 <h2>Magazyn: {{warehouse}}</h2>
 
-{% if warehouse != "Wszystko" %}
+{% if warehouse != "Wszystko" and can('inventory_manage') %}
 <details style="margin-bottom:16px;">
 <summary class="btn" style="display:inline-block;">Dodaj kartotekę produktu</summary>
 <form method="POST" action="/add_product" style="display:grid;grid-template-columns:2fr repeat(3,1fr);gap:8px;margin-top:12px;">
@@ -87,7 +87,7 @@ input {
 
 <!-- 🔍 WYSZUKIWARKA -->
 <div style="position:relative;">
-    <input type="text" id="search" class="search" placeholder="Szukaj produktu lub paczkę..." onkeyup="showSuggestions()">
+    <input type="text" id="search" class="search" value="{{ search_query }}" placeholder="Szukaj produktu lub paczkę..." onkeyup="showSuggestions()">
     <select id="packageFilter" onchange="filterTable()" style="margin-bottom:10px;">
         <option value="">Z numerem i bez numeru paczki</option>
         <option value="numbered">Tylko z numerem paczki</option>
@@ -114,7 +114,10 @@ input {
 <th>{% if session.get('role') == 'admin' %}<input type="checkbox" onclick="toggleAll(this)">{% endif %}</th>
 <th>Nazwa</th>
 <th>Ilość</th>
+<th>Zarezerwowano</th>
+<th>Dostępne</th>
 <th>Jedn.</th>
+<th>Magazyn</th>
 <th>Brutto</th>
 <th>Paczki</th>
 <th>Akcja</th>
@@ -136,12 +139,15 @@ input {
 </td>
 
 <td>{{p[2]}}</td>
+<td>{{ reservations.get(p[0], 0)|round(3) }}</td>
+<td>{{ ([p[2] - reservations.get(p[0], 0), 0]|max)|round(3) }}</td>
 <td>{{p[3]}}</td>
+<td>{{ p[4] }}</td>
 <td>{{ (p[5]*(1+p[6]/100))|round(2) }} zł</td>
 <td>{% set mode = package_modes.get(p[0], 'empty') %}{% if mode == 'numbered' %}z numerem{% elif mode == 'unnumbered' %}bez numeru paczki{% elif mode == 'mixed' %}z numerem i bez numeru{% else %}brak stanu{% endif %}</td>
 
 <td style="display:flex; gap:5px;">
-    {% if can('inventory') %}
+    {% if can('inventory_manage') %}
     <details>
         <summary class="btn">Edytuj</summary>
         <div style="position:absolute;background:white;padding:12px;border:1px solid #ddd;z-index:20;display:grid;gap:6px;min-width:260px;">
@@ -320,6 +326,7 @@ async function updatePackage(event, form) {
     location.reload();
     return false;
 }
+if (document.getElementById("search").value) filterTable();
 </script>
 
 {% endblock %}

@@ -2,6 +2,17 @@
 
 {% block content %}
 <h2>Kontrahenci</h2>
+<div class="card" style="margin-bottom:16px;">
+  <h3>Dodaj klienta</h3>
+  <form method="POST" action="/kontrahenci/add" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;">
+    <input name="name" placeholder="Nazwa" maxlength="200" required>
+    <input name="nip" placeholder="NIP" maxlength="30">
+    <input name="email" type="email" placeholder="E-mail" maxlength="254">
+    <input name="phone" placeholder="Telefon" maxlength="50">
+    <input name="address" placeholder="Adres" maxlength="500">
+    <button type="submit">Dodaj klienta</button>
+  </form>
+</div>
 <div class="card" style="overflow:auto;">
 <table width="100%">
     <tr><th>Nazwa</th><th>NIP</th><th>E-mail</th><th>Telefon</th><th>Adres</th><th>Akcja</th></tr>

@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Raport handlowca</h2>
+<div class="card" style="overflow:auto;">
+  <table width="100%">
+    <tr>
+      <th>Handlowiec</th><th>Liczba zamówień</th><th>Wartość zamówień</th>
+      <th>Zakończone</th><th>W realizacji</th><th>Anulowane</th>
+    </tr>
+    {% for row in rows %}
+    <tr>
+      <td>{{ row[0] }}</td><td>{{ row[1] }}</td><td>{{ '%.2f'|format(row[2] or 0) }} zł</td>
+      <td>{{ row[3] }}</td><td>{{ row[4] }}</td><td>{{ row[5] }}</td>
+    </tr>
+    {% else %}<tr><td colspan="6">Brak zamówień w raporcie.</td></tr>{% endfor %}
+  </table>
+</div>
+{% endblock %}
