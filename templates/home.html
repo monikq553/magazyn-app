@@ -18,6 +18,12 @@
 {% if can('accounting') %}
 <a href="/ksiegowosc" class="tile"><div style="font-size:20px;">K</div><div style="margin-top:10px;font-weight:600;">Księgowość</div><div style="font-size:13px;color:#6b7280;margin-top:5px;">Rozliczenia zamówień</div></a>
 {% endif %}
+{% if session.get('role') == 'admin' or session.get('can_import_warehouse') or session.get('can_import_accounting') %}
+<a href="/import-ogolny" class="tile"><div style="font-size:20px;">X</div><div style="margin-top:10px;font-weight:600;">Import ogólny z Excela</div><div style="font-size:13px;color:#6b7280;margin-top:5px;">Podgląd, korekta i import wielu arkuszy</div></a>
+{% endif %}
+{% if session.get('role') in ['admin', 'warehouse', 'accounting'] %}
+<a href="/kontrahenci" class="tile"><div style="font-size:20px;">C</div><div style="margin-top:10px;font-weight:600;">Kontrahenci</div><div style="font-size:13px;color:#6b7280;margin-top:5px;">Edycja danych kontrahentów</div></a>
+{% endif %}
 {% if can('history') %}
 <a href="/historia" class="tile"><div style="font-size:20px;">H</div><div style="margin-top:10px;font-weight:600;">Historia</div><div style="font-size:13px;color:#6b7280;margin-top:5px;">Dokumenty</div></a>
 {% endif %}

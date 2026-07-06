@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h2>Kontrahenci</h2>
+<div class="card" style="overflow:auto;">
+<table width="100%">
+    <tr><th>Nazwa</th><th>NIP</th><th>E-mail</th><th>Telefon</th><th>Adres</th><th>Akcja</th></tr>
+    {% for contractor in contractors %}
+    <tr>
+        <td><form id="contractor-{{ contractor[0] }}" method="POST" action="/kontrahenci/{{ contractor[0] }}/edit"></form>
+            <input form="contractor-{{ contractor[0] }}" name="name" value="{{ contractor[1] }}" maxlength="200" required></td>
+        <td><input form="contractor-{{ contractor[0] }}" name="nip" value="{{ contractor[2] or '' }}" maxlength="30"></td>
+        <td><input form="contractor-{{ contractor[0] }}" name="email" value="{{ contractor[3] or '' }}" type="email" maxlength="254"></td>
+        <td><input form="contractor-{{ contractor[0] }}" name="phone" value="{{ contractor[4] or '' }}" maxlength="50"></td>
+        <td><input form="contractor-{{ contractor[0] }}" name="address" value="{{ contractor[5] or '' }}" maxlength="500"></td>
+        <td><button form="contractor-{{ contractor[0] }}" type="submit">Zapisz</button></td>
+    </tr>
+    {% else %}
+    <tr><td colspan="6">Brak kontrahentów.</td></tr>
+    {% endfor %}
+</table>
+</div>
+{% endblock %}

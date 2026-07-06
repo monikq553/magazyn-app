@@ -1,0 +1,129 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h2>Podgląd importu: {{ run[1] }}</h2>
+
+{% if request.args.get('completed') or run[3] == 'completed' %}
+<div class="card" style="margin-bottom:16px;color:#166534;">
+    <strong>Import zakończony.</strong>
+    Dodano: {{ (run[5] or {}).get('added', 0) }},
+    zaktualizowano: {{ (run[5] or {}).get('updated', 0) }},
+    pominięto: {{ (run[5] or {}).get('skipped', 0) }}.
+</div>
+{% endif %}
+{% if request.args.get('validation') == 'failed' %}
+<div class="card" style="margin-bottom:16px;color:#b91c1c;">
+    Import nie został zapisany. Popraw oznaczone wiersze i ponownie zapisz korekty.
+</div>
+{% endif %}
+{% if request.args.get('commit_error') %}
+<div class="card" style="margin-bottom:16px;color:#b91c1c;">
+    Import został wycofany. {{ (run[6] or ['Sprawdź dane i spróbuj ponownie.'])[0] }}
+</div>
+{% endif %}
+
+<div class="card" style="margin-bottom:18px;">
+    <p><strong>Użytkownik:</strong> {{ run[2] }} · <strong>Status:</strong> {{ run[3] }}</p>
+    <p>Duplikaty są domyślnie pomijane. Przed zatwierdzeniem możesz wybrać aktualizację
+       albo dodanie nowej pozycji.</p>
+</div>
+
+{% if run[3] == 'draft' %}
+<form method="POST" action="/import-ogolny/{{ run[0] }}/mapping">
+<div class="card" style="margin-bottom:18px;overflow:auto;">
+    <h3>Rozpoznane arkusze i przypisanie kolumn</h3>
+    {% for sheet in run[4] or [] %}
+    {% set sheet_index = loop.index0 %}
+    <details style="margin-bottom:12px;" {% if sheet.entity_type in ['unknown'] %}open{% endif %}>
+        <summary><strong>{{ sheet.name }}</strong> · {{ sheet.row_count }} wierszy ·
+            {{ entity_labels.get(sheet.entity_type, 'nierozpoznany') }}</summary>
+        <div style="padding:12px;display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:8px;">
+            <label>Typ danych
+                <select name="entity_{{ sheet_index }}">
+                    <option value="unknown">Nie importuj / przypisz ręcznie</option>
+                    {% for entity, label in entity_labels.items() %}
+                    {% if entity_groups.get(entity) in allowed_groups %}
+                    <option value="{{ entity }}" {% if sheet.entity_type == entity %}selected{% endif %}>{{ label }}</option>
+                    {% endif %}
+                    {% endfor %}
+                </select>
+            </label>
+            {% for field in entity_fields.get(sheet.entity_type, []) %}
+            <label>{{ field_labels.get(field, field) }}
+                <select name="map_{{ sheet_index }}_{{ field }}">
+                    <option value="">— brak —</option>
+                    {% for column in sheet.columns %}
+                    <option value="{{ column }}" {% if sheet.mapping.get(field) == column %}selected{% endif %}>{{ column }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            {% endfor %}
+        </div>
+    </details>
+    {% endfor %}
+    <button type="submit">Zapisz przypisanie kolumn</button>
+</div>
+</form>
+
+<form method="POST" action="/import-ogolny/{{ run[0] }}/prepare">
+<div class="card" style="margin-bottom:18px;overflow:auto;">
+    <h3>Dane przed zapisem</h3>
+    {% for sheet_name, sheet_rows in rows|groupby(1) %}
+    <h4>{{ sheet_name }}</h4>
+    <table style="min-width:1100px;width:100%;border-collapse:collapse;">
+        <tr>
+            <th>Importuj</th><th>Wiersz</th><th>Typ</th><th>Dane</th>
+            <th>Duplikat</th><th>Decyzja</th><th>Walidacja</th>
+        </tr>
+        {% for row in sheet_rows %}
+        {% set data = row[5] or {} %}
+        <tr style="{% if row[9] %}background:#fff7ed;{% endif %}">
+            <td><input type="checkbox" name="included_{{ row[0] }}" {% if row[8] %}checked{% endif %}></td>
+            <td>{{ row[2] }}</td>
+            <td>{{ entity_labels.get(row[3], row[3]) }}</td>
+            <td>
+                <div style="display:grid;grid-template-columns:repeat(3,minmax(170px,1fr));gap:6px;">
+                {% for field in entity_fields.get(row[3], []) %}
+                    <label style="font-size:12px;">{{ field_labels.get(field, field) }}
+                    {% if field == 'unit' %}
+                        <select name="row_{{ row[0] }}_{{ field }}">
+                            <option value="">—</option>
+                            {% for unit in units %}<option {% if data.get(field)|string == unit %}selected{% endif %}>{{ unit }}</option>{% endfor %}
+                        </select>
+                    {% elif field == 'warehouse' %}
+                        <select name="row_{{ row[0] }}_{{ field }}">
+                            <option value="">—</option>
+                            {% for warehouse in warehouses %}<option {% if data.get(field)|string == warehouse %}selected{% endif %}>{{ warehouse }}</option>{% endfor %}
+                        </select>
+                    {% else %}
+                        <input name="row_{{ row[0] }}_{{ field }}" value="{{ data.get(field, '') }}" style="width:100%;">
+                    {% endif %}
+                    </label>
+                {% endfor %}
+                </div>
+            </td>
+            <td>{% if row[6] %}{{ row[6].get('label', 'istnieje') }}{% else %}—{% endif %}</td>
+            <td>
+                <select name="resolution_{{ row[0] }}">
+                    <option value="skip" {% if row[7] == 'skip' %}selected{% endif %}>Pomiń</option>
+                    <option value="update" {% if row[7] == 'update' %}selected{% endif %}>Aktualizuj</option>
+                    <option value="new" {% if row[7] == 'new' %}selected{% endif %}>Dodaj jako nową</option>
+                </select>
+            </td>
+            <td style="color:#b91c1c;">{{ (row[9] or [])|join(' ') }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% endfor %}
+    <button type="submit">Zapisz korekty i ponownie sprawdź dane</button>
+</div>
+</form>
+
+<form method="POST" action="/import-ogolny/{{ run[0] }}/confirm"
+      onsubmit="return confirm('Zapisać dane do właściwych modułów? Operacja wykona się w jednej transakcji.');">
+    <button type="submit">Zatwierdź i wykonaj import</button>
+</form>
+{% endif %}
+
+<p><a href="/import-ogolny">Wróć do historii importów</a></p>
+{% endblock %}

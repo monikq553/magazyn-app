@@ -141,6 +141,20 @@ input {
 <td>{% set mode = package_modes.get(p[0], 'empty') %}{% if mode == 'numbered' %}z numerem{% elif mode == 'unnumbered' %}bez numeru paczki{% elif mode == 'mixed' %}z numerem i bez numeru{% else %}brak stanu{% endif %}</td>
 
 <td style="display:flex; gap:5px;">
+    {% if can('inventory') %}
+    <details>
+        <summary class="btn">Edytuj</summary>
+        <div style="position:absolute;background:white;padding:12px;border:1px solid #ddd;z-index:20;display:grid;gap:6px;min-width:260px;">
+            <input name="name" value="{{ p[1] }}" maxlength="200" required>
+            <input name="qty" value="{{ p[2] }}" type="number" min="0" step="any" required>
+            <select name="unit">{% for unit in units %}<option {% if p[3] == unit %}selected{% endif %}>{{ unit }}</option>{% endfor %}</select>
+            <select name="warehouse">{% for wh in warehouses %}<option {% if p[4] == wh %}selected{% endif %}>{{ wh }}</option>{% endfor %}</select>
+            <input name="price_netto" value="{{ p[5] or 0 }}" type="number" min="0" step="0.01">
+            <input name="vat" value="{{ p[6] or 0 }}" type="number" min="0" max="100" step="0.01">
+            <button type="button" onclick="updateProduct({{ p[0] }}, this.parentElement)">Zapisz</button>
+        </div>
+    </details>
+    {% endif %}
     {% if session.get('role') == 'admin' %}
     <button type="button" class="btn" style="background:red;" onclick="deleteOne({{p[0]}})">Usuń</button>
     {% endif %}
@@ -198,6 +212,24 @@ function deleteOne(id) {
         if (!response.ok) throw new Error(await response.text());
         location.reload();
     }).catch(error => alert(error.message));
+}
+
+async function updateProduct(id, editor) {
+    const data = new FormData();
+    editor.querySelectorAll("input[name], select[name]").forEach(field => {
+        data.append(field.name, field.value);
+    });
+    data.append("_csrf_token", document.querySelector('meta[name="csrf-token"]').content);
+    try {
+        const response = await fetch("/products/" + id + "/edit", {
+            method: "POST",
+            body: data
+        });
+        if (!response.ok) throw new Error(await response.text());
+        location.href = response.url || location.href;
+    } catch (error) {
+        alert(error.message);
+    }
 }
 
 function toggleAll(source) {
@@ -272,6 +304,21 @@ function showPackages(e, productId, warehouse) {
 
 function closePackages() {
     document.getElementById("packagesModal").style.display = "none";
+}
+
+async function updatePackage(event, form) {
+    event.preventDefault();
+    const response = await fetch(form.action, {
+        method: "POST",
+        headers: {"X-CSRF-Token": document.querySelector('meta[name="csrf-token"]').content},
+        body: new FormData(form)
+    });
+    if (!response.ok) {
+        alert(await response.text());
+        return false;
+    }
+    location.reload();
+    return false;
 }
 </script>
 
