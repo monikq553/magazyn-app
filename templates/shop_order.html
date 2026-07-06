@@ -11,11 +11,28 @@
   Dokument sprzedaży został wygenerowany i zapisany przy zamówieniu.
 </div>
 {% endif %}
+{% if request.args.get('details') == 'saved' %}
+<div class="card" style="margin-bottom:16px;color:#166534;">
+  Dane operacyjne zamówienia zostały zapisane.
+</div>
+{% endif %}
 <div class="card" style="margin-bottom:16px;">
   <p><strong>Klient:</strong> {{ order[3] }} · {{ order[6] }} · {{ order[5] }}</p>
   <p><strong>Adres:</strong> {{ order[4] }} {% if order[14] %}· NIP: {{ order[14] }}{% endif %}</p>
   <p><strong>Status:</strong> {{ order[10] }} · <strong>Płatność:</strong> {{ order[9] }} · <strong>List:</strong> {{ order[12] or '' }}</p>
   <p><strong>Uwagi:</strong> {{ order[13] or '' }}</p>
+  {% if session.get('role') in ['admin','shop','warehouse'] %}
+  <form method="POST" action="/sklep/orders/{{ order[0] }}/details"
+        style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px;">
+    {% if session.get('role') in ['admin','shop'] %}
+    <input name="notes" placeholder="Uwagi" value="{{ order[13] or '' }}">
+    {% endif %}
+    {% if session.get('role') in ['admin','warehouse'] %}
+    <input name="tracking_number" placeholder="Numer przesyłki" value="{{ order[12] or '' }}">
+    {% endif %}
+    <button type="submit">Zapisz dane operacyjne</button>
+  </form>
+  {% endif %}
 </div>
 <div class="card" style="margin-bottom:16px;">
   <h3>Produkty</h3>
@@ -60,10 +77,27 @@
 {% endif %}
 
 <div class="card" style="margin-bottom:16px;">
+  <h3>Etapy realizacji</h3>
+  <p id="stage-save-message" role="status" style="min-height:20px;color:#166534;"></p>
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:9px;">
+    {% for stage in stage_rows %}
+    <label style="display:flex;align-items:center;gap:8px;padding:8px;border:1px solid #e5e7eb;border-radius:8px;">
+      <input type="checkbox"
+             class="order-stage-checkbox"
+             data-stage="{{ stage.key }}"
+             {% if stage.checked %}checked{% endif %}
+             {% if not stage.can_edit %}disabled title="Brak uprawnień do tego etapu"{% endif %}>
+      <span>{{ stage.label }}</span>
+    </label>
+    {% endfor %}
+  </div>
+</div>
+
+<div class="card" style="margin-bottom:16px;">
   <h3>Proces</h3>
   <form method="POST" action="/sklep/orders/{{ order[0] }}/status" style="display:flex;gap:8px;">
     <select name="status">{% for s in statuses %}<option {% if order[10] == s %}selected{% endif %}>{{ s }}</option>{% endfor %}</select>
-    <input name="tracking_number" placeholder="Numer listu przewozowego" value="{{ order[12] or '' }}">
+    <input id="tracking-number" name="tracking_number" placeholder="Numer listu przewozowego" value="{{ order[12] or '' }}">
     <button>Zmień status</button>
   </form>
 </div>
@@ -85,5 +119,68 @@
     <p>Dokument nie został jeszcze wygenerowany.</p>
   {% endif %}
 </div>
+<div class="card" style="margin-bottom:16px;overflow:auto;">
+  <h3>Historia etapów</h3>
+  <table width="100%">
+    <tr><th>Data i godzina</th><th>Użytkownik</th><th>Etap</th><th>Poprzednio</th><th>Po zmianie</th><th>Status przed</th><th>Status po</th></tr>
+    {% for h in stage_history %}
+    <tr>
+      <td>{{ h[4] }}</td>
+      <td>{{ h[3] }}</td>
+      <td>{{ stage_labels.get(h[0], h[0]) }}</td>
+      <td>{{ 'odhaczone' if h[1] else 'nieodhaczone' }}</td>
+      <td>{{ 'odhaczone' if h[2] else 'nieodhaczone' }}</td>
+      <td>{{ h[5] or '—' }}</td>
+      <td>{{ h[6] or '—' }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="7">Brak zmian etapów.</td></tr>
+    {% endfor %}
+  </table>
+</div>
 <div class="card"><h3>Historia zmian</h3>{% for h in history %}<p>{{ h[3] }} · <strong>{{ h[1] }}</strong> · {{ h[0] }} · {{ h[2] }}</p>{% endfor %}</div>
+
+<script>
+document.querySelectorAll('.order-stage-checkbox').forEach(function (checkbox) {
+  checkbox.addEventListener('change', async function () {
+    const previous = !checkbox.checked;
+    checkbox.disabled = true;
+    const message = document.getElementById('stage-save-message');
+    message.style.color = '#6b7280';
+    message.textContent = 'Zapisywanie…';
+    try {
+      const response = await fetch('/sklep/orders/{{ order[0] }}/stage', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CSRF-Token': document.querySelector('meta[name="csrf-token"]').content
+        },
+        body: JSON.stringify({
+          stage: checkbox.dataset.stage,
+          checked: checkbox.checked,
+          tracking_number: document.getElementById('tracking-number').value
+        })
+      });
+      const responseText = await response.text();
+      let result;
+      try {
+        result = JSON.parse(responseText);
+      } catch (_error) {
+        result = {ok: false, message: responseText || 'Nie udało się zapisać etapu.'};
+      }
+      if (!response.ok || !result.ok) {
+        throw new Error(result.message || 'Nie udało się zapisać etapu.');
+      }
+      message.style.color = '#166534';
+      message.textContent = result.message;
+      window.setTimeout(function () { window.location.reload(); }, 350);
+    } catch (error) {
+      checkbox.checked = previous;
+      checkbox.disabled = false;
+      message.style.color = '#b91c1c';
+      message.textContent = error.message;
+    }
+  });
+});
+</script>
 {% endblock %}

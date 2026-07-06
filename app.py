@@ -65,6 +65,16 @@ from general_import import (
     parse_workbook,
     validate_row as validate_import_row,
 )
+from issue_import import (
+    ISSUE_IMPORT_FIELDS,
+    ISSUE_IMPORT_LABELS,
+    issue_history_pdf,
+    issue_history_xlsx,
+    issue_mapping,
+    issue_sheet_selected,
+    normalize_issue_row,
+    validate_issue_row,
+)
 
 load_dotenv()
 
@@ -524,6 +534,9 @@ def run_db_migrations():
     cur.execute("ALTER TABLE issue_docs ADD COLUMN IF NOT EXISTS voided_at TIMESTAMPTZ")
     cur.execute("ALTER TABLE issue_docs ADD COLUMN IF NOT EXISTS voided_by TEXT")
     cur.execute("ALTER TABLE issue_items ADD COLUMN IF NOT EXISTS package_number TEXT")
+    cur.execute("ALTER TABLE issue_items ADD COLUMN IF NOT EXISTS dimension TEXT")
+    cur.execute("ALTER TABLE issue_items ADD COLUMN IF NOT EXISTS species TEXT")
+    cur.execute("ALTER TABLE issue_items ADD COLUMN IF NOT EXISTS notes TEXT")
     cur.execute("ALTER TABLE costs ADD COLUMN IF NOT EXISTS source_warehouse TEXT")
     cur.execute("UPDATE products SET qty=0 WHERE qty IS NULL OR qty < 0 OR qty::text='NaN'")
     cur.execute("UPDATE packages SET qty=0 WHERE qty IS NULL OR qty < 0 OR qty::text='NaN'")
@@ -672,6 +685,7 @@ def run_db_migrations():
         tracking_number TEXT,
         notes TEXT,
         nip TEXT,
+        stages JSONB NOT NULL DEFAULT '{}'::jsonb,
         document_confirmed BOOLEAN NOT NULL DEFAULT FALSE,
         created_by TEXT,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -719,6 +733,7 @@ def run_db_migrations():
             ADD COLUMN IF NOT EXISTS tracking_number TEXT,
             ADD COLUMN IF NOT EXISTS notes TEXT,
             ADD COLUMN IF NOT EXISTS nip TEXT,
+            ADD COLUMN IF NOT EXISTS stages JSONB DEFAULT '{}'::jsonb,
             ADD COLUMN IF NOT EXISTS document_confirmed BOOLEAN DEFAULT FALSE,
             ADD COLUMN IF NOT EXISTS created_by TEXT,
             ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW(),
@@ -744,6 +759,7 @@ def run_db_migrations():
                     WHEN 'reserved' THEN 'Towar zarezerwowany'
                     ELSE 'Nowe zamówienie'
                 END),
+            stages=COALESCE(stages, '{}'::jsonb),
             document_confirmed=COALESCE(document_confirmed, FALSE),
             created_at=COALESCE(created_at, NOW()),
             updated_at=COALESCE(updated_at, NOW())
@@ -757,6 +773,7 @@ def run_db_migrations():
             ALTER COLUMN shipping_cost SET NOT NULL,
             ALTER COLUMN payment_status SET NOT NULL,
             ALTER COLUMN status SET NOT NULL,
+            ALTER COLUMN stages SET NOT NULL,
             ALTER COLUMN document_confirmed SET NOT NULL,
             ALTER COLUMN created_at SET NOT NULL,
             ALTER COLUMN updated_at SET NOT NULL
@@ -860,6 +877,41 @@ def run_db_migrations():
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
     """)
+    cur.execute("""
+        UPDATE shop_orders o
+        SET stages=jsonb_build_object(
+            'order_accepted', o.status<>'Nowe zamówienie',
+            'stock_checked', FALSE,
+            'stock_reserved', o.status IN (
+                'Towar zarezerwowany','Dokument wystawiony','W trakcie pakowania',
+                'Spakowane','Wysłane','Dostarczone','Zakończone'
+            ),
+            'payment_checked', o.payment_status IS NOT NULL,
+            'paid', o.payment_status='Opłacone',
+            'proforma_issued', COALESCE((
+                SELECT a.proforma_issued FROM shop_accounting a WHERE a.order_id=o.id
+            ),FALSE),
+            'invoice_issued', COALESCE((
+                SELECT a.invoice_issued FROM shop_accounting a WHERE a.order_id=o.id
+            ),FALSE),
+            'receipt_issued', COALESCE((
+                SELECT a.receipt_issued FROM shop_accounting a WHERE a.order_id=o.id
+            ),FALSE),
+            'sales_document_generated', EXISTS (
+                SELECT 1 FROM shop_sales_documents sd WHERE sd.order_id=o.id
+            ),
+            'document_sent', FALSE,
+            'sent_to_packing', o.status IN (
+                'W trakcie pakowania','Spakowane','Wysłane','Dostarczone','Zakończone'
+            ),
+            'packed', o.status IN ('Spakowane','Wysłane','Dostarczone','Zakończone'),
+            'shipped', o.status IN ('Wysłane','Dostarczone','Zakończone'),
+            'tracking_entered', COALESCE(NULLIF(o.tracking_number,''),'')<>'',
+            'completed', o.status='Zakończone',
+            'cancelled', o.status='Anulowane'
+        )
+        WHERE COALESCE(o.stages,'{}'::jsonb)='{}'::jsonb
+    """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_shop_accounting_filters ON shop_accounting(payment_method, proforma_number, invoice_number, receipt_number, salesperson)")
 
     cur.execute("CREATE INDEX IF NOT EXISTS idx_shop_orders_search ON shop_orders(lower(order_number), lower(customer_name), lower(status), order_date)")
@@ -897,6 +949,28 @@ def run_db_migrations():
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
     """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS shop_order_stage_history(
+        id SERIAL PRIMARY KEY,
+        order_id INTEGER NOT NULL REFERENCES shop_orders(id) ON DELETE CASCADE,
+        stage_key TEXT NOT NULL,
+        previous_value BOOLEAN NOT NULL,
+        new_value BOOLEAN NOT NULL,
+        previous_status TEXT,
+        new_status TEXT,
+        changed_by TEXT NOT NULL,
+        changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    """)
+    cur.execute("""
+        ALTER TABLE shop_order_stage_history
+            ADD COLUMN IF NOT EXISTS previous_status TEXT,
+            ADD COLUMN IF NOT EXISTS new_status TEXT
+    """)
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_shop_stage_history_order "
+        "ON shop_order_stage_history(order_id, changed_at DESC)"
+    )
     cur.execute("""
         ALTER TABLE shop_sales_documents
             ADD COLUMN IF NOT EXISTS document_number TEXT,
@@ -969,6 +1043,87 @@ def run_db_migrations():
     """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_general_import_rows_import ON general_import_rows(import_id, id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_general_imports_created ON general_imports(created_at DESC)")
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS app_settings(
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_by TEXT,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    """)
+    cur.execute(
+        """
+        INSERT INTO app_settings(key,value)
+        VALUES ('issue_import_allow_general_stock','false')
+        ON CONFLICT (key) DO NOTHING
+        """
+    )
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS issue_imports(
+        id SERIAL PRIMARY KEY,
+        filename TEXT NOT NULL,
+        imported_by TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'draft',
+        detected_sheets JSONB NOT NULL DEFAULT '[]'::jsonb,
+        summary JSONB NOT NULL DEFAULT '{}'::jsonb,
+        errors JSONB NOT NULL DEFAULT '[]'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        completed_at TIMESTAMPTZ,
+        undone_at TIMESTAMPTZ,
+        undone_by TEXT
+    );
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS issue_import_rows(
+        id SERIAL PRIMARY KEY,
+        import_id INTEGER NOT NULL REFERENCES issue_imports(id) ON DELETE CASCADE,
+        sheet_name TEXT NOT NULL,
+        row_number INTEGER NOT NULL,
+        source_data JSONB NOT NULL DEFAULT '{}'::jsonb,
+        normalized_data JSONB NOT NULL DEFAULT '{}'::jsonb,
+        duplicate_data JSONB,
+        resolution TEXT NOT NULL DEFAULT 'new',
+        included BOOLEAN NOT NULL DEFAULT TRUE,
+        validation_errors JSONB NOT NULL DEFAULT '[]'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS issue_import_effects(
+        id SERIAL PRIMARY KEY,
+        import_id INTEGER NOT NULL REFERENCES issue_imports(id) ON DELETE CASCADE,
+        row_id INTEGER NOT NULL REFERENCES issue_import_rows(id) ON DELETE CASCADE,
+        action TEXT NOT NULL,
+        doc_id INTEGER REFERENCES issue_docs(id) ON DELETE RESTRICT,
+        item_id INTEGER REFERENCES issue_items(id) ON DELETE SET NULL,
+        product_id INTEGER REFERENCES products(id) ON DELETE RESTRICT,
+        package_id INTEGER REFERENCES packages(id) ON DELETE SET NULL,
+        qty REAL NOT NULL,
+        prior_data JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    """)
+    cur.execute("""
+        ALTER TABLE issue_import_effects
+            DROP CONSTRAINT IF EXISTS issue_import_effects_item_id_fkey
+    """)
+    cur.execute("""
+        ALTER TABLE issue_import_effects
+            ADD CONSTRAINT issue_import_effects_item_id_fkey
+            FOREIGN KEY (item_id) REFERENCES issue_items(id) ON DELETE SET NULL
+    """)
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_issue_import_rows_import "
+        "ON issue_import_rows(import_id,id)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_issue_imports_created "
+        "ON issue_imports(created_at DESC)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_issue_import_effects_import "
+        "ON issue_import_effects(import_id,id)"
+    )
 
     conn.commit()
     conn.close()
@@ -1039,12 +1194,13 @@ def is_issue_document(movement_type, doc_number):
 
 
 def issue_doc_history(cur, doc_id, action, details=""):
+    actor = session.get("user", "system") if has_request_context() else "system"
     cur.execute(
         """
         INSERT INTO issue_doc_history(doc_id, user_email, action, details)
         VALUES (%s,%s,%s,%s)
         """,
-        (doc_id, session.get("user", "system"), action, details),
+        (doc_id, actor, action, details),
     )
 
 
@@ -1116,6 +1272,41 @@ ACCOUNTING_FIELD_LABELS = {
     "settled": "Zamówienie rozliczone",
 }
 
+SHOP_ORDER_STAGES = (
+    ("order_accepted", "Zamówienie przyjęte", "shop_edit"),
+    ("stock_checked", "Towar sprawdzony w magazynie", "warehouse"),
+    ("stock_reserved", "Towar zarezerwowany", "warehouse"),
+    ("payment_checked", "Płatność sprawdzona", "accounting"),
+    ("paid", "Zapłacone", "accounting"),
+    ("proforma_issued", "Proforma wystawiona", "accounting"),
+    ("invoice_issued", "Faktura wystawiona", "accounting"),
+    ("receipt_issued", "Paragon wystawiony", "accounting"),
+    ("sales_document_generated", "Dokument sprzedaży wygenerowany", "accounting"),
+    ("document_sent", "Dokument wysłany do klienta", "shop_edit"),
+    ("sent_to_packing", "Przekazane do pakowania", "warehouse"),
+    ("packed", "Spakowane", "warehouse"),
+    ("shipped", "Wysłane", "warehouse"),
+    ("tracking_entered", "Numer przesyłki wpisany", "warehouse"),
+    ("completed", "Zakończone", "shop_edit"),
+    ("cancelled", "Anulowane", "shop_edit"),
+)
+SHOP_STAGE_BY_KEY = {
+    key: {"label": label, "permission": permission}
+    for key, label, permission in SHOP_ORDER_STAGES
+}
+SHOP_STAGE_STATUS = {
+    "order_accepted": "Przyjęte",
+    "stock_reserved": "Towar zarezerwowany",
+    "payment_checked": "Oczekuje na płatność",
+    "paid": "Opłacone",
+    "sales_document_generated": "Dokument wystawiony",
+    "sent_to_packing": "W trakcie pakowania",
+    "packed": "Spakowane",
+    "shipped": "Wysłane",
+    "completed": "Zakończone",
+    "cancelled": "Anulowane",
+}
+
 
 def accounting_required(f):
     @wraps(f)
@@ -1178,7 +1369,7 @@ def can_shop(action):
     role = current_user_role()
     if role == "admin":
         return True
-    return action in {
+    return role in {
         "shop_edit": {"shop"},
         "warehouse": {"warehouse"},
         "accounting": {"accounting"},
@@ -1193,13 +1384,196 @@ def require_shop_permission(action):
 
 
 def shop_history(cur, order_id, action, details=""):
+    actor = session.get("user", "system") if has_request_context() else "system"
     cur.execute(
         """
         INSERT INTO shop_order_history(order_id, user_email, action, details)
         VALUES (%s,%s,%s,%s)
         """,
-        (order_id, session.get("user", "system"), action, details),
+        (order_id, actor, action, details),
     )
+
+
+def shop_stage_can_edit(stage_key):
+    stage = SHOP_STAGE_BY_KEY.get(stage_key)
+    if not stage:
+        return False
+    return current_user_role() == "admin" or can_shop(stage["permission"])
+
+
+def shop_stage_dict(value):
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {}
+        except (TypeError, ValueError):
+            return {}
+    return {}
+
+
+def shop_status_from_stages(stages):
+    precedence = (
+        "cancelled",
+        "completed",
+        "shipped",
+        "packed",
+        "sent_to_packing",
+        "sales_document_generated",
+        "paid",
+        "payment_checked",
+        "stock_reserved",
+        "order_accepted",
+    )
+    for stage_key in precedence:
+        if stages.get(stage_key):
+            return SHOP_STAGE_STATUS[stage_key]
+    return "Nowe zamówienie"
+
+
+def set_shop_inventory_issued(cur, order_id, issued):
+    ensure_shop_accounting_row(cur, order_id)
+    if issued:
+        cur.execute(
+            "SELECT * FROM shop_accounting WHERE order_id=%s FOR UPDATE",
+            (order_id,),
+        )
+        if not order_can_be_shipped(cur.fetchone()):
+            raise ValueError(
+                "Księgowość nie odblokowała wydania: wymagane opłacenie albo "
+                "pobranie oraz oznaczenie gotowości do wysyłki."
+            )
+    cur.execute(
+        """
+        SELECT id,product_id,warehouse,qty,issued_qty
+        FROM shop_order_items WHERE order_id=%s ORDER BY id FOR UPDATE
+        """,
+        (order_id,),
+    )
+    for item_id, product_id, warehouse, qty, issued_qty in cur.fetchall():
+        current = float(issued_qty or 0)
+        target = float(qty or 0) if issued else 0.0
+        delta = target - current
+        if delta > 0:
+            cur.execute(
+                """
+                UPDATE products SET qty=qty-%s
+                WHERE id=%s AND warehouse=%s AND qty>=%s
+                """,
+                (delta, product_id, warehouse, delta),
+            )
+            if cur.rowcount != 1:
+                raise ValueError(
+                    "Brak stanu magazynowego lub próba podwójnego wydania."
+                )
+        elif delta < 0:
+            cur.execute(
+                "UPDATE products SET qty=qty+%s WHERE id=%s AND warehouse=%s",
+                (-delta, product_id, warehouse),
+            )
+            if cur.rowcount != 1:
+                raise ValueError("Nie można odtworzyć stanu magazynowego.")
+        cur.execute(
+            "UPDATE shop_order_items SET issued_qty=%s WHERE id=%s",
+            (target, item_id),
+        )
+
+
+def update_shop_stage(cur, order_id, stage_key, new_value, actor, tracking_number=""):
+    if stage_key not in SHOP_STAGE_BY_KEY:
+        raise ValueError("Nieprawidłowy etap zamówienia.")
+    cur.execute(
+        """
+        SELECT status,stages,tracking_number
+        FROM shop_orders WHERE id=%s FOR UPDATE
+        """,
+        (order_id,),
+    )
+    order = cur.fetchone()
+    if not order:
+        raise ValueError("Nie znaleziono zamówienia.")
+    stages = shop_stage_dict(order[1])
+    previous = bool(stages.get(stage_key))
+    new_value = bool(new_value)
+    if previous == new_value:
+        return previous, new_value
+    tracking_number = (tracking_number or order[2] or "").strip()
+    if stage_key == "tracking_entered" and new_value and not tracking_number:
+        raise ValueError("Najpierw wpisz numer przesyłki.")
+    if stage_key == "sales_document_generated" and new_value:
+        cur.execute(
+            "SELECT 1 FROM shop_sales_documents WHERE order_id=%s",
+            (order_id,),
+        )
+        if not cur.fetchone():
+            raise ValueError("Najpierw wygeneruj dokument sprzedaży.")
+    if stage_key == "shipped":
+        set_shop_inventory_issued(cur, order_id, new_value)
+    if stage_key == "cancelled" and new_value:
+        set_shop_inventory_issued(cur, order_id, False)
+        if stages.get("shipped"):
+            stages["shipped"] = False
+            cur.execute(
+                """
+                INSERT INTO shop_order_stage_history(
+                    order_id,stage_key,previous_value,new_value,
+                    previous_status,new_status,changed_by
+                ) VALUES (%s,'shipped',TRUE,FALSE,%s,'Anulowane',%s)
+                """,
+                (order_id, order[0], actor),
+            )
+    accounting_column = {
+        "paid": "paid",
+        "proforma_issued": "proforma_issued",
+        "invoice_issued": "invoice_issued",
+        "receipt_issued": "receipt_issued",
+    }.get(stage_key)
+    if accounting_column:
+        ensure_shop_accounting_row(cur, order_id)
+        cur.execute(
+            f"""
+            UPDATE shop_accounting
+            SET {accounting_column}=%s,updated_by=%s,updated_at=NOW()
+            WHERE order_id=%s
+            """,
+            (new_value, actor, order_id),
+        )
+        sync_accounting_payment_status(cur, order_id)
+    stages[stage_key] = new_value
+    status = shop_status_from_stages(stages)
+    cur.execute(
+        """
+        UPDATE shop_orders
+        SET stages=%s::jsonb,status=%s,
+            tracking_number=COALESCE(NULLIF(%s,''),tracking_number),
+            updated_at=NOW()
+        WHERE id=%s
+        """,
+        (
+            json.dumps(stages, ensure_ascii=False),
+            status,
+            tracking_number,
+            order_id,
+        ),
+    )
+    cur.execute(
+        """
+        INSERT INTO shop_order_stage_history(
+            order_id,stage_key,previous_value,new_value,
+            previous_status,new_status,changed_by
+        ) VALUES (%s,%s,%s,%s,%s,%s,%s)
+        """,
+        (order_id, stage_key, previous, new_value, order[0], status, actor),
+    )
+    label = SHOP_STAGE_BY_KEY[stage_key]["label"]
+    shop_history(
+        cur,
+        order_id,
+        "zmieniono etap",
+        f"{label}: {'tak' if previous else 'nie'} → {'tak' if new_value else 'nie'}",
+    )
+    return previous, new_value
 
 
 def create_shop_document_payload(order, items):
@@ -1620,7 +1994,15 @@ def generate_shop_sales_document(cur, order_id, created_by):
             created_by,
         ),
     )
-    return cur.fetchone(), payload
+    document = cur.fetchone()
+    update_shop_stage(
+        cur,
+        order_id,
+        "sales_document_generated",
+        True,
+        created_by or "system",
+    )
+    return document, payload
 
 
 # 🔒 LOGIN REQUIRED
@@ -1687,6 +2069,195 @@ def import_run_allowed(run):
             or str(run[2] or "").casefold() == str(session.get("user") or "").casefold()
         )
     )
+
+
+def issue_import_access_error():
+    if session.get("role") == "admin":
+        return None
+    if session.get("role") == "warehouse" and session.get("can_import_warehouse"):
+        return None
+    return "Brak uprawnień do importu wydań.", 403
+
+
+def issue_import_run_allowed(run):
+    return bool(
+        run
+        and (
+            session.get("role") == "admin"
+            or str(run[2] or "").casefold()
+            == str(session.get("user") or "").casefold()
+        )
+    )
+
+
+def issue_import_allow_general_stock(cur):
+    cur.execute(
+        "SELECT value FROM app_settings WHERE key='issue_import_allow_general_stock'"
+    )
+    row = cur.fetchone()
+    return bool(row and str(row[0]).strip().lower() == "true")
+
+
+def issue_import_run_query(cur, import_id, for_update=False):
+    cur.execute(
+        """
+        SELECT id,filename,imported_by,status,detected_sheets,summary,errors,
+               created_at,completed_at,undone_at,undone_by
+        FROM issue_imports WHERE id=%s
+        """
+        + (" FOR UPDATE" if for_update else ""),
+        (import_id,),
+    )
+    return cur.fetchone()
+
+
+def issue_import_rows_query(cur, import_id, for_update=False):
+    cur.execute(
+        """
+        SELECT id,sheet_name,row_number,source_data,normalized_data,
+               duplicate_data,resolution,included,validation_errors
+        FROM issue_import_rows
+        WHERE import_id=%s ORDER BY sheet_name,row_number,id
+        """
+        + (" FOR UPDATE" if for_update else ""),
+        (import_id,),
+    )
+    return cur.fetchall()
+
+
+def detect_issue_import_duplicate(cur, data):
+    number = str(data.get("doc_number") or "").strip()
+    if not number:
+        return None
+    cur.execute(
+        """
+        SELECT id,doc_number,date,kontrahent
+        FROM issue_docs
+        WHERE lower(doc_number)=lower(%s)
+          AND COALESCE(movement_type,'WZ') IN ('WZ','RW')
+          AND voided_at IS NULL
+        ORDER BY id LIMIT 1
+        """,
+        (number,),
+    )
+    row = cur.fetchone()
+    if not row:
+        return None
+    return {
+        "id": row[0],
+        "label": " · ".join(str(value or "") for value in row[1:]),
+    }
+
+
+def issue_import_row_context(
+    cur,
+    data,
+    allow_general_stock,
+    duplicate=None,
+    resolution="new",
+):
+    errors = validate_issue_row(data, UNITS, WAREHOUSES)
+    context = {"product": None, "package": None, "existing_item": None}
+    if errors:
+        return errors, context
+    product_name = str(data.get("product_name") or "").strip()
+    warehouse = str(data.get("warehouse") or "").strip()
+    cur.execute(
+        """
+        SELECT id,qty,unit,price_netto,vat
+        FROM products
+        WHERE lower(name)=lower(%s) AND warehouse=%s
+        ORDER BY id LIMIT 1 FOR UPDATE
+        """,
+        (product_name, warehouse),
+    )
+    product = cur.fetchone()
+    if not product:
+        errors.append(
+            f"Produkt {product_name} nie istnieje w magazynie {warehouse}."
+        )
+        return errors, context
+    context["product"] = product
+    unit = str(data.get("unit") or "").strip()
+    if unit != str(product[2] or "").strip():
+        errors.append(
+            f"Jednostka produktu to {product[2]}, a w pliku podano {unit}."
+        )
+    package = None
+    raw_package_id = str(data.get("package_id") or "").strip()
+    package_number = str(data.get("package_number") or "").strip()
+    if raw_package_id:
+        try:
+            package_id = int(raw_package_id)
+        except ValueError:
+            errors.append("Wybrana paczka jest nieprawidłowa.")
+        else:
+            cur.execute(
+                """
+                SELECT id,number,qty FROM packages
+                WHERE id=%s AND product_id=%s AND warehouse=%s AND status='active'
+                FOR UPDATE
+                """,
+                (package_id, product[0], warehouse),
+            )
+            package = cur.fetchone()
+    elif package_number:
+        cur.execute(
+            """
+            SELECT id,number,qty FROM packages
+            WHERE product_id=%s AND warehouse=%s AND lower(number)=lower(%s)
+              AND status='active'
+            ORDER BY id LIMIT 1 FOR UPDATE
+            """,
+            (product[0], warehouse, package_number),
+        )
+        package = cur.fetchone()
+    if (raw_package_id or package_number) and not package:
+        errors.append(
+            "Nie znaleziono wskazanej aktywnej paczki. Wybierz właściwą paczkę."
+        )
+    if not raw_package_id and not package_number and not allow_general_stock:
+        errors.append(
+            "Numer paczki jest wymagany. Administrator może zezwolić na "
+            "wydanie z ogólnego stanu."
+        )
+    if package:
+        context["package"] = package
+        data["package_id"] = package[0]
+        data["package_number"] = package[1]
+    old_qty = 0.0
+    if duplicate and resolution == "update":
+        package_clause = "package_id=%s" if package else "package_id IS NULL"
+        item_params = (
+            (duplicate["id"], product[0], package[0])
+            if package
+            else (duplicate["id"], product[0])
+        )
+        cur.execute(
+            f"""
+            SELECT id,qty,package_id,package_number,dimension,species,notes
+            FROM issue_items
+            WHERE doc_id=%s AND product_id=%s
+              AND {package_clause}
+            ORDER BY id LIMIT 1 FOR UPDATE
+            """,
+            item_params,
+        )
+        existing_item = cur.fetchone()
+        if existing_item:
+            context["existing_item"] = existing_item
+            old_qty = float(existing_item[1] or 0)
+    qty = float(data.get("qty") or 0)
+    if float(product[1] or 0) + old_qty + 1e-9 < qty:
+        errors.append(
+            f"Dostępny stan produktu to {float(product[1] or 0) + old_qty:g}."
+        )
+    if package and float(package[2] or 0) + old_qty + 1e-9 < qty:
+        errors.append(
+            f"W paczce {package[1]} dostępne jest "
+            f"{float(package[2] or 0) + old_qty:g}."
+        )
+    return errors, context
 
 
 def detect_import_duplicate(cur, entity_type, data):
@@ -3638,6 +4209,458 @@ def stage_general_import(cur, filename, sheets):
     return import_id
 
 
+def stage_issue_import(cur, filename, sheets):
+    metadata = []
+    prepared = []
+    allow_general_stock = issue_import_allow_general_stock(cur)
+    for sheet in sheets:
+        if sheet["entity_type"] == "ignored" or not sheet["rows"]:
+            continue
+        mapping = issue_mapping(sheet["columns"])
+        selected = issue_sheet_selected(sheet)
+        metadata.append(
+            {
+                "name": sheet["name"],
+                "columns": sheet["columns"],
+                "mapping": mapping,
+                "row_count": len(sheet["rows"]),
+                "selected": selected,
+            }
+        )
+        for row in sheet["rows"]:
+            data = (
+                normalize_issue_row(row["source_data"], mapping)
+                if selected
+                else {field: "" for field in ISSUE_IMPORT_FIELDS}
+            )
+            duplicate = detect_issue_import_duplicate(cur, data) if selected else None
+            resolution = "skip" if duplicate else "new"
+            errors, _context = (
+                issue_import_row_context(
+                    cur,
+                    data,
+                    allow_general_stock,
+                    duplicate,
+                    resolution,
+                )
+                if selected
+                else (["Wybierz arkusz i przypisz kolumny."], {})
+            )
+            prepared.append(
+                (
+                    sheet["name"],
+                    row["row_number"],
+                    row["source_data"],
+                    data,
+                    duplicate,
+                    resolution,
+                    selected,
+                    errors,
+                )
+            )
+    cur.execute(
+        """
+        INSERT INTO issue_imports(filename,imported_by,detected_sheets)
+        VALUES (%s,%s,%s::jsonb) RETURNING id
+        """,
+        (
+            filename,
+            session.get("user"),
+            json.dumps(metadata, ensure_ascii=False),
+        ),
+    )
+    import_id = cur.fetchone()[0]
+    for (
+        sheet_name,
+        row_number,
+        source_data,
+        data,
+        duplicate,
+        resolution,
+        included,
+        errors,
+    ) in prepared:
+        cur.execute(
+            """
+            INSERT INTO issue_import_rows(
+                import_id,sheet_name,row_number,source_data,normalized_data,
+                duplicate_data,resolution,included,validation_errors
+            ) VALUES (%s,%s,%s,%s::jsonb,%s::jsonb,%s::jsonb,%s,%s,%s::jsonb)
+            """,
+            (
+                import_id,
+                sheet_name,
+                row_number,
+                json.dumps(source_data, ensure_ascii=False),
+                json.dumps(data, ensure_ascii=False),
+                json.dumps(duplicate, ensure_ascii=False) if duplicate else None,
+                resolution,
+                included,
+                json.dumps(errors, ensure_ascii=False),
+            ),
+        )
+    return import_id
+
+
+def apply_issue_import_row(cur, import_id, row, data, context, document_cache):
+    row_id = row[0]
+    duplicate = row[5] or {}
+    resolution = row[6]
+    requested_number = str(data.get("doc_number") or "").strip()
+    cache_key = (requested_number.casefold(), resolution)
+    doc_created = False
+    doc_prior = None
+    if cache_key in document_cache:
+        doc_id, doc_created, doc_prior = document_cache[cache_key]
+        document_cache[cache_key] = (doc_id, doc_created, None)
+    elif duplicate and resolution == "update":
+        doc_id = duplicate["id"]
+        cur.execute(
+            """
+            SELECT date,kontrahent,warehouse,doc_number
+            FROM issue_docs WHERE id=%s FOR UPDATE
+            """,
+            (doc_id,),
+        )
+        previous_doc = cur.fetchone()
+        if not previous_doc:
+            raise ValueError("Nie znaleziono dokumentu wybranego do aktualizacji.")
+        doc_prior = {
+            "date": previous_doc[0],
+            "contractor": previous_doc[1],
+            "warehouse": previous_doc[2],
+            "doc_number": previous_doc[3],
+        }
+        cur.execute(
+            """
+            UPDATE issue_docs
+            SET date=%s,kontrahent=%s,warehouse=%s,movement_type='WZ'
+            WHERE id=%s
+            """,
+            (
+                data["date"],
+                str(data["contractor"]).strip(),
+                str(data["warehouse"]).strip(),
+                doc_id,
+            ),
+        )
+        document_cache[cache_key] = (doc_id, False, None)
+    else:
+        doc_number = requested_number
+        if duplicate and resolution == "new":
+            doc_number = unique_import_identifier(
+                cur,
+                "issue_docs",
+                "doc_number",
+                requested_number,
+                import_id,
+                row_id,
+            )
+        cur.execute(
+            """
+            INSERT INTO issue_docs(
+                date,kontrahent,warehouse,image,doc_number,movement_type
+            ) VALUES (%s,%s,%s,'',%s,'WZ') RETURNING id
+            """,
+            (
+                data["date"],
+                str(data["contractor"]).strip(),
+                str(data["warehouse"]).strip(),
+                doc_number,
+            ),
+        )
+        doc_id = cur.fetchone()[0]
+        doc_created = True
+        document_cache[cache_key] = (doc_id, True, None)
+    product = context["product"]
+    package = context["package"]
+    existing_item = context["existing_item"]
+    qty = float(data["qty"])
+    old_qty = float(existing_item[1] or 0) if existing_item else 0.0
+    delta = qty - old_qty
+    if delta > 0:
+        cur.execute(
+            "UPDATE products SET qty=qty-%s WHERE id=%s AND qty>=%s",
+            (delta, product[0], delta),
+        )
+        if cur.rowcount != 1:
+            raise ValueError(f"Brak stanu produktu {data['product_name']}.")
+        if package:
+            cur.execute(
+                """
+                UPDATE packages
+                SET qty=qty-%s,
+                    status=CASE WHEN qty-%s<=0 THEN 'issued' ELSE 'active' END,
+                    archived_at=CASE WHEN qty-%s<=0 THEN NOW() ELSE NULL END
+                WHERE id=%s AND qty>=%s
+                """,
+                (delta, delta, delta, package[0], delta),
+            )
+            if cur.rowcount != 1:
+                raise ValueError(f"Brak stanu w paczce {package[1]}.")
+    elif delta < 0:
+        cur.execute(
+            "UPDATE products SET qty=qty+%s WHERE id=%s",
+            (-delta, product[0]),
+        )
+        if package:
+            cur.execute(
+                """
+                UPDATE packages
+                SET qty=qty+%s,status='active',archived_at=NULL
+                WHERE id=%s
+                """,
+                (-delta, package[0]),
+            )
+    prior_data = {
+        "doc_created": doc_created,
+        "doc_prior": doc_prior,
+    }
+    if existing_item:
+        item_id = existing_item[0]
+        prior_data["item"] = {
+            "qty": old_qty,
+            "package_id": existing_item[2],
+            "package_number": existing_item[3],
+            "dimension": existing_item[4],
+            "species": existing_item[5],
+            "notes": existing_item[6],
+        }
+        cur.execute(
+            """
+            UPDATE issue_items
+            SET qty=%s,warehouse=%s,package_id=%s,package_number=%s,
+                dimension=%s,species=%s,notes=%s,price_netto=%s,price_brutto=%s
+            WHERE id=%s
+            """,
+            (
+                qty,
+                data["warehouse"],
+                package[0] if package else None,
+                package[1] if package else None,
+                str(data.get("dimension") or "").strip() or None,
+                str(data.get("species") or "").strip() or None,
+                str(data.get("notes") or "").strip() or None,
+                float(product[3] or 0),
+                float(product[3] or 0) * (1 + float(product[4] or 0) / 100),
+                item_id,
+            ),
+        )
+        action = "updated_item"
+        outcome = "updated"
+    else:
+        cur.execute(
+            """
+            INSERT INTO issue_items(
+                doc_id,product_id,qty,warehouse,package_id,package_number,
+                price_netto,price_brutto,dimension,species,notes
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            RETURNING id
+            """,
+            (
+                doc_id,
+                product[0],
+                qty,
+                data["warehouse"],
+                package[0] if package else None,
+                package[1] if package else None,
+                float(product[3] or 0),
+                float(product[3] or 0) * (1 + float(product[4] or 0) / 100),
+                str(data.get("dimension") or "").strip() or None,
+                str(data.get("species") or "").strip() or None,
+                str(data.get("notes") or "").strip() or None,
+            ),
+        )
+        item_id = cur.fetchone()[0]
+        action = "added_item"
+        outcome = "added"
+    cur.execute(
+        """
+        INSERT INTO issue_import_effects(
+            import_id,row_id,action,doc_id,item_id,product_id,package_id,qty,prior_data
+        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)
+        """,
+        (
+            import_id,
+            row_id,
+            action,
+            doc_id,
+            item_id,
+            product[0],
+            package[0] if package else None,
+            qty,
+            json.dumps(prior_data, ensure_ascii=False, default=str),
+        ),
+    )
+    issue_doc_history(
+        cur,
+        doc_id,
+        "import wydania z Excela",
+        f"Import #{import_id}, wiersz {row[2]}",
+    )
+    return outcome
+
+
+def undo_issue_import(cur, import_id, actor):
+    cur.execute(
+        """
+        SELECT id,row_id,action,doc_id,item_id,product_id,package_id,qty,prior_data
+        FROM issue_import_effects
+        WHERE import_id=%s ORDER BY id DESC FOR UPDATE
+        """,
+        (import_id,),
+    )
+    effects = cur.fetchall()
+    if not effects:
+        raise ValueError("Import nie zawiera operacji możliwych do cofnięcia.")
+    created_docs = set()
+    restored_docs = set()
+    locked_docs = set()
+    for effect in effects:
+        action = effect[2]
+        doc_id = effect[3]
+        item_id = effect[4]
+        product_id = effect[5]
+        package_id = effect[6]
+        prior = effect[8] or {}
+        if doc_id not in locked_docs:
+            cur.execute(
+                "SELECT voided_at FROM issue_docs WHERE id=%s FOR UPDATE",
+                (doc_id,),
+            )
+            document = cur.fetchone()
+            if not document:
+                raise ValueError(
+                    "Nie można cofnąć importu: dokument został usunięty."
+                )
+            if document[0]:
+                raise ValueError(
+                    "Nie można cofnąć importu: jeden z dokumentów został już anulowany."
+                )
+            locked_docs.add(doc_id)
+        cur.execute(
+            "SELECT qty FROM issue_items WHERE id=%s FOR UPDATE",
+            (item_id,),
+        )
+        current_item = cur.fetchone()
+        if not current_item:
+            raise ValueError(
+                "Nie można cofnąć importu: jedna z pozycji została usunięta."
+            )
+        current_qty = float(current_item[0] or 0)
+        if action == "added_item":
+            cur.execute(
+                "UPDATE products SET qty=qty+%s WHERE id=%s",
+                (current_qty, product_id),
+            )
+            if package_id:
+                cur.execute(
+                    """
+                    UPDATE packages
+                    SET qty=qty+%s,status='active',archived_at=NULL
+                    WHERE id=%s
+                    """,
+                    (current_qty, package_id),
+                )
+            if prior.get("doc_created"):
+                created_docs.add(doc_id)
+            else:
+                cur.execute("DELETE FROM issue_items WHERE id=%s", (item_id,))
+        elif action == "updated_item":
+            old_item = prior.get("item") or {}
+            old_qty = float(old_item.get("qty") or 0)
+            restore_delta = current_qty - old_qty
+            if restore_delta >= 0:
+                cur.execute(
+                    "UPDATE products SET qty=qty+%s WHERE id=%s",
+                    (restore_delta, product_id),
+                )
+                if package_id:
+                    cur.execute(
+                        """
+                        UPDATE packages
+                        SET qty=qty+%s,status='active',archived_at=NULL
+                        WHERE id=%s
+                        """,
+                        (restore_delta, package_id),
+                    )
+            else:
+                needed = -restore_delta
+                cur.execute(
+                    "UPDATE products SET qty=qty-%s WHERE id=%s AND qty>=%s",
+                    (needed, product_id, needed),
+                )
+                if cur.rowcount != 1:
+                    raise ValueError(
+                        "Nie można odtworzyć poprzedniego stanu produktu."
+                    )
+                if package_id:
+                    cur.execute(
+                        "UPDATE packages SET qty=qty-%s WHERE id=%s AND qty>=%s",
+                        (needed, package_id, needed),
+                    )
+                    if cur.rowcount != 1:
+                        raise ValueError(
+                            "Nie można odtworzyć poprzedniego stanu paczki."
+                        )
+            cur.execute(
+                """
+                UPDATE issue_items
+                SET qty=%s,package_id=%s,package_number=%s,dimension=%s,
+                    species=%s,notes=%s
+                WHERE id=%s
+                """,
+                (
+                    old_qty,
+                    old_item.get("package_id"),
+                    old_item.get("package_number"),
+                    old_item.get("dimension"),
+                    old_item.get("species"),
+                    old_item.get("notes"),
+                    item_id,
+                ),
+            )
+        doc_prior = prior.get("doc_prior")
+        if doc_prior and doc_id not in restored_docs:
+            cur.execute(
+                """
+                UPDATE issue_docs
+                SET date=%s,kontrahent=%s,warehouse=%s,doc_number=%s
+                WHERE id=%s
+                """,
+                (
+                    doc_prior.get("date"),
+                    doc_prior.get("contractor"),
+                    doc_prior.get("warehouse"),
+                    doc_prior.get("doc_number"),
+                    doc_id,
+                ),
+            )
+            restored_docs.add(doc_id)
+    for doc_id in created_docs:
+        cur.execute(
+            """
+            UPDATE issue_docs SET voided_at=NOW(),voided_by=%s
+            WHERE id=%s AND voided_at IS NULL
+            """,
+            (actor, doc_id),
+        )
+        issue_doc_history(
+            cur,
+            doc_id,
+            "cofnięto import wydania",
+            f"Import #{import_id}",
+        )
+    cur.execute(
+        """
+        UPDATE issue_imports
+        SET status='undone',undone_at=NOW(),undone_by=%s
+        WHERE id=%s
+        """,
+        (actor, import_id),
+    )
+
+
 def import_run_query(cur, import_id, for_update=False):
     cur.execute(
         """
@@ -3922,13 +4945,17 @@ def apply_import_document(cur, row, data, import_id, document_cache):
     cur.execute(
         """
         INSERT INTO issue_items(
-            doc_id,product_id,qty,warehouse,package_id,package_number,price_netto,price_brutto
-        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+            doc_id,product_id,qty,warehouse,package_id,package_number,
+            price_netto,price_brutto,dimension,species,notes
+        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         """,
         (
             doc_id, product_id, qty, data.get("warehouse"), package_id, package_number,
             float(data.get("price_netto") or 0),
             float(data.get("price_netto") or 0) * (1 + float(data.get("vat") or 0) / 100),
+            str(data.get("dimension") or "").strip() or None,
+            str(data.get("species") or "").strip() or None,
+            str(data.get("notes") or "").strip() or None,
         ),
     )
     return "added"
@@ -4616,6 +5643,637 @@ def general_import_confirm(import_id):
 
 
 # 📤 WYDANIE
+@app.route('/import-wydan')
+@login_required
+def issue_import_page():
+    denied = issue_import_access_error()
+    if denied:
+        return denied
+    conn = db()
+    cur = conn.cursor()
+    if session.get("role") == "admin":
+        cur.execute(
+            """
+            SELECT id,filename,imported_by,status,summary,errors,created_at,
+                   completed_at,undone_at,undone_by
+            FROM issue_imports ORDER BY id DESC LIMIT 100
+            """
+        )
+    else:
+        cur.execute(
+            """
+            SELECT id,filename,imported_by,status,summary,errors,created_at,
+                   completed_at,undone_at,undone_by
+            FROM issue_imports
+            WHERE lower(imported_by)=lower(%s)
+            ORDER BY id DESC LIMIT 100
+            """,
+            (session.get("user"),),
+        )
+    history = cur.fetchall()
+    allow_general_stock = issue_import_allow_general_stock(cur)
+    cur.execute(
+        """
+        SELECT id FROM issue_imports
+        WHERE status='completed' AND undone_at IS NULL
+        ORDER BY completed_at DESC,id DESC LIMIT 1
+        """
+    )
+    latest_undo = cur.fetchone()
+    conn.close()
+    return render_template(
+        "issue_import.html",
+        history=history,
+        allow_general_stock=allow_general_stock,
+        latest_undo_id=latest_undo[0] if latest_undo else None,
+    )
+
+
+@app.route('/import-wydan/settings', methods=['POST'])
+@login_required
+@admin_required
+def issue_import_settings():
+    allowed = request.form.get("allow_general_stock") == "on"
+    conn = db()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            INSERT INTO app_settings(key,value,updated_by,updated_at)
+            VALUES ('issue_import_allow_general_stock',%s,%s,NOW())
+            ON CONFLICT (key) DO UPDATE SET
+                value=EXCLUDED.value,updated_by=EXCLUDED.updated_by,
+                updated_at=NOW()
+            """,
+            ("true" if allowed else "false", session.get("user")),
+        )
+        conn.commit()
+        return redirect("/import-wydan?settings=saved")
+    except Exception:
+        conn.rollback()
+        logger.exception("Issue import settings update failed.")
+        return "Nie udało się zapisać ustawień importu.", 500
+    finally:
+        conn.close()
+
+
+@app.route('/import-wydan/upload', methods=['POST'])
+@login_required
+@limiter.limit("10 per hour")
+def issue_import_upload():
+    denied = issue_import_access_error()
+    if denied:
+        return denied
+    upload = request.files.get("excel_file")
+    if not upload or not upload.filename:
+        return "Wybierz plik Excel.", 400
+    if not upload.filename.lower().endswith(".xlsx"):
+        return "Dozwolony jest wyłącznie plik .xlsx.", 400
+    filename = secure_filename(upload.filename)[:200] or "wydania.xlsx"
+    try:
+        sheets = parse_workbook(upload.read())
+    except ValueError as exc:
+        return f"Nie udało się odczytać pliku: {exc}", 400
+    except Exception:
+        logger.warning("Issue import workbook parsing failed.", exc_info=True)
+        return "Nie udało się odczytać pliku Excel.", 400
+    if not any(
+        sheet["entity_type"] != "ignored" and sheet["rows"]
+        for sheet in sheets
+    ):
+        return "Plik nie zawiera danych do przygotowania.", 400
+    conn = db()
+    cur = conn.cursor()
+    try:
+        import_id = stage_issue_import(cur, filename, sheets)
+        conn.commit()
+        return redirect(f"/import-wydan/{import_id}")
+    except Exception:
+        conn.rollback()
+        logger.exception("Issue import staging failed.")
+        return "Nie udało się przygotować podglądu importu.", 500
+    finally:
+        conn.close()
+
+
+@app.route('/import-wydan/<int:import_id>')
+@login_required
+def issue_import_preview(import_id):
+    denied = issue_import_access_error()
+    if denied:
+        return denied
+    conn = db()
+    cur = conn.cursor()
+    run = issue_import_run_query(cur, import_id)
+    if not issue_import_run_allowed(run):
+        conn.close()
+        return "Nie znaleziono importu.", 404
+    rows = issue_import_rows_query(cur, import_id)
+    cur.execute(
+        """
+        SELECT pk.id,pk.number,pk.qty,pk.warehouse,p.name,p.unit
+        FROM packages pk
+        JOIN products p ON p.id=pk.product_id
+        WHERE pk.status='active' AND pk.qty>0
+        ORDER BY pk.warehouse,lower(p.name),lower(pk.number)
+        """
+    )
+    packages = cur.fetchall()
+    allow_general_stock = issue_import_allow_general_stock(cur)
+    conn.close()
+    return render_template(
+        "issue_import_preview.html",
+        run=run,
+        rows=rows,
+        fields=ISSUE_IMPORT_FIELDS,
+        field_labels=ISSUE_IMPORT_LABELS,
+        units=sorted(UNITS),
+        warehouses=WAREHOUSES,
+        packages=packages,
+        allow_general_stock=allow_general_stock,
+    )
+
+
+@app.route('/import-wydan/<int:import_id>/mapping', methods=['POST'])
+@login_required
+def issue_import_mapping(import_id):
+    denied = issue_import_access_error()
+    if denied:
+        return denied
+    conn = db()
+    cur = conn.cursor()
+    try:
+        run = issue_import_run_query(cur, import_id, for_update=True)
+        if not issue_import_run_allowed(run):
+            return "Nie znaleziono importu.", 404
+        if run[3] != "draft":
+            raise ValueError("Zakończonego importu nie można zmieniać.")
+        metadata = list(run[4] or [])
+        allow_general_stock = issue_import_allow_general_stock(cur)
+        for index, sheet in enumerate(metadata):
+            selected = request.form.get(f"selected_{index}") == "on"
+            mapping = {
+                field: request.form.get(f"map_{index}_{field}", "").strip()
+                for field in ISSUE_IMPORT_FIELDS
+                if request.form.get(f"map_{index}_{field}", "").strip()
+            }
+            sheet["selected"] = selected
+            sheet["mapping"] = mapping
+            cur.execute(
+                """
+                SELECT id,source_data,resolution
+                FROM issue_import_rows
+                WHERE import_id=%s AND sheet_name=%s
+                ORDER BY id FOR UPDATE
+                """,
+                (import_id, sheet["name"]),
+            )
+            for row_id, source_data, current_resolution in cur.fetchall():
+                data = (
+                    normalize_issue_row(source_data or {}, mapping)
+                    if selected
+                    else {field: "" for field in ISSUE_IMPORT_FIELDS}
+                )
+                duplicate = (
+                    detect_issue_import_duplicate(cur, data) if selected else None
+                )
+                resolution = (
+                    current_resolution
+                    if duplicate and current_resolution in {"skip", "update", "new"}
+                    else ("skip" if duplicate else "new")
+                )
+                errors, _context = (
+                    issue_import_row_context(
+                        cur,
+                        data,
+                        allow_general_stock,
+                        duplicate,
+                        resolution,
+                    )
+                    if selected
+                    else (["Arkusz nie jest wybrany do importu."], {})
+                )
+                cur.execute(
+                    """
+                    UPDATE issue_import_rows
+                    SET normalized_data=%s::jsonb,duplicate_data=%s::jsonb,
+                        resolution=%s,included=%s,validation_errors=%s::jsonb
+                    WHERE id=%s
+                    """,
+                    (
+                        json.dumps(data, ensure_ascii=False),
+                        json.dumps(duplicate, ensure_ascii=False)
+                        if duplicate
+                        else None,
+                        resolution,
+                        selected,
+                        json.dumps(errors, ensure_ascii=False),
+                        row_id,
+                    ),
+                )
+        cur.execute(
+            "UPDATE issue_imports SET detected_sheets=%s::jsonb WHERE id=%s",
+            (json.dumps(metadata, ensure_ascii=False), import_id),
+        )
+        conn.commit()
+        return redirect(f"/import-wydan/{import_id}?mapping=saved")
+    except ValueError as exc:
+        conn.rollback()
+        return str(exc), 400
+    except Exception:
+        conn.rollback()
+        logger.exception("Issue import mapping update failed.")
+        return "Nie udało się zapisać przypisania kolumn.", 500
+    finally:
+        conn.close()
+
+
+@app.route('/import-wydan/<int:import_id>/prepare', methods=['POST'])
+@login_required
+def issue_import_prepare(import_id):
+    denied = issue_import_access_error()
+    if denied:
+        return denied
+    conn = db()
+    cur = conn.cursor()
+    try:
+        run = issue_import_run_query(cur, import_id, for_update=True)
+        if not issue_import_run_allowed(run):
+            return "Nie znaleziono importu.", 404
+        if run[3] != "draft":
+            raise ValueError("Zakończonego importu nie można zmieniać.")
+        rows = issue_import_rows_query(cur, import_id, for_update=True)
+        allow_general_stock = issue_import_allow_general_stock(cur)
+        for row in rows:
+            included = request.form.get(f"included_{row[0]}") == "on"
+            resolution = request.form.get(
+                f"resolution_{row[0]}", row[6]
+            )
+            if resolution not in {"skip", "update", "new"}:
+                resolution = "skip"
+            data = {
+                field: request.form.get(f"row_{row[0]}_{field}", "").strip()
+                for field in ISSUE_IMPORT_FIELDS
+            }
+            data["package_id"] = request.form.get(
+                f"row_{row[0]}_package_id", ""
+            ).strip()
+            duplicate = detect_issue_import_duplicate(cur, data)
+            errors, _context = (
+                issue_import_row_context(
+                    cur,
+                    data,
+                    allow_general_stock,
+                    duplicate,
+                    resolution,
+                )
+                if included and resolution != "skip"
+                else ([], {})
+            )
+            cur.execute(
+                """
+                UPDATE issue_import_rows
+                SET normalized_data=%s::jsonb,duplicate_data=%s::jsonb,
+                    resolution=%s,included=%s,validation_errors=%s::jsonb
+                WHERE id=%s
+                """,
+                (
+                    json.dumps(data, ensure_ascii=False),
+                    json.dumps(duplicate, ensure_ascii=False)
+                    if duplicate
+                    else None,
+                    resolution,
+                    included,
+                    json.dumps(errors, ensure_ascii=False),
+                    row[0],
+                ),
+            )
+        conn.commit()
+        return redirect(f"/import-wydan/{import_id}?prepared=1")
+    except ValueError as exc:
+        conn.rollback()
+        return str(exc), 400
+    except Exception:
+        conn.rollback()
+        logger.exception("Issue import preparation failed.")
+        return "Nie udało się zapisać korekt.", 500
+    finally:
+        conn.close()
+
+
+@app.route('/import-wydan/<int:import_id>/rows', methods=['POST'])
+@login_required
+def issue_import_add_row(import_id):
+    denied = issue_import_access_error()
+    if denied:
+        return denied
+    conn = db()
+    cur = conn.cursor()
+    try:
+        run = issue_import_run_query(cur, import_id, for_update=True)
+        if not issue_import_run_allowed(run):
+            return "Nie znaleziono importu.", 404
+        if run[3] != "draft":
+            raise ValueError("Zakończonego importu nie można zmieniać.")
+        data = {
+            field: request.form.get(field, "").strip()
+            for field in ISSUE_IMPORT_FIELDS
+        }
+        data["package_id"] = request.form.get("package_id", "").strip()
+        duplicate = detect_issue_import_duplicate(cur, data)
+        resolution = "skip" if duplicate else "new"
+        errors, _context = issue_import_row_context(
+            cur,
+            data,
+            issue_import_allow_general_stock(cur),
+            duplicate,
+            resolution,
+        )
+        cur.execute(
+            """
+            SELECT COALESCE(MAX(row_number),1)+1
+            FROM issue_import_rows WHERE import_id=%s
+            """,
+            (import_id,),
+        )
+        row_number = cur.fetchone()[0]
+        cur.execute(
+            """
+            INSERT INTO issue_import_rows(
+                import_id,sheet_name,row_number,source_data,normalized_data,
+                duplicate_data,resolution,included,validation_errors
+            ) VALUES (%s,'Dodane ręcznie',%s,%s::jsonb,%s::jsonb,%s::jsonb,%s,TRUE,%s::jsonb)
+            """,
+            (
+                import_id,
+                row_number,
+                json.dumps(data, ensure_ascii=False),
+                json.dumps(data, ensure_ascii=False),
+                json.dumps(duplicate, ensure_ascii=False)
+                if duplicate
+                else None,
+                resolution,
+                json.dumps(errors, ensure_ascii=False),
+            ),
+        )
+        conn.commit()
+        return redirect(f"/import-wydan/{import_id}?row=added")
+    except ValueError as exc:
+        conn.rollback()
+        return str(exc), 400
+    except Exception:
+        conn.rollback()
+        logger.exception("Issue import row creation failed.")
+        return "Nie udało się dodać wiersza.", 500
+    finally:
+        conn.close()
+
+
+@app.route(
+    '/import-wydan/<int:import_id>/rows/<int:row_id>/delete',
+    methods=['POST'],
+)
+@login_required
+def issue_import_delete_row(import_id, row_id):
+    denied = issue_import_access_error()
+    if denied:
+        return denied
+    conn = db()
+    cur = conn.cursor()
+    try:
+        run = issue_import_run_query(cur, import_id, for_update=True)
+        if not issue_import_run_allowed(run):
+            return "Nie znaleziono importu.", 404
+        if run[3] != "draft":
+            raise ValueError("Zakończonego importu nie można zmieniać.")
+        cur.execute(
+            "DELETE FROM issue_import_rows WHERE id=%s AND import_id=%s",
+            (row_id, import_id),
+        )
+        if cur.rowcount != 1:
+            raise ValueError("Nie znaleziono wiersza.")
+        conn.commit()
+        return redirect(f"/import-wydan/{import_id}?row=deleted")
+    except ValueError as exc:
+        conn.rollback()
+        return str(exc), 400
+    except Exception:
+        conn.rollback()
+        logger.exception("Issue import row deletion failed.")
+        return "Nie udało się usunąć wiersza.", 500
+    finally:
+        conn.close()
+
+
+@app.route('/import-wydan/<int:import_id>/confirm', methods=['POST'])
+@login_required
+def issue_import_confirm(import_id):
+    denied = issue_import_access_error()
+    if denied:
+        return denied
+    conn = db()
+    cur = conn.cursor()
+    try:
+        run = issue_import_run_query(cur, import_id, for_update=True)
+        if not issue_import_run_allowed(run):
+            return "Nie znaleziono importu.", 404
+        if run[3] != "draft":
+            raise ValueError("Ten import został już zakończony.")
+        rows = issue_import_rows_query(cur, import_id, for_update=True)
+        allow_general_stock = issue_import_allow_general_stock(cur)
+        prepared = []
+        validation_failed = False
+        for row in rows:
+            if not row[7] or row[6] == "skip":
+                continue
+            data = dict(row[4] or {})
+            duplicate = detect_issue_import_duplicate(cur, data)
+            errors, context = issue_import_row_context(
+                cur,
+                data,
+                allow_general_stock,
+                duplicate,
+                row[6],
+            )
+            cur.execute(
+                """
+                UPDATE issue_import_rows
+                SET duplicate_data=%s::jsonb,validation_errors=%s::jsonb
+                WHERE id=%s
+                """,
+                (
+                    json.dumps(duplicate, ensure_ascii=False)
+                    if duplicate
+                    else None,
+                    json.dumps(errors, ensure_ascii=False),
+                    row[0],
+                ),
+            )
+            if errors:
+                validation_failed = True
+            effective_row = list(row)
+            effective_row[5] = duplicate
+            prepared.append((tuple(effective_row), data, context))
+        if validation_failed:
+            conn.commit()
+            return redirect(f"/import-wydan/{import_id}?validation=failed")
+        counts = {"issues": 0, "updated": 0, "skipped": 0, "errors": 0}
+        counts["skipped"] = sum(
+            1 for row in rows if not row[7] or row[6] == "skip"
+        )
+        document_cache = {}
+        for row, data, context in prepared:
+            outcome = apply_issue_import_row(
+                cur,
+                import_id,
+                row,
+                data,
+                context,
+                document_cache,
+            )
+            counts["issues"] += 1
+            if outcome == "updated":
+                counts["updated"] += 1
+        cur.execute(
+            """
+            UPDATE issue_imports
+            SET status='completed',summary=%s::jsonb,errors='[]'::jsonb,
+                completed_at=NOW()
+            WHERE id=%s
+            """,
+            (json.dumps(counts, ensure_ascii=False), import_id),
+        )
+        log_action(
+            "issue_import.completed",
+            "issue_import",
+            import_id,
+            counts,
+            conn,
+        )
+        conn.commit()
+        cache.clear()
+        return redirect(f"/import-wydan/{import_id}?completed=1")
+    except ValueError as exc:
+        conn.rollback()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE issue_imports SET errors=%s::jsonb WHERE id=%s",
+                (json.dumps([str(exc)], ensure_ascii=False), import_id),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            logger.exception("Issue import validation history update failed.")
+        return redirect(f"/import-wydan/{import_id}?commit_error=1")
+    except Exception:
+        conn.rollback()
+        logger.exception("Issue import commit failed.")
+        user_message = (
+            "Nie udało się zapisać importu. Żadne stany magazynowe nie zostały "
+            "zmienione."
+        )
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE issue_imports SET errors=%s::jsonb WHERE id=%s",
+                (json.dumps([user_message], ensure_ascii=False), import_id),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+        return redirect(f"/import-wydan/{import_id}?commit_error=1")
+    finally:
+        conn.close()
+
+
+@app.route('/import-wydan/undo-last', methods=['POST'])
+@login_required
+@admin_required
+def issue_import_undo_last():
+    conn = db()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT id FROM issue_imports
+            WHERE status='completed' AND undone_at IS NULL
+            ORDER BY completed_at DESC,id DESC
+            LIMIT 1 FOR UPDATE
+            """
+        )
+        row = cur.fetchone()
+        if not row:
+            raise ValueError("Brak zakończonego importu do cofnięcia.")
+        undo_issue_import(cur, row[0], session.get("user", "system"))
+        log_action(
+            "issue_import.undone",
+            "issue_import",
+            row[0],
+            {"status": "undone"},
+            conn,
+        )
+        conn.commit()
+        cache.clear()
+        return redirect(f"/import-wydan?undone={row[0]}")
+    except ValueError as exc:
+        conn.rollback()
+        return str(exc), 409
+    except Exception:
+        conn.rollback()
+        logger.exception("Issue import undo failed.")
+        return "Nie udało się cofnąć importu. Żadne stany nie zostały zmienione.", 500
+    finally:
+        conn.close()
+
+
+@app.route('/import-wydan/history.<fmt>')
+@login_required
+def issue_import_history_export(fmt):
+    denied = issue_import_access_error()
+    if denied:
+        return denied
+    if fmt not in {"xlsx", "pdf"}:
+        return "Nieprawidłowy format eksportu.", 400
+    conn = db()
+    cur = conn.cursor()
+    if session.get("role") == "admin":
+        cur.execute(
+            """
+            SELECT id,filename,imported_by,status,summary,errors,created_at
+            FROM issue_imports ORDER BY id DESC
+            """
+        )
+    else:
+        cur.execute(
+            """
+            SELECT id,filename,imported_by,status,summary,errors,created_at
+            FROM issue_imports WHERE lower(imported_by)=lower(%s)
+            ORDER BY id DESC
+            """,
+            (session.get("user"),),
+        )
+    rows = cur.fetchall()
+    conn.close()
+    if fmt == "xlsx":
+        data = issue_history_xlsx(rows)
+        mimetype = (
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+    else:
+        data = issue_history_pdf(rows)
+        mimetype = "application/pdf"
+    return Response(
+        data,
+        mimetype=mimetype,
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="historia-importow-wydan.{fmt}"'
+            )
+        },
+    )
+
+
 @app.route('/wydanie')
 @login_required
 def wydanie():
@@ -4963,7 +6621,8 @@ def doc_detail(id):
 
     cur.execute("""
         SELECT p.name, i.qty, COALESCE(i.warehouse, p.warehouse),
-               COALESCE(i.package_number, pk.number)
+               COALESCE(i.package_number, pk.number),
+               i.dimension,i.species,i.notes
         FROM issue_items i
         JOIN products p ON p.id = i.product_id
         LEFT JOIN packages pk ON pk.id = i.package_id
@@ -5562,6 +7221,19 @@ def update_order_accounting(order_id):
             ),
         )
         sync_accounting_payment_status(cur, order_id)
+        for accounting_field, stage_key in {
+            "paid": "paid",
+            "proforma_issued": "proforma_issued",
+            "invoice_issued": "invoice_issued",
+            "receipt_issued": "receipt_issued",
+        }.items():
+            update_shop_stage(
+                cur,
+                order_id,
+                stage_key,
+                bool_values[accounting_field],
+                session.get("user", "system"),
+            )
         if request.form.get("invoice_number"):
             cur.execute("UPDATE shop_orders SET sales_document_number=%s WHERE id=%s", (request.form.get("invoice_number").strip(), order_id))
         labels = []
@@ -5590,29 +7262,55 @@ def shop_orders():
     return render_shop_dashboard()
 
 
-def shop_dashboard_data(cur, q="", status=""):
-    q = (q or "").strip()
-    status = (status or "").strip()
+def shop_dashboard_data(cur, filters=None):
+    filters = filters or {}
+    q = (filters.get("q") or "").strip()
     params = []
     where = []
     if q:
         like = f"%{q.lower()}%"
         where.append("(lower(o.order_number) LIKE %s OR lower(o.customer_name) LIKE %s OR lower(COALESCE(o.tracking_number,'')) LIKE %s OR lower(COALESCE(o.sales_document_number,'')) LIKE %s OR EXISTS (SELECT 1 FROM shop_order_items i WHERE i.order_id=o.id AND lower(i.product_name) LIKE %s))")
         params += [like]*5
-    if status:
-        where.append("o.status=%s"); params.append(status)
+    if filters.get("status"):
+        where.append("o.status=%s")
+        params.append(filters["status"])
+    if filters.get("client"):
+        where.append("lower(o.customer_name) LIKE %s")
+        params.append(f"%{filters['client'].lower()}%")
+    if filters.get("salesperson"):
+        where.append("lower(COALESCE(a.salesperson,'')) LIKE %s")
+        params.append(f"%{filters['salesperson'].lower()}%")
+    if filters.get("date"):
+        where.append("o.order_date=%s")
+        params.append(filters["date"])
+    boolean_filters = {
+        "invoice": "COALESCE(a.invoice_issued,FALSE)",
+        "receipt": "COALESCE(a.receipt_issued,FALSE)",
+        "paid": "COALESCE(a.paid,FALSE)",
+        "shipped": "COALESCE((o.stages->>'shipped')::boolean,FALSE)",
+        "packed": "COALESCE((o.stages->>'packed')::boolean,FALSE)",
+    }
+    for key, expression in boolean_filters.items():
+        value = filters.get(key)
+        if value in {"yes", "no"}:
+            where.append(f"{expression}=%s")
+            params.append(value == "yes")
     sql_where = (" WHERE " + " AND ".join(where)) if where else ""
     cur.execute(
         f"""
         SELECT o.id,o.order_number,o.order_date,o.customer_name,o.status,
                o.payment_status,o.sales_document_number,o.tracking_number,
                COALESCE(SUM(i.qty*i.price_brutto),0)+o.shipping_cost AS total,
-               sd.id,sd.document_number
+               sd.id,sd.document_number,o.stages,
+               COALESCE(a.invoice_issued,FALSE),
+               COALESCE(a.receipt_issued,FALSE),
+               COALESCE(a.paid,FALSE),a.salesperson
         FROM shop_orders o
         LEFT JOIN shop_order_items i ON i.order_id=o.id
         LEFT JOIN shop_sales_documents sd ON sd.order_id=o.id
+        LEFT JOIN shop_accounting a ON a.order_id=o.id
         {sql_where}
-        GROUP BY o.id,sd.id
+        GROUP BY o.id,sd.id,a.order_id
         ORDER BY o.order_date DESC,o.id DESC
         """,
         tuple(params),
@@ -5621,19 +7319,29 @@ def shop_dashboard_data(cur, q="", status=""):
     cur.execute("SELECT type,message,created_at FROM shop_notifications WHERE resolved=FALSE ORDER BY created_at DESC LIMIT 8")
     notifications = cur.fetchall()
     cur.execute(
-        """
-        SELECT COUNT(*),COALESCE(SUM(order_total),0),
-               COUNT(*) FILTER (WHERE status NOT IN ('Zakończone','Anulowane')),
-               COUNT(*) FILTER (WHERE status='Zakończone'),
-               COUNT(*) FILTER (WHERE status='Anulowane')
-        FROM (
-            SELECT o.id,o.status,
-                   COALESCE(SUM(i.qty*i.price_brutto),0)+o.shipping_cost AS order_total
-            FROM shop_orders o
-            LEFT JOIN shop_order_items i ON i.order_id=o.id
-            GROUP BY o.id
-        ) totals
-        """
+        f"""
+        SELECT
+            COUNT(*) FILTER (
+                WHERE NOT COALESCE(a.paid,FALSE)
+                  AND o.status NOT IN ('Zakończone','Anulowane')
+            ),
+            COUNT(*) FILTER (WHERE COALESCE(a.invoice_issued,FALSE)),
+            COUNT(*) FILTER (WHERE COALESCE(a.receipt_issued,FALSE)),
+            COUNT(*) FILTER (
+                WHERE COALESCE((o.stages->>'packed')::boolean,FALSE)
+            ),
+            COUNT(*) FILTER (
+                WHERE COALESCE((o.stages->>'shipped')::boolean,FALSE)
+            ),
+            COUNT(*) FILTER (
+                WHERE COALESCE((o.stages->>'completed')::boolean,FALSE)
+                   OR o.status='Zakończone'
+            )
+        FROM shop_orders o
+        LEFT JOIN shop_accounting a ON a.order_id=o.id
+        {sql_where}
+        """,
+        tuple(params),
     )
     reports = cur.fetchone()
     cur.execute("SELECT id,name,qty,unit,warehouse,price_netto,vat FROM products ORDER BY warehouse,lower(name),id")
@@ -5642,14 +7350,25 @@ def shop_dashboard_data(cur, q="", status=""):
 
 
 def render_shop_dashboard(form_error=None, status_code=200, form_data=None):
-    q = (request.args.get("q") or "").strip()
-    selected_status = (request.args.get("status") or "").strip()
+    filters = {
+        key: (request.args.get(key) or "").strip()
+        for key in (
+            "q",
+            "status",
+            "client",
+            "salesperson",
+            "date",
+            "invoice",
+            "receipt",
+            "paid",
+            "shipped",
+            "packed",
+        )
+    }
     conn = db()
     cur = conn.cursor()
     try:
-        orders, notifications, reports, products = shop_dashboard_data(
-            cur, q, selected_status
-        )
+        orders, notifications, reports, products = shop_dashboard_data(cur, filters)
     finally:
         conn.close()
     return (
@@ -5662,6 +7381,7 @@ def render_shop_dashboard(form_error=None, status_code=200, form_data=None):
             statuses=SHOP_STATUS_FLOW,
             role_labels=SHOP_ROLE_LABELS,
             payment_methods=ACCOUNTING_PAYMENT_METHODS,
+            filters=filters,
             form_error=form_error,
             form_data=form_data,
         ),
@@ -5796,10 +7516,24 @@ def shop_create_order():
             )
             if reserved:
                 shop_history(cur, order_id, "zarezerwowano towar", f"{p[1]} x {qty}")
+        update_shop_stage(
+            cur,
+            order_id,
+            "order_accepted",
+            True,
+            session.get("user", "system"),
+        )
         if lacking:
             cur.execute("INSERT INTO shop_notifications(order_id,type,message) VALUES (%s,'brak towaru',%s)", (order_id, "Brak towaru: "+", ".join(lacking)))
         else:
             cur.execute("UPDATE shop_orders SET status='Towar zarezerwowany' WHERE id=%s", (order_id,))
+            update_shop_stage(
+                cur,
+                order_id,
+                "stock_reserved",
+                True,
+                session.get("user", "system"),
+            )
             cur.execute("INSERT INTO shop_notifications(order_id,type,message) VALUES (%s,'oczekuje na dokument','Zamówienie oczekuje na dokument sprzedaży')", (order_id,))
         ensure_shop_accounting_row(cur, order_id)
         conn.commit()
@@ -5849,7 +7583,8 @@ def shop_order_detail(order_id):
         """
         SELECT id,order_number,order_date,customer_name,delivery_address,phone,email,
                shipping_cost,payment_method,payment_status,status,sales_document_number,
-               tracking_number,notes,nip,document_confirmed,created_by,created_at,updated_at
+               tracking_number,notes,nip,document_confirmed,created_by,created_at,updated_at,
+               stages
         FROM shop_orders WHERE id=%s
         """,
         (order_id,),
@@ -5871,63 +7606,231 @@ def shop_order_detail(order_id):
     ensure_shop_accounting_row(cur, order_id)
     conn.commit()
     cur.execute("SELECT * FROM shop_accounting WHERE order_id=%s", (order_id,)); accounting=cur.fetchone()
-    cur.execute("SELECT user_email,action,details,created_at FROM shop_order_history WHERE order_id=%s ORDER BY created_at DESC", (order_id,)); history=cur.fetchall(); conn.close()
-    return render_template("shop_order.html", order=order, items=items, document=document, history=history, statuses=SHOP_STATUS_FLOW, accounting=accounting, payment_methods=ACCOUNTING_PAYMENT_METHODS, can_ship=order_can_be_shipped(accounting))
+    cur.execute("SELECT user_email,action,details,created_at FROM shop_order_history WHERE order_id=%s ORDER BY created_at DESC", (order_id,)); history=cur.fetchall()
+    cur.execute(
+        """
+        SELECT stage_key,previous_value,new_value,changed_by,changed_at,
+               previous_status,new_status
+        FROM shop_order_stage_history
+        WHERE order_id=%s ORDER BY changed_at DESC,id DESC
+        """,
+        (order_id,),
+    )
+    stage_history = cur.fetchall()
+    conn.close()
+    stages = shop_stage_dict(order[19])
+    stage_rows = [
+        {
+            "key": key,
+            "label": label,
+            "checked": bool(stages.get(key)),
+            "can_edit": shop_stage_can_edit(key),
+        }
+        for key, label, _permission in SHOP_ORDER_STAGES
+    ]
+    return render_template(
+        "shop_order.html",
+        order=order,
+        items=items,
+        document=document,
+        history=history,
+        stage_history=stage_history,
+        stage_labels={key: value["label"] for key, value in SHOP_STAGE_BY_KEY.items()},
+        stage_rows=stage_rows,
+        statuses=SHOP_STATUS_FLOW,
+        accounting=accounting,
+        payment_methods=ACCOUNTING_PAYMENT_METHODS,
+        can_ship=order_can_be_shipped(accounting),
+    )
+
+
+@app.route('/sklep/orders/<int:order_id>/stage', methods=['POST'])
+@login_required
+def shop_update_stage(order_id):
+    payload = request.get_json(silent=True) or request.form
+    stage_key = str(payload.get("stage") or "").strip()
+    if stage_key not in SHOP_STAGE_BY_KEY:
+        return jsonify({"ok": False, "message": "Nieprawidłowy etap zamówienia."}), 400
+    if not shop_stage_can_edit(stage_key):
+        return jsonify({"ok": False, "message": "Brak uprawnień do tego etapu."}), 403
+    raw_value = payload.get("checked")
+    new_value = raw_value is True or str(raw_value).lower() in {"1", "true", "on", "yes"}
+    conn = db()
+    cur = conn.cursor()
+    try:
+        previous, current = update_shop_stage(
+            cur,
+            order_id,
+            stage_key,
+            new_value,
+            session.get("user", "system"),
+            str(payload.get("tracking_number") or ""),
+        )
+        conn.commit()
+        cache.clear()
+        return jsonify(
+            {
+                "ok": True,
+                "stage": stage_key,
+                "previous": previous,
+                "checked": current,
+                "message": "Etap zapisany.",
+            }
+        )
+    except ValueError as exc:
+        conn.rollback()
+        return jsonify({"ok": False, "message": str(exc)}), 400
+    except Exception:
+        conn.rollback()
+        logger.exception("Shop stage update failed.")
+        return jsonify(
+            {
+                "ok": False,
+                "message": "Nie udało się zapisać etapu. Spróbuj ponownie.",
+            }
+        ), 500
+    finally:
+        conn.close()
+
+
+@app.route('/sklep/orders/<int:order_id>/details', methods=['POST'])
+@login_required
+def shop_update_details(order_id):
+    role = current_user_role()
+    if role not in {"admin", "shop", "warehouse"}:
+        return "Brak uprawnień do edycji danych operacyjnych.", 403
+    conn = db()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT notes,tracking_number
+            FROM shop_orders WHERE id=%s FOR UPDATE
+            """,
+            (order_id,),
+        )
+        current = cur.fetchone()
+        if not current:
+            return "Nie znaleziono zamówienia.", 404
+        notes = (
+            (request.form.get("notes") or "").strip()
+            if role in {"admin", "shop"}
+            else (current[0] or "")
+        )
+        tracking = (
+            (request.form.get("tracking_number") or "").strip()
+            if role in {"admin", "warehouse"}
+            else (current[1] or "")
+        )
+        if len(notes) > 2000:
+            raise ValueError("Uwagi mogą mieć maksymalnie 2000 znaków.")
+        if len(tracking) > 100:
+            raise ValueError("Numer przesyłki może mieć maksymalnie 100 znaków.")
+        cur.execute(
+            """
+            UPDATE shop_orders
+            SET notes=%s,tracking_number=%s,updated_at=NOW()
+            WHERE id=%s
+            """,
+            (notes, tracking, order_id),
+        )
+        changes = []
+        if (current[0] or "") != notes:
+            changes.append("zmieniono uwagi")
+        if (current[1] or "") != tracking:
+            changes.append(
+                f"numer przesyłki: {current[1] or 'brak'} → {tracking or 'brak'}"
+            )
+        if changes:
+            shop_history(cur, order_id, "zmieniono dane zamówienia", "; ".join(changes))
+        conn.commit()
+        cache.clear()
+        return redirect(f"/sklep/orders/{order_id}?details=saved")
+    except ValueError as exc:
+        conn.rollback()
+        return str(exc), 400
+    except Exception:
+        conn.rollback()
+        logger.exception("Shop order details update failed.")
+        return "Nie udało się zapisać danych zamówienia.", 500
+    finally:
+        conn.close()
 
 
 @app.route('/sklep/orders/<int:order_id>/status', methods=['POST'])
 @login_required
 def shop_update_status(order_id):
     status = request.form.get("status")
-    if status not in SHOP_STATUS_FLOW: return "Nieprawidłowy status.", 400
-    action = "warehouse" if status in {"W trakcie pakowania","Spakowane","Wysłane","Dostarczone","Zakończone"} else "shop_edit"
-    denied=require_shop_permission(action)
-    if denied: return denied
-    conn=db(); cur=conn.cursor()
+    if status not in SHOP_STATUS_FLOW:
+        return "Nieprawidłowy status.", 400
+    stage_key = next(
+        (key for key, mapped_status in SHOP_STAGE_STATUS.items() if mapped_status == status),
+        None,
+    )
+    if stage_key:
+        if not shop_stage_can_edit(stage_key):
+            return "Brak uprawnień do tego etapu.", 403
+    else:
+        action = "warehouse" if status == "Dostarczone" else "shop_edit"
+        denied = require_shop_permission(action)
+        if denied:
+            return denied
+    conn = db()
+    cur = conn.cursor()
     try:
-        cur.execute("SELECT status FROM shop_orders WHERE id=%s FOR UPDATE", (order_id,))
-        current_order = cur.fetchone()
-        if not current_order:
-            raise ValueError("Nie znaleziono zamówienia.")
-        if status == "Wysłane":
-            ensure_shop_accounting_row(cur, order_id)
-            cur.execute("SELECT * FROM shop_accounting WHERE order_id=%s FOR UPDATE", (order_id,))
-            accounting = cur.fetchone()
-            if not order_can_be_shipped(accounting):
-                raise ValueError("Księgowość nie odblokowała wydania: wymagane opłacenie zamówienia albo pobranie oraz status gotowe do wysyłki.")
-            cur.execute("SELECT product_id,warehouse,qty,issued_qty FROM shop_order_items WHERE order_id=%s FOR UPDATE", (order_id,))
-            for pid, wh, qty, issued in cur.fetchall():
-                delta = qty - (issued or 0)
-                if delta > 0:
-                    cur.execute("UPDATE products SET qty=qty-%s WHERE id=%s AND warehouse=%s AND qty >= %s", (delta,pid,wh,delta))
-                    if cur.rowcount != 1: raise ValueError("Brak stanu magazynowego lub próba podwójnej sprzedaży.")
-                    cur.execute("UPDATE shop_order_items SET issued_qty=qty WHERE order_id=%s AND product_id=%s", (order_id,pid))
-            shop_history(cur, order_id, "wysłano zamówienie", "Towar zdjęty ze stanu")
-        elif status == "Anulowane":
+        if stage_key:
+            update_shop_stage(
+                cur,
+                order_id,
+                stage_key,
+                True,
+                session.get("user", "system"),
+                request.form.get("tracking_number", ""),
+            )
+        else:
             cur.execute(
                 """
-                SELECT product_id,warehouse,issued_qty
-                FROM shop_order_items WHERE order_id=%s FOR UPDATE
+                SELECT status FROM shop_orders WHERE id=%s FOR UPDATE
                 """,
                 (order_id,),
             )
-            for pid, warehouse, issued_qty in cur.fetchall():
-                if issued_qty and issued_qty > 0:
-                    cur.execute(
-                        "UPDATE products SET qty=qty+%s WHERE id=%s AND warehouse=%s",
-                        (issued_qty, pid, warehouse),
-                    )
-                    if cur.rowcount != 1:
-                        raise ValueError("Nie można odtworzyć stanu anulowanego zamówienia.")
+            current = cur.fetchone()
+            if not current:
+                raise ValueError("Nie znaleziono zamówienia.")
             cur.execute(
-                "UPDATE shop_order_items SET issued_qty=0 WHERE order_id=%s",
+                """
+                UPDATE shop_orders
+                SET status=%s,tracking_number=COALESCE(NULLIF(%s,''),tracking_number),
+                    updated_at=NOW()
+                WHERE id=%s
+                """,
+                (status, request.form.get("tracking_number", ""), order_id),
+            )
+            shop_history(
+                cur,
+                order_id,
+                "zmieniono status",
+                f"{current[0]} → {status}",
+            )
+        if status == "Dokument wystawiony":
+            cur.execute(
+                """
+                INSERT INTO shop_notifications(order_id,type,message)
+                VALUES (%s,'gotowe do pakowania','Zamówienie gotowe do pakowania')
+                """,
                 (order_id,),
             )
-        cur.execute("UPDATE shop_orders SET status=%s,tracking_number=COALESCE(NULLIF(%s,''),tracking_number),updated_at=NOW() WHERE id=%s", (status,request.form.get('tracking_number',''),order_id))
-        shop_history(cur, order_id, "zmieniono status", status)
-        if status == "Dokument wystawiony": cur.execute("INSERT INTO shop_notifications(order_id,type,message) VALUES (%s,'gotowe do pakowania','Zamówienie gotowe do pakowania')", (order_id,))
-        if status == "Spakowane": cur.execute("INSERT INTO shop_notifications(order_id,type,message) VALUES (%s,'gotowe do wysyłki','Zamówienie gotowe do wysyłki')", (order_id,))
-        conn.commit(); cache.clear(); return redirect(f"/sklep/orders/{order_id}")
+        if status == "Spakowane":
+            cur.execute(
+                """
+                INSERT INTO shop_notifications(order_id,type,message)
+                VALUES (%s,'gotowe do wysyłki','Zamówienie gotowe do wysyłki')
+                """,
+                (order_id,),
+            )
+        conn.commit()
+        cache.clear()
+        return redirect(f"/sklep/orders/{order_id}")
     except ValueError as exc:
         conn.rollback(); return str(exc), 400
     except Exception:

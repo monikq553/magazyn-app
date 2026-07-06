@@ -1,7 +1,7 @@
 import io
 import zipfile
 import unittest
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -73,7 +73,10 @@ class ShopModuleTests(unittest.TestCase):
         ):
             warehouse_app.session["user"] = "admin@example.com"
             warehouse_app.session["role"] = "admin"
-            with patch.object(warehouse_app, "db", return_value=connection):
+            with (
+                patch.object(warehouse_app, "db", return_value=connection),
+                patch.object(warehouse_app, "update_shop_stage") as update_stage,
+            ):
                 response = warehouse_app.shop_create_order()
 
         self.assertEqual(response.status_code, 302)
@@ -90,6 +93,7 @@ class ShopModuleTests(unittest.TestCase):
                 for call in cursor.execute.call_args_list
             )
         )
+        self.assertEqual(update_stage.call_count, 2)
 
     def test_incomplete_order_returns_specific_form_message(self):
         form = MultiDict(
@@ -154,9 +158,10 @@ class ShopModuleTests(unittest.TestCase):
         cursor.fetchone.side_effect = [sample_order(), (77, "DS/SK/TEST/42")]
         cursor.fetchall.return_value = sample_items()
 
-        document, payload = warehouse_app.generate_shop_sales_document(
-            cursor, 42, "admin@example.com"
-        )
+        with patch.object(warehouse_app, "update_shop_stage") as update_stage:
+            document, payload = warehouse_app.generate_shop_sales_document(
+                cursor, 42, "admin@example.com"
+            )
 
         self.assertEqual(document[0], 77)
         self.assertEqual(payload["buyer"], "Klient Testowy")
@@ -169,6 +174,13 @@ class ShopModuleTests(unittest.TestCase):
         params = upserts[0].args[1]
         self.assertGreater(len(params[3].adapted), 5000)
         self.assertGreater(len(params[4].adapted), 5000)
+        update_stage.assert_called_once_with(
+            cursor,
+            42,
+            "sales_document_generated",
+            True,
+            "admin@example.com",
+        )
 
     def test_generate_document_action_commits_and_redirects_to_order(self):
         cursor = MagicMock()
@@ -238,6 +250,144 @@ class ShopModuleTests(unittest.TestCase):
             "CREATE UNIQUE INDEX IF NOT EXISTS uq_shop_sales_documents_order",
             migration_section,
         )
+
+    def test_stage_change_is_saved_with_actor_previous_and_new_value(self):
+        cursor = MagicMock()
+        cursor.fetchone.return_value = (
+            "Nowe zamówienie",
+            {"order_accepted": False},
+            "",
+        )
+        cursor.rowcount = 1
+
+        with warehouse_app.app.test_request_context("/sklep/orders/42/stage"):
+            warehouse_app.session["user"] = "shop@example.com"
+            warehouse_app.session["role"] = "shop"
+            previous, current = warehouse_app.update_shop_stage(
+                cursor,
+                42,
+                "order_accepted",
+                True,
+                "shop@example.com",
+            )
+
+        self.assertFalse(previous)
+        self.assertTrue(current)
+        stage_insert = next(
+            call
+            for call in cursor.execute.call_args_list
+            if "INSERT INTO shop_order_stage_history" in call.args[0]
+        )
+        self.assertEqual(
+            stage_insert.args[1],
+            (
+                42,
+                "order_accepted",
+                False,
+                True,
+                "Nowe zamówienie",
+                "Przyjęte",
+                "shop@example.com",
+            ),
+        )
+        order_update = next(
+            call
+            for call in cursor.execute.call_args_list
+            if "UPDATE shop_orders" in call.args[0] and "stages=" in call.args[0]
+        )
+        self.assertEqual(order_update.args[1][1], "Przyjęte")
+
+    def test_stage_permissions_are_split_between_roles(self):
+        cases = (
+            ("warehouse", "packed", True),
+            ("warehouse", "invoice_issued", False),
+            ("accounting", "invoice_issued", True),
+            ("accounting", "shipped", False),
+            ("shop", "order_accepted", True),
+            ("shop", "paid", False),
+            ("admin", "paid", True),
+            ("admin", "shipped", True),
+        )
+        for role, stage, expected in cases:
+            with self.subTest(role=role, stage=stage):
+                with warehouse_app.app.test_request_context("/"):
+                    warehouse_app.session["role"] = role
+                    self.assertEqual(
+                        warehouse_app.shop_stage_can_edit(stage),
+                        expected,
+                    )
+
+    def test_shop_filters_cover_invoice_receipt_payment_shipping_and_packing(self):
+        cursor = MagicMock()
+        cursor.fetchall.side_effect = [[], [], []]
+        cursor.fetchone.return_value = (0, 0, 0, 0, 0, 0)
+        filters = {
+            "invoice": "yes",
+            "receipt": "no",
+            "paid": "yes",
+            "shipped": "no",
+            "packed": "yes",
+            "salesperson": "Anna",
+            "client": "Klient",
+            "date": "2026-07-06",
+            "status": "Przyjęte",
+        }
+
+        orders, notifications, reports, products = warehouse_app.shop_dashboard_data(
+            cursor, filters
+        )
+
+        self.assertEqual((orders, notifications, products), ([], [], []))
+        self.assertEqual(reports, (0, 0, 0, 0, 0, 0))
+        order_query = cursor.execute.call_args_list[0].args[0]
+        self.assertIn("a.invoice_issued", order_query)
+        self.assertIn("a.receipt_issued", order_query)
+        self.assertIn("o.stages->>'shipped'", order_query)
+        self.assertIn("o.stages->>'packed'", order_query)
+
+    def test_order_detail_renders_all_stages_and_immediate_save_endpoint(self):
+        order = sample_order() + (
+            False,
+            "admin@example.com",
+            datetime(2026, 7, 6, 12, 0),
+            datetime(2026, 7, 6, 12, 0),
+            {},
+        )
+        stage_rows = [
+            {
+                "key": key,
+                "label": label,
+                "checked": False,
+                "can_edit": True,
+            }
+            for key, label, _permission in warehouse_app.SHOP_ORDER_STAGES
+        ]
+        with warehouse_app.app.test_request_context("/sklep/orders/42"):
+            warehouse_app.session["user"] = "admin@example.com"
+            warehouse_app.session["role"] = "admin"
+            html = warehouse_app.render_template(
+                "shop_order.html",
+                order=order,
+                items=[],
+                document=None,
+                history=[],
+                stage_history=[],
+                stage_labels={
+                    key: value["label"]
+                    for key, value in warehouse_app.SHOP_STAGE_BY_KEY.items()
+                },
+                stage_rows=stage_rows,
+                statuses=warehouse_app.SHOP_STATUS_FLOW,
+                accounting=None,
+                payment_methods=warehouse_app.ACCOUNTING_PAYMENT_METHODS,
+                can_ship=False,
+            )
+
+        self.assertEqual(html.count('class="order-stage-checkbox"'), 16)
+        self.assertIn("/sklep/orders/42/stage", html)
+        self.assertIn("X-CSRF-Token", html)
+        self.assertIn("Status przed", html)
+        self.assertIn("Status po", html)
 
 
 if __name__ == "__main__":

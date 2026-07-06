@@ -42,6 +42,9 @@
                 <th style="text-align:right;padding:8px;">Ilość</th>
                 <th style="text-align:left;padding:8px;">Magazyn</th>
                 <th style="text-align:left;padding:8px;">Paczka</th>
+                <th style="text-align:left;padding:8px;">Wymiar</th>
+                <th style="text-align:left;padding:8px;">Gatunek</th>
+                <th style="text-align:left;padding:8px;">Uwagi</th>
             </tr>
         </thead>
         <tbody>
@@ -51,6 +54,9 @@
                 <td style="padding:8px;border-top:1px solid #eee;text-align:right;">{{ item[1] }}</td>
                 <td style="padding:8px;border-top:1px solid #eee;">{{ item[2] }}</td>
                 <td style="padding:8px;border-top:1px solid #eee;">{{ item[3] or '—' }}</td>
+                <td style="padding:8px;border-top:1px solid #eee;">{{ item[4] or '—' }}</td>
+                <td style="padding:8px;border-top:1px solid #eee;">{{ item[5] or '—' }}</td>
+                <td style="padding:8px;border-top:1px solid #eee;">{{ item[6] or '—' }}</td>
             </tr>
         {% endfor %}
         </tbody>

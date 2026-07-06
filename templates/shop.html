@@ -2,10 +2,12 @@
 {% block content %}
 <h2>Sklep internetowy</h2>
 <div class="tiles" style="margin-bottom:16px;">
-  <div class="tile"><strong>Liczba zamówień</strong><br>{{ reports[0] or 0 }}</div>
-  <div class="tile"><strong>Wartość sprzedaży</strong><br>{{ '%.2f'|format(reports[1] or 0) }} zł</div>
-  <div class="tile"><strong>W realizacji</strong><br>{{ reports[2] or 0 }}</div>
-  <div class="tile"><strong>Zakończone / anulowane</strong><br>{{ reports[3] or 0 }} / {{ reports[4] or 0 }}</div>
+  <div class="tile"><strong>Oczekuje na płatność</strong><br>{{ reports[0] or 0 }}</div>
+  <div class="tile"><strong>Ma fakturę</strong><br>{{ reports[1] or 0 }}</div>
+  <div class="tile"><strong>Ma paragon</strong><br>{{ reports[2] or 0 }}</div>
+  <div class="tile"><strong>Spakowane</strong><br>{{ reports[3] or 0 }}</div>
+  <div class="tile"><strong>Wysłane</strong><br>{{ reports[4] or 0 }}</div>
+  <div class="tile"><strong>Zakończone</strong><br>{{ reports[5] or 0 }}</div>
 </div>
 <div class="card" style="margin-bottom:16px;">
   <h3>Powiadomienia</h3>
@@ -61,16 +63,37 @@
   </form>
 </div>
 <div class="card">
-  <form method="GET" action="/sklep" style="display:flex;gap:8px;margin-bottom:12px;">
-    <input name="q" value="{{ request.args.get('q','') }}" placeholder="Szukaj: zamówienie, klient, paczka, dokument, produkt">
-    <select name="status"><option value="">Wszystkie statusy</option>{% for s in statuses %}<option {% if request.args.get('status') == s %}selected{% endif %}>{{ s }}</option>{% endfor %}</select>
+  <form method="GET" action="/sklep" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;margin-bottom:12px;">
+    <input name="q" value="{{ filters.q }}" placeholder="Zamówienie, dokument, produkt">
+    <input name="client" value="{{ filters.client }}" placeholder="Klient">
+    <input name="salesperson" value="{{ filters.salesperson }}" placeholder="Handlowiec">
+    <input type="date" name="date" value="{{ filters.date }}">
+    <select name="status"><option value="">Wszystkie statusy</option>{% for s in statuses %}<option {% if filters.status == s %}selected{% endif %}>{{ s }}</option>{% endfor %}</select>
+    {% for field, label in [('invoice','Faktura'),('receipt','Paragon'),('paid','Płatność'),('shipped','Wysyłka'),('packed','Pakowanie')] %}
+    <select name="{{ field }}">
+      <option value="">{{ label }}: wszystkie</option>
+      <option value="yes" {% if filters[field] == 'yes' %}selected{% endif %}>{{ label }}: tak</option>
+      <option value="no" {% if filters[field] == 'no' %}selected{% endif %}>{{ label }}: nie</option>
+    </select>
+    {% endfor %}
     <button>Szukaj</button>
+    <a href="/sklep" style="align-self:center;">Wyczyść filtry</a>
   </form>
-  <table width="100%"><tr><th>Numer</th><th>Data</th><th>Klient</th><th>Status</th><th>Płatność</th><th>Dokument</th><th>Paczka</th><th>Wartość</th><th>Akcja</th></tr>
+  <div style="overflow:auto;">
+  <table width="100%"><tr><th>Numer</th><th>Data</th><th>Klient</th><th>Status</th><th>Kluczowe etapy</th><th>Płatność</th><th>Dokument</th><th>Paczka</th><th>Wartość</th><th>Akcja</th></tr>
   {% for o in orders %}
   <tr>
     <td><a href="/sklep/orders/{{ o[0] }}">{{ o[1] }}</a></td><td>{{ o[2] }}</td>
-    <td>{{ o[3] }}</td><td>{{ o[4] }}</td><td>{{ o[5] }}</td>
+    <td>{{ o[3] }}</td><td>{{ o[4] }}</td>
+    <td style="white-space:nowrap;">
+      {% set stages = o[11] or {} %}
+      <span title="Zapłacone">{{ '✓' if o[14] else '□' }} Płatność</span><br>
+      <span title="Faktura">{{ '✓' if o[12] else '□' }} Faktura</span>
+      <span title="Paragon">{{ '✓' if o[13] else '□' }} Paragon</span><br>
+      <span title="Spakowane">{{ '✓' if stages.get('packed') else '□' }} Spakowane</span>
+      <span title="Wysłane">{{ '✓' if stages.get('shipped') else '□' }} Wysłane</span>
+    </td>
+    <td>{{ o[5] }}</td>
     <td>{{ o[10] or o[6] or '' }}</td><td>{{ o[7] or '' }}</td>
     <td>{{ '%.2f'|format(o[8] or 0) }}</td>
     <td>
@@ -86,5 +109,6 @@
     </td>
   </tr>
   {% endfor %}</table>
+  </div>
 </div>
 {% endblock %}
