@@ -53,6 +53,18 @@ button {
 .suggestions div:hover {
     background:#f1f5f9;
 }
+
+.save.is-disabled {
+    opacity:0.65;
+}
+
+.items-summary-row {
+    display:grid;
+    grid-template-columns:2fr 1fr 1fr 1fr;
+    gap:8px;
+    padding:9px 0;
+    border-bottom:1px solid #e2e8f0;
+}
 </style>
 
 <div class="box">
@@ -72,7 +84,7 @@ button {
     <button type="submit">Importuj Excel (.xlsx)</button>
 </form>
 
-<form id="receiptForm" method="POST" action="{{ form_action or '/receive_doc' }}">
+<form id="receiptForm" method="POST" action="{{ form_action or '/receive_doc' }}" novalidate>
 
 <!-- 🔥 DOKUMENT -->
 <input name="doc_number" value="{{ (submitted_header or {}).get('doc_number', '') }}" placeholder="Numer dokumentu (np. PZ/01)">
@@ -159,7 +171,16 @@ button {
 
 <hr>
 
-<button id="saveReceipt" type="submit" disabled>Dodaj do magazynu</button>
+<h3>Lista pozycji dokumentu</h3>
+<div id="itemsSummary" class="card" style="margin-bottom:14px;">
+    Brak kompletnych pozycji.
+</div>
+<div id="validationHint" class="info" style="margin-bottom:10px;">
+    Wybierz produkt z listy podpowiedzi i podaj ilość.
+</div>
+<button id="saveReceipt" class="save is-disabled" type="submit" aria-disabled="true">
+    Dodaj do magazynu
+</button>
 
 </form>
 
@@ -279,14 +300,105 @@ function itemComplete(item) {
     );
 }
 
+function itemValidationErrors(item, index) {
+    const errors = [];
+    const productName = item.querySelector("input[name='product_name']").value.trim();
+    const productId = item.querySelector("input[name='product_id']").value.trim();
+    const qtyValue = item.querySelector("input[name='qty']").value.trim();
+    const qty = Number(qtyValue);
+    const warehouse = item.querySelector("select[name='warehouse'], input[type='hidden'][name='warehouse']");
+    const unit = item.querySelector("select[name='unit']");
+    const packageChecked = item.querySelector("input[type='checkbox']").checked;
+    const packageNumber = item.querySelector("input[name='package_number']").value.trim();
+    const netto = item.querySelector("input[name='price_netto']").value;
+    const brutto = item.querySelector("input[name='price_brutto']").value;
+
+    if (!productName || !productId) errors.push("wybierz produkt z listy podpowiedzi");
+    if (!qtyValue || !Number.isFinite(qty) || qty <= 0) errors.push("podaj ilość większą od zera");
+    if (!warehouse || !warehouse.value) errors.push("wybierz magazyn");
+    if (!unit || !unit.value) errors.push("wybierz jednostkę");
+    if (packageChecked && !packageNumber) errors.push("wpisz numer paczki");
+    if (netto && (!Number.isFinite(Number(netto)) || Number(netto) < 0)) {
+        errors.push("popraw cenę netto");
+    }
+    if (brutto && (!Number.isFinite(Number(brutto)) || Number(brutto) < 0)) {
+        errors.push("popraw cenę brutto");
+    }
+    return errors.length ? `Pozycja ${index + 1}: ${errors.join(", ")}.` : "";
+}
+
+function receiptValidationErrors() {
+    const errors = [];
+    const date = document.querySelector("#receiptForm input[name='date']").value.trim();
+    const contractor = document.querySelector("#receiptForm input[name='kontrahent']").value.trim();
+    if (!date) errors.push("Podaj datę dokumentu.");
+    if (!contractor) errors.push("Podaj dostawcę.");
+    const items = Array.from(document.querySelectorAll("#items .item"));
+    if (!items.length) {
+        errors.push("Dodaj co najmniej jedną pozycję.");
+    } else {
+        items.forEach((item, index) => {
+            const error = itemValidationErrors(item, index);
+            if (error) errors.push(error);
+        });
+    }
+    return errors;
+}
+
 function receiptItemsValid() {
     const items = Array.from(document.querySelectorAll("#items .item"));
     return items.length > 0 && items.every(itemComplete);
 }
 
+function updateItemsSummary() {
+    const summary = document.getElementById("itemsSummary");
+    const completeItems = Array.from(document.querySelectorAll("#items .item"))
+        .filter(itemComplete);
+    if (!completeItems.length) {
+        summary.textContent = "Brak kompletnych pozycji.";
+        return;
+    }
+    summary.innerHTML = completeItems.map((item, index) => {
+        const product = item.querySelector("input[name='product_name']").value.trim();
+        const qty = item.querySelector("input[name='qty']").value.trim();
+        const unit = item.querySelector("select[name='unit']").value;
+        const warehouse = item.querySelector("select[name='warehouse'], input[type='hidden'][name='warehouse']").value;
+        const packageNumber = item.querySelector("input[name='package_number']").value.trim();
+        return `<div class="items-summary-row">
+            <strong>${index + 1}. ${escapeHtml(product)}</strong>
+            <span>${escapeHtml(qty)} ${escapeHtml(unit)}</span>
+            <span>${escapeHtml(warehouse)}</span>
+            <span>${packageNumber ? "Paczka: " + escapeHtml(packageNumber) : "Bez numeru paczki"}</span>
+        </div>`;
+    }).join("");
+}
+
+function escapeHtml(value) {
+    const div = document.createElement("div");
+    div.textContent = value;
+    return div.innerHTML;
+}
+
 function updateSaveState() {
     const button = document.getElementById("saveReceipt");
-    if (button) button.disabled = !receiptItemsValid();
+    const errors = receiptValidationErrors();
+    const hint = document.getElementById("validationHint");
+    const formError = document.getElementById("formError");
+    updateItemsSummary();
+    if (button) {
+        button.disabled = false;
+        button.setAttribute("aria-disabled", errors.length ? "true" : "false");
+        button.classList.toggle("is-disabled", Boolean(errors.length));
+    }
+    if (hint) {
+        hint.textContent = errors.length
+            ? errors[0]
+            : "Dokument jest gotowy do zapisania.";
+        hint.style.color = errors.length ? "#991b1b" : "#166534";
+    }
+    if (formError && formError.dataset.clientError === "true") {
+        formError.style.display = "none";
+    }
 }
 
 document.addEventListener("input", function(e){
@@ -318,10 +430,12 @@ document.addEventListener("change", updateSaveState);
 document.addEventListener("DOMContentLoaded", updateSaveState);
 
 document.getElementById("receiptForm").addEventListener("submit", function(event) {
-    if (receiptItemsValid()) return;
+    const errors = receiptValidationErrors();
+    if (!errors.length && receiptItemsValid()) return;
     event.preventDefault();
     const error = document.getElementById("formError");
-    error.textContent = "Dodaj co najmniej jedną kompletną pozycję. Wybierz produkt z listy, podaj dodatnią ilość, a po zaznaczeniu paczki także jej numer.";
+    error.innerHTML = `<strong>Nie można zapisać dokumentu:</strong><br>${errors.map(escapeHtml).join("<br>")}`;
+    error.dataset.clientError = "true";
     error.style.display = "block";
     error.scrollIntoView({behavior: "smooth", block: "center"});
 });
