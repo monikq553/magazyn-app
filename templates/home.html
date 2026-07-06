@@ -13,7 +13,10 @@
 <a href="/wydanie" class="tile"><div style="font-size:20px;">W</div><div style="margin-top:10px;font-weight:600;">Wydanie</div><div style="font-size:13px;color:#6b7280;margin-top:5px;">Wystaw WZ / RW</div></a>
 {% endif %}
 {% if can('shop') %}
-<a href="/shop/orders" class="tile"><div style="font-size:20px;">S</div><div style="margin-top:10px;font-weight:600;">Sklep internetowy</div><div style="font-size:13px;color:#6b7280;margin-top:5px;">Zamówienia i rezerwacje</div></a>
+<a href="/sklep" class="tile"><div style="font-size:20px;">S</div><div style="margin-top:10px;font-weight:600;">Sklep internetowy</div><div style="font-size:13px;color:#6b7280;margin-top:5px;">Zamówienia i rezerwacje</div></a>
+{% endif %}
+{% if can('accounting') %}
+<a href="/ksiegowosc" class="tile"><div style="font-size:20px;">K</div><div style="margin-top:10px;font-weight:600;">Księgowość</div><div style="font-size:13px;color:#6b7280;margin-top:5px;">Rozliczenia zamówień</div></a>
 {% endif %}
 {% if can('history') %}
 <a href="/historia" class="tile"><div style="font-size:20px;">H</div><div style="margin-top:10px;font-weight:600;">Historia</div><div style="font-size:13px;color:#6b7280;margin-top:5px;">Dokumenty</div></a>

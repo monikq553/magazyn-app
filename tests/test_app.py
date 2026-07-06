@@ -3,11 +3,18 @@ import gzip
 import json
 import os
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import app as warehouse_app
-from backup_service import BACKUP_FORMAT, decrypt_backup, encrypt_backup, parse_backup
+from backup_service import (
+    BACKUP_FORMAT,
+    BACKUP_TABLES,
+    decrypt_backup,
+    encrypt_backup,
+    parse_backup,
+)
 from cryptography.fernet import Fernet
 
 
@@ -117,6 +124,8 @@ class FakeCursor:
             self.rowcount = 1
         elif normalized.startswith("insert into issue_items"):
             self.store.items.append(params)
+            self.rowcount = 1
+        elif normalized.startswith("insert into action_logs"):
             self.rowcount = 1
         elif normalized.startswith("select id from products where id="):
             product_id, warehouse = params
@@ -383,6 +392,98 @@ class InventoryFlowTests(unittest.TestCase):
         self.assertIn("@dpg-example-a:5432/magazyn", internal_dsn)
         self.assertNotIn("sslmode", internal_dsn)
         warehouse_app.DB_POOL = None
+
+    def test_shop_document_payload_uses_correct_quantity_prices_and_shipping(self):
+        order = (
+            1, "SK/1", "2026-07-04", "Klient", "Adres", "123", "a@example.com",
+            15.0, "Przelew", "Opłacone", "Nowe zamówienie", "FV/1", "", "Uwagi", "NIP",
+        )
+        items = [(1, 1, "Deska", 2.0, 100.0, 123.0, 23.0)]
+        payload = warehouse_app.create_shop_document_payload(order, items)
+        self.assertEqual(payload["items"][0]["name"], "Deska")
+        self.assertEqual(payload["items"][0]["qty"], 2.0)
+        self.assertEqual(payload["total_net"], 200.0)
+        self.assertEqual(payload["total_gross"], 261.0)
+        self.assertEqual(payload["shipping"], 15.0)
+
+    def test_backup_includes_all_relational_module_tables(self):
+        expected = {
+            "shop_order_history",
+            "shop_notifications",
+            "shop_sales_documents",
+            "shop_accounting",
+            "issue_doc_photos",
+            "issue_doc_history",
+        }
+        self.assertTrue(expected.issubset(BACKUP_TABLES))
+
+    def test_migration_defines_only_one_canonical_shop_schema(self):
+        source = Path(warehouse_app.__file__).read_text(encoding="utf-8").lower()
+        self.assertEqual(source.count("create table if not exists shop_orders("), 1)
+        self.assertIn("add column if not exists order_number", source)
+        self.assertIn("uq_shop_orders_order_number", source)
+
+    def test_main_templates_render_with_empty_database(self):
+        class EmptyCursor:
+            def __init__(self):
+                self.result = None
+
+            def execute(self, sql, params=()):
+                normalized = " ".join(str(sql).lower().split())
+                if normalized.startswith("select count(*), coalesce(sum(i.qty*i.price_brutto)"):
+                    self.result = [(0, 0, 0, 0, 0)]
+                elif "select coalesce(sum(a.amount_due),0)" in normalized:
+                    self.result = [(0, 0, 0, 0, 0, 0, 0, 0)]
+                elif normalized.startswith("select count(*), coalesce(sum(qty)"):
+                    self.result = [(0, 0)]
+                else:
+                    self.result = []
+
+            def fetchall(self):
+                return list(self.result or [])
+
+            def fetchone(self):
+                return (self.result or [None])[0]
+
+        class EmptyConnection:
+            def __init__(self):
+                self.cursor_instance = EmptyCursor()
+
+            def cursor(self):
+                return self.cursor_instance
+
+            def commit(self):
+                pass
+
+            def rollback(self):
+                pass
+
+            def close(self):
+                pass
+
+        cases = [
+            ("/", warehouse_app.home),
+            ("/dashboard", warehouse_app.dashboard_page),
+            ("/magazyn/Wszystko", lambda: warehouse_app.magazyn("Wszystko")),
+            ("/przyjecie", warehouse_app.przyjecie),
+            ("/wydanie", warehouse_app.wydanie),
+            ("/historia", warehouse_app.historia),
+            ("/users", warehouse_app.users),
+            ("/sklep", warehouse_app.shop_orders),
+            ("/ksiegowosc", warehouse_app.accounting_dashboard),
+        ]
+        for path, view in cases:
+            with self.subTest(path=path):
+                with warehouse_app.app.test_request_context(path):
+                    warehouse_app.session["user"] = "admin@example.com"
+                    warehouse_app.session["role"] = "admin"
+                    with patch.object(
+                        warehouse_app,
+                        "db",
+                        side_effect=lambda: EmptyConnection(),
+                    ):
+                        response = warehouse_app.app.make_response(view())
+                self.assertEqual(response.status_code, 200)
 
 
 if __name__ == "__main__":

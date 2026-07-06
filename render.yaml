@@ -10,7 +10,7 @@ services:
     autoDeployTrigger: commit
     envVars:
       - key: PYTHON_VERSION
-        value: 3.13.13
+        value: 3.13.14
       - key: SECRET_KEY
         generateValue: true
       - key: DATABASE_URL
@@ -39,6 +39,10 @@ services:
         value: "false"
       - key: DB_POOL_SIZE
         value: "5"
+      - key: RATELIMIT_STORAGE_URI
+        value: memory://
+      - key: ALLOWED_ORIGINS
+        value: https://pmagazyn.pl,https://app.pmagazyn.pl
   - type: cron
     name: magazyn-db-backup
     runtime: python
@@ -48,7 +52,7 @@ services:
     startCommand: python backup.py
     envVars:
       - key: PYTHON_VERSION
-        value: 3.13.13
+        value: 3.13.14
       - key: SECRET_KEY
         generateValue: true
       - key: DATABASE_URL
