@@ -23,7 +23,9 @@
 
 .actions {
     display:flex;
+    flex-wrap:wrap;
     gap:10px;
+    justify-content:flex-end;
 }
 
 input, select {
@@ -54,6 +56,9 @@ input, select {
         <input name="first_name" placeholder="Imię" maxlength="100" required>
         <input name="last_name" placeholder="Nazwisko" maxlength="100" required>
         <input name="email" type="email" placeholder="E-mail" maxlength="254" required>
+        <input name="phone" placeholder="Telefon (opcjonalnie)" maxlength="50">
+        <input name="temporary_password" type="password" placeholder="Hasło tymczasowe" minlength="12" autocomplete="new-password" required>
+        <label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" name="active" checked> Konto aktywne</label>
 
         <select name="role">
             <option value="warehouse">Magazynier</option>
@@ -66,12 +71,23 @@ input, select {
         <button class="btn">Dodaj użytkownika</button>
     </form>
     <p style="color:#6b7280;font-size:13px;margin-bottom:0;">
-        Hasło nie jest zapisywane w aplikacji. Nowy użytkownik ustawia je przez „Nie pamiętam hasła” na ekranie logowania.
+        Hasło musi mieć minimum 12 znaków, małą i dużą literę, cyfrę oraz znak specjalny.
+        Aplikacja nie zapisuje hasła — jest ono bezpiecznie obsługiwane przez Firebase Authentication.
+        Użytkownik musi zmienić hasło przy pierwszym logowaniu.
     </p>
 </div>
 
 {% if request.args.get('reset') == 'sent' %}
 <div class="card" style="margin-bottom:16px;color:#166534;">Wiadomość do ustawienia nowego hasła została wysłana.</div>
+{% endif %}
+{% if request.args.get('temporary') == 'saved' %}
+<div class="card" style="margin-bottom:16px;color:#166534;">Nowe hasło tymczasowe zostało ustawione.</div>
+{% endif %}
+{% if request.args.get('force') == 'saved' %}
+<div class="card" style="margin-bottom:16px;color:#166534;">Zmiana hasła została wymuszona.</div>
+{% endif %}
+{% if request.args.get('unlock') == 'saved' %}
+<div class="card" style="margin-bottom:16px;color:#166534;">Konto zostało odblokowane.</div>
 {% endif %}
 
 <!-- 📋 LISTA -->
@@ -81,10 +97,15 @@ input, select {
     <div>
         <strong>{{u[2]}} {{u[3]}}</strong>
         <div>{{u[4]}}</div>
+        {% if u[9] %}<div>{{ u[9] }}</div>{% endif %}
         <div class="role">
             {{ role_labels.get(u[5], u[5]) }}
-            · {{ 'aktywne' if u[6] == 'active' else 'zablokowane' }}
+            · {{ 'aktywne' if u[6] == 'active' else 'nieaktywne' if u[6] == 'inactive' else 'zablokowane' }}
+            {% if u[10] %}· wymagana zmiana hasła{% endif %}
         </div>
+        <div class="role">Ostatnie logowanie: {{ u[11] or 'brak' }} · Ostatnia zmiana hasła: {{ u[12] or 'brak' }}</div>
+        <div class="role">Utworzył: {{ u[13] or 'brak danych' }} · Ostatni reset: {{ u[14] or 'brak' }}</div>
+        <div class="role">Nieudane logowania: {{ u[15] or 0 }} {% if u[16] %}· blokada do {{ u[16] }}{% endif %}</div>
     </div>
 
     <div class="actions">
@@ -112,13 +133,33 @@ input, select {
         {% endif %}
 
         <form method="POST" action="/users/{{u[0]}}/reset-password">
-            <button class="btn">Resetuj hasło</button>
+            <button class="btn">Wyślij link resetu</button>
         </form>
 
-        {% if u[1] != session.get('uid') %}
-        <form method="POST" action="/users/{{u[0]}}/toggle-block">
-            <button class="btn">{{ 'Odblokuj' if u[6] == 'blocked' else 'Zablokuj' }}</button>
+        <form method="POST" action="/users/{{u[0]}}/temporary-password" style="display:flex;gap:6px;">
+            <input name="temporary_password" type="password" minlength="12" autocomplete="new-password" placeholder="Nowe hasło tymczasowe" required>
+            <button class="btn">Ustaw tymczasowe</button>
         </form>
+
+        <form method="POST" action="/users/{{u[0]}}/force-password-change">
+            <button class="btn">Wymuś zmianę hasła</button>
+        </form>
+
+        {% if u[6] == 'blocked' or u[16] %}
+        <form method="POST" action="/users/{{u[0]}}/unlock">
+            <button class="btn">Odblokuj</button>
+        </form>
+        {% endif %}
+
+        {% if u[1] != session.get('uid') %}
+        <form method="POST" action="/users/{{u[0]}}/toggle-active">
+            <button class="btn">{{ 'Aktywuj' if u[6] == 'inactive' else 'Dezaktywuj' }}</button>
+        </form>
+        {% if u[6] == 'active' and not u[16] %}
+        <form method="POST" action="/users/{{u[0]}}/toggle-block">
+            <button class="btn">Zablokuj</button>
+        </form>
+        {% endif %}
         <form method="POST" action="/delete_user/{{u[0]}}">
             <button class="btn delete" onclick="return confirm('Usunąć użytkownika?')">
                 Usuń

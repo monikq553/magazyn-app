@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Historia bezpieczeństwa użytkowników</h2>
+<div class="card" style="overflow:auto;">
+  <table width="100%">
+    <tr><th>Data</th><th>Użytkownik</th><th>Zdarzenie</th><th>Wykonał</th><th>Szczegóły</th></tr>
+    {% for event in events %}
+    <tr>
+      <td>{{ event[0] }}</td>
+      <td>{{ event[1] }}</td>
+      <td>{{ event[2] }}</td>
+      <td>{{ event[3] or 'system' }}</td>
+      <td>{{ event[4] or {} }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="5">Brak zdarzeń bezpieczeństwa.</td></tr>
+    {% endfor %}
+  </table>
+</div>
+{% endblock %}

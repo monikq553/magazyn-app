@@ -26,6 +26,7 @@ import json
 import io
 import pandas as pd
 from urllib import request as urlrequest
+from urllib import error as urlerror
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from dotenv import load_dotenv
 from reportlab.lib.pagesizes import A4
@@ -136,6 +137,13 @@ ROLE_LABELS = {
     "accounting": "Księgowość",
     "sales": "Handlowiec",
 }
+LOGIN_LOCK_MODE = os.environ.get("LOGIN_LOCK_MODE", "temporary").strip().lower()
+if LOGIN_LOCK_MODE not in {"temporary", "admin"}:
+    LOGIN_LOCK_MODE = "temporary"
+try:
+    LOGIN_LOCK_MINUTES = max(1, min(int(os.environ.get("LOGIN_LOCK_MINUTES", "15")), 1440))
+except ValueError:
+    LOGIN_LOCK_MINUTES = 15
 ROLE_PERMISSIONS = {
     "admin": {"dashboard", "inventory", "inventory_manage", "receive", "issue", "history", "reports", "users", "backups", "shop", "accounting"},
     "warehouse": {"dashboard", "inventory", "inventory_manage", "receive", "issue", "history", "shop"},
@@ -381,6 +389,15 @@ def run_db_migrations():
         email TEXT UNIQUE NOT NULL,
         role TEXT NOT NULL DEFAULT 'warehouse',
         status TEXT NOT NULL DEFAULT 'active',
+        phone TEXT,
+        must_change_password BOOLEAN NOT NULL DEFAULT FALSE,
+        last_login_at TIMESTAMPTZ,
+        password_changed_at TIMESTAMPTZ,
+        created_by TEXT,
+        password_reset_by TEXT,
+        failed_login_attempts INTEGER NOT NULL DEFAULT 0,
+        last_failed_login_at TIMESTAMPTZ,
+        locked_until TIMESTAMPTZ,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
@@ -412,6 +429,15 @@ def run_db_migrations():
                     email TEXT UNIQUE NOT NULL,
                     role TEXT NOT NULL DEFAULT 'warehouse',
                     status TEXT NOT NULL DEFAULT 'active',
+                    phone TEXT,
+                    must_change_password BOOLEAN NOT NULL DEFAULT FALSE,
+                    last_login_at TIMESTAMPTZ,
+                    password_changed_at TIMESTAMPTZ,
+                    created_by TEXT,
+                    password_reset_by TEXT,
+                    failed_login_attempts INTEGER NOT NULL DEFAULT 0,
+                    last_failed_login_at TIMESTAMPTZ,
+                    locked_until TIMESTAMPTZ,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 )
@@ -625,7 +651,7 @@ def run_db_migrations():
             UPDATE users SET role='warehouse'
             WHERE role IS NULL OR role NOT IN ('admin', 'warehouse', 'shop', 'accounting', 'sales');
             UPDATE users SET status='active'
-            WHERE status IS NULL OR status NOT IN ('active', 'blocked');
+            WHERE status IS NULL OR status NOT IN ('active', 'blocked', 'inactive');
             IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname='users_role_valid') THEN
                 ALTER TABLE users DROP CONSTRAINT users_role_valid;
             END IF;
@@ -633,7 +659,7 @@ def run_db_migrations():
             ADD CONSTRAINT users_role_valid CHECK (role IN ('admin', 'warehouse', 'shop', 'accounting', 'sales'));
             IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='users_status_valid') THEN
                 ALTER TABLE users
-                ADD CONSTRAINT users_status_valid CHECK (status IN ('active', 'blocked'));
+                ADD CONSTRAINT users_status_valid CHECK (status IN ('active', 'blocked', 'inactive'));
             END IF;
         END $$;
     """)
@@ -836,6 +862,36 @@ def run_db_migrations():
           AND u.role='sales'
           AND lower(u.email)=lower(COALESCE(o.created_by,''))
     """)
+    cur.execute("""
+        ALTER TABLE users
+            ADD COLUMN IF NOT EXISTS phone TEXT,
+            ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN NOT NULL DEFAULT FALSE,
+            ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ,
+            ADD COLUMN IF NOT EXISTS password_changed_at TIMESTAMPTZ,
+            ADD COLUMN IF NOT EXISTS created_by TEXT,
+            ADD COLUMN IF NOT EXISTS password_reset_by TEXT,
+            ADD COLUMN IF NOT EXISTS failed_login_attempts INTEGER NOT NULL DEFAULT 0,
+            ADD COLUMN IF NOT EXISTS last_failed_login_at TIMESTAMPTZ,
+            ADD COLUMN IF NOT EXISTS locked_until TIMESTAMPTZ
+    """)
+    cur.execute("ALTER TABLE users DROP CONSTRAINT IF EXISTS users_status_valid")
+    cur.execute("""
+        ALTER TABLE users
+        ADD CONSTRAINT users_status_valid
+        CHECK (status IN ('active','blocked','inactive'))
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS user_security_events(
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        user_email TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        actor_email TEXT,
+        details JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_user_security_events_user ON user_security_events(lower(user_email),created_at DESC)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_shop_order_items_order ON shop_order_items(order_id)")
     cur.execute("""
     CREATE TABLE IF NOT EXISTS shop_order_history(
@@ -2518,6 +2574,67 @@ def log_action(action, entity_type=None, entity_id=None, details=None, conn=None
             target_conn.close()
 
 
+def password_validation_error(password):
+    password = password or ""
+    if len(password) < 12:
+        return "Hasło musi mieć co najmniej 12 znaków."
+    if not any(character.islower() for character in password):
+        return "Hasło musi zawierać małą literę."
+    if not any(character.isupper() for character in password):
+        return "Hasło musi zawierać dużą literę."
+    if not any(character.isdigit() for character in password):
+        return "Hasło musi zawierać cyfrę."
+    if not any(not character.isalnum() for character in password):
+        return "Hasło musi zawierać znak specjalny."
+    return None
+
+
+def security_event(cur, user_id, email, event_type, actor=None, details=None):
+    cur.execute(
+        """
+        INSERT INTO user_security_events(
+            user_id,user_email,event_type,actor_email,details
+        ) VALUES (%s,%s,%s,%s,%s::jsonb)
+        """,
+        (
+            user_id,
+            (email or "").strip().lower(),
+            event_type,
+            actor or (session.get("user") if has_request_context() else None),
+            json.dumps(details or {}, ensure_ascii=False),
+        ),
+    )
+
+
+def firebase_password_sign_in(email, password):
+    api_key = FIREBASE_CONFIG.get("apiKey")
+    if not api_key:
+        raise RuntimeError("Firebase Web API nie jest skonfigurowane.")
+    endpoint = (
+        "https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword"
+        f"?key={api_key}"
+    )
+    payload = json.dumps(
+        {
+            "email": (email or "").strip().lower(),
+            "password": password or "",
+            "returnSecureToken": True,
+        }
+    ).encode("utf-8")
+    request_object = urlrequest.Request(
+        endpoint,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlrequest.urlopen(request_object, timeout=12) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urlerror.HTTPError as exc:
+        # Firebase returns credential details in the response. Do not expose them.
+        raise ValueError("Nieprawidłowy adres e-mail lub hasło.") from exc
+
+
 @app.context_processor
 def inject_permissions():
     return {"can": current_user_can, "role_labels": ROLE_LABELS}
@@ -2553,6 +2670,168 @@ def register():
     return redirect('/login')
 
 
+@app.route('/auth/password-login', methods=['POST'])
+@limiter.limit("10 per minute")
+def password_login():
+    payload = request.get_json(silent=True) or {}
+    email = (payload.get("email") or "").strip().lower()
+    password = payload.get("password") or ""
+    if not email or not password:
+        return jsonify({"ok": False, "error": "Podaj adres e-mail i hasło."}), 400
+    conn = None
+    try:
+        ensure_db_initialized()
+        conn = db()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id,firebase_uid,status,failed_login_attempts,
+                   (locked_until IS NOT NULL AND locked_until>NOW())
+            FROM users WHERE lower(email)=lower(%s) FOR UPDATE
+            """,
+            (email,),
+        )
+        account = cur.fetchone()
+        if not account:
+            conn.rollback()
+            return jsonify({
+                "ok": False,
+                "error": "Nieprawidłowy adres e-mail lub hasło.",
+            }), 401
+        user_id, uid, status, failed_attempts, is_temporarily_locked = account
+        if status == "inactive":
+            conn.rollback()
+            return jsonify({"ok": False, "error": "Konto jest nieaktywne."}), 403
+        if status == "blocked":
+            conn.rollback()
+            return jsonify({
+                "ok": False,
+                "error": "Konto jest zablokowane. Skontaktuj się z administratorem.",
+            }), 423
+        if is_temporarily_locked:
+            conn.rollback()
+            return jsonify({
+                "ok": False,
+                "error": (
+                    f"Konto jest tymczasowo zablokowane. Spróbuj ponownie za "
+                    f"{LOGIN_LOCK_MINUTES} minut."
+                ),
+            }), 423
+        try:
+            result = firebase_password_sign_in(email, password)
+        except ValueError:
+            attempts = int(failed_attempts or 0) + 1
+            if attempts >= 5 and LOGIN_LOCK_MODE == "admin":
+                cur.execute(
+                    """
+                    UPDATE users SET failed_login_attempts=%s,status='blocked',
+                        locked_until=NULL,last_failed_login_at=NOW(),updated_at=NOW()
+                    WHERE id=%s
+                    """,
+                    (attempts, user_id),
+                )
+                security_event(
+                    cur, user_id, email, "account_locked", None,
+                    {"mode": "admin", "failed_attempts": attempts},
+                )
+                try:
+                    auth.update_user(uid, disabled=True)
+                except Exception:
+                    logger.warning("Firebase account lock synchronization failed.", exc_info=True)
+            elif attempts >= 5:
+                cur.execute(
+                    """
+                    UPDATE users SET failed_login_attempts=%s,
+                        locked_until=NOW()+(%s*INTERVAL '1 minute'),
+                        last_failed_login_at=NOW(),updated_at=NOW()
+                    WHERE id=%s
+                    """,
+                    (attempts, LOGIN_LOCK_MINUTES, user_id),
+                )
+                security_event(
+                    cur, user_id, email, "account_temporarily_locked", None,
+                    {"minutes": LOGIN_LOCK_MINUTES, "failed_attempts": attempts},
+                )
+            else:
+                cur.execute(
+                    """
+                    UPDATE users SET failed_login_attempts=%s,
+                        last_failed_login_at=NOW(),updated_at=NOW()
+                    WHERE id=%s
+                    """,
+                    (attempts, user_id),
+                )
+                security_event(
+                    cur, user_id, email, "login_failed", None,
+                    {"failed_attempts": attempts},
+                )
+            conn.commit()
+            message = (
+                "Konto zostało zablokowane po 5 nieudanych próbach."
+                if attempts >= 5
+                else "Nieprawidłowy adres e-mail lub hasło."
+            )
+            return jsonify({"ok": False, "error": message}), (
+                423 if attempts >= 5 else 401
+            )
+        cur.execute(
+            """
+            UPDATE users SET failed_login_attempts=0,locked_until=NULL,
+                updated_at=NOW() WHERE id=%s
+            """,
+            (user_id,),
+        )
+        conn.commit()
+        return jsonify({"ok": True, "idToken": result.get("idToken")})
+    except Exception:
+        if conn:
+            conn.rollback()
+        logger.exception("Password login failed.")
+        return jsonify({
+            "ok": False,
+            "error": "Logowanie jest chwilowo niedostępne. Spróbuj ponownie.",
+        }), 503
+    finally:
+        if conn:
+            conn.close()
+
+
+@app.route('/auth/forgot-password', methods=['POST'])
+@limiter.limit("5 per hour")
+def forgot_password():
+    email = ((request.get_json(silent=True) or {}).get("email") or "").strip().lower()
+    if email:
+        conn = None
+        try:
+            ensure_db_initialized()
+            conn = db()
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT id,status FROM users WHERE lower(email)=lower(%s)",
+                (email,),
+            )
+            account = cur.fetchone()
+            if account and account[1] == "active":
+                send_firebase_password_reset(email)
+                security_event(cur, account[0], email, "password_reset_requested")
+                conn.commit()
+        except Exception:
+            if conn:
+                conn.rollback()
+            logger.warning("Password reset request could not be completed.", exc_info=True)
+        finally:
+            if conn:
+                conn.close()
+    # Always return the same response to prevent account enumeration.
+    return jsonify({
+        "ok": True,
+        "message": (
+            "Jeśli konto istnieje i jest aktywne, wysłaliśmy jednorazowy link "
+            "do zmiany hasła."
+        ),
+    })
+
+
 @app.route('/auth/session', methods=['POST'])
 @limiter.limit("10 per minute")
 def create_session():
@@ -2586,7 +2865,9 @@ def create_session():
         cur = conn.cursor()
         cur.execute(
             """
-            SELECT role, status, can_import_warehouse, can_import_accounting
+            SELECT role,status,can_import_warehouse,can_import_accounting,
+                   must_change_password,id,
+                   (locked_until IS NOT NULL AND locked_until>NOW())
             FROM users
             WHERE firebase_uid=%s OR lower(email)=lower(%s)
             FOR UPDATE
@@ -2609,28 +2890,45 @@ def create_session():
             role = "admin"
             can_import_warehouse = True
             can_import_accounting = True
+            must_change_password = False
             cur.execute(
                 """
-                INSERT INTO users(firebase_uid, first_name, last_name, email, role, status)
-                VALUES (%s,%s,%s,%s,'admin','active')
+                INSERT INTO users(
+                    firebase_uid,first_name,last_name,email,role,status,last_login_at
+                )
+                VALUES (%s,%s,%s,%s,'admin','active',NOW())
+                RETURNING id
                 """,
                 (uid, first_name, last_name, email),
             )
+            user_id = cur.fetchone()[0]
+            security_event(cur, user_id, email, "login_successful", email)
         else:
             role, status = row[:2]
             can_import_warehouse = bool(row[2]) if len(row) > 2 else False
             can_import_accounting = bool(row[3]) if len(row) > 3 else False
+            must_change_password = bool(row[4]) if len(row) > 4 else False
+            user_id = row[5] if len(row) > 5 else None
+            is_temporarily_locked = bool(row[6]) if len(row) > 6 else False
             if role == "employee":
                 role = "warehouse"
             if status != "active":
                 return jsonify({"ok": False, "error": "Konto jest zablokowane."}), 403
+            if is_temporarily_locked:
+                return jsonify({
+                    "ok": False,
+                    "error": "Konto jest tymczasowo zablokowane.",
+                }), 423
             cur.execute(
                 """
-                UPDATE users SET firebase_uid=%s, email=%s, role=%s, updated_at=NOW()
+                UPDATE users SET firebase_uid=%s,email=%s,role=%s,
+                    failed_login_attempts=0,locked_until=NULL,last_login_at=NOW(),
+                    updated_at=NOW()
                 WHERE firebase_uid=%s OR lower(email)=lower(%s)
                 """,
                 (uid, email, role, uid, email),
             )
+            security_event(cur, user_id, email, "login_successful", email)
         conn.commit()
     except Exception:
         if conn:
@@ -2654,7 +2952,13 @@ def create_session():
     session['uid'] = uid
     session['can_import_warehouse'] = role == "admin" or can_import_warehouse
     session['can_import_accounting'] = role == "admin" or can_import_accounting
-    response = make_response(jsonify({"ok": True, "role": role}))
+    session['must_change_password'] = bool(must_change_password)
+    response = make_response(jsonify({
+        "ok": True,
+        "role": role,
+        "mustChangePassword": bool(must_change_password),
+        "redirect": "/change-password?required=1" if must_change_password else "/",
+    }))
     response.set_cookie(
         "firebase_session",
         firebase_cookie,
@@ -2664,6 +2968,97 @@ def create_session():
         samesite="Lax",
     )
     return response
+
+
+def render_change_password(error=None, status=200):
+    return render_template(
+        "change_password.html",
+        error=error,
+        required=bool(session.get("must_change_password")),
+    ), status
+
+
+@app.route('/change-password')
+@login_required
+def change_password_page():
+    return render_change_password()
+
+
+@app.route('/auth/change-password', methods=['POST'])
+@login_required
+@limiter.limit("10 per hour")
+def change_password():
+    current_password = request.form.get("current_password") or ""
+    new_password = request.form.get("new_password") or ""
+    confirmation = request.form.get("confirm_password") or ""
+    if not current_password:
+        return render_change_password("Podaj aktualne hasło.", 400)
+    if new_password != confirmation:
+        return render_change_password("Nowe hasła nie są identyczne.", 400)
+    validation_error = password_validation_error(new_password)
+    if validation_error:
+        return render_change_password(validation_error, 400)
+    if secrets.compare_digest(current_password, new_password):
+        return render_change_password("Nowe hasło musi różnić się od aktualnego.", 400)
+    try:
+        firebase_password_sign_in(session.get("user"), current_password)
+    except ValueError:
+        return render_change_password("Aktualne hasło jest nieprawidłowe.", 400)
+    except Exception:
+        logger.exception("Current password verification failed.")
+        return render_change_password("Nie udało się zweryfikować hasła.", 503)
+
+    conn = db()
+    cur = conn.cursor()
+    try:
+        auth.update_user(session.get("uid"), password=new_password)
+        sign_in_result = firebase_password_sign_in(session.get("user"), new_password)
+        new_id_token = sign_in_result.get("idToken")
+        if not new_id_token:
+            raise RuntimeError("Firebase did not return an ID token.")
+        expires = timedelta(days=5)
+        firebase_cookie = auth.create_session_cookie(new_id_token, expires_in=expires)
+        cur.execute(
+            """
+            UPDATE users SET must_change_password=FALSE,password_changed_at=NOW(),
+                failed_login_attempts=0,locked_until=NULL,updated_at=NOW()
+            WHERE firebase_uid=%s RETURNING id,email
+            """,
+            (session.get("uid"),),
+        )
+        user_row = cur.fetchone()
+        if not user_row:
+            raise ValueError("Nie znaleziono konta użytkownika.")
+        security_event(
+            cur,
+            user_row[0],
+            user_row[1],
+            "password_changed",
+            session.get("user"),
+        )
+        conn.commit()
+        session["must_change_password"] = False
+        response = make_response(redirect("/?password=changed"))
+        response.set_cookie(
+            "firebase_session",
+            firebase_cookie,
+            max_age=int(expires.total_seconds()),
+            httponly=True,
+            secure=os.environ.get("RENDER", "").lower() == "true",
+            samesite="Lax",
+        )
+        return response
+    except ValueError as exc:
+        conn.rollback()
+        return render_change_password(str(exc), 404)
+    except Exception:
+        conn.rollback()
+        logger.exception("Password change failed.")
+        return render_change_password(
+            "Nie udało się zmienić hasła. Spróbuj ponownie.", 500
+        )
+    finally:
+        conn.close()
 
 
 @app.route('/logout', methods=['POST'])
@@ -2696,7 +3091,7 @@ def require_login_for_private_app():
             return csrf_error()
         return None
 
-    if request.endpoint == "create_session":
+    if request.endpoint in {"create_session", "password_login", "forgot_password"}:
         return validate_csrf()
 
     if request.endpoint == "logout":
@@ -2722,7 +3117,9 @@ def require_login_for_private_app():
             cur = conn.cursor()
             cur.execute(
                 """
-                SELECT role, status, can_import_warehouse, can_import_accounting
+                SELECT role,status,can_import_warehouse,can_import_accounting,
+                       must_change_password,
+                       (locked_until IS NOT NULL AND locked_until>NOW())
                 FROM users
                 WHERE firebase_uid=%s AND lower(email)=lower(%s)
                 """,
@@ -2742,7 +3139,7 @@ def require_login_for_private_app():
                 title="Aplikacja chwilowo niedostępna",
                 message="Nie udało się połączyć z bazą danych. Spróbuj ponownie później.",
             ), 503
-        if account and account[1] == "active":
+        if account and account[1] == "active" and not bool(account[5]):
             session["user"] = email
             session["uid"] = uid
             session["role"] = account[0]
@@ -2752,6 +3149,7 @@ def require_login_for_private_app():
             session["can_import_accounting"] = (
                 account[0] == "admin" or (bool(account[3]) if len(account) > 3 else False)
             )
+            session["must_change_password"] = bool(account[4])
             if request.endpoint == "login":
                 return redirect("/")
         else:
@@ -2771,6 +3169,17 @@ def require_login_for_private_app():
         csrf_failure = validate_csrf()
         if csrf_failure:
             return csrf_failure
+    if session.get("must_change_password") and request.endpoint not in {
+        "change_password_page",
+        "change_password",
+        "logout",
+    }:
+        if request.path.startswith("/api/") or request.is_json:
+            return jsonify({
+                "ok": False,
+                "error": "Przed użyciem aplikacji zmień hasło tymczasowe.",
+            }), 403
+        return redirect("/change-password?required=1")
     required_permission = ENDPOINT_PERMISSIONS.get(request.endpoint)
     if required_permission and not current_user_can(required_permission):
         return "Brak uprawnień", 403
@@ -3003,7 +3412,9 @@ def users():
     cur.execute(
         """
         SELECT id, firebase_uid, first_name, last_name, email, role, status,
-               can_import_warehouse, can_import_accounting
+               can_import_warehouse, can_import_accounting,phone,
+               must_change_password,last_login_at,password_changed_at,created_by,
+               password_reset_by,failed_login_attempts,locked_until
         FROM users ORDER BY lower(last_name), lower(first_name), lower(email)
         """
     )
@@ -3012,16 +3423,40 @@ def users():
     return render_template("users.html", users=users_list, role_labels=SHOP_ROLE_LABELS)
 
 
+@app.route('/admin/security-history')
+@admin_required
+def security_history():
+    conn = db()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT created_at,user_email,event_type,actor_email,details
+        FROM user_security_events ORDER BY created_at DESC,id DESC LIMIT 500
+        """
+    )
+    events = cur.fetchall()
+    conn.close()
+    return render_template("security_history.html", events=events)
+
+
 @app.route('/add_user', methods=['POST'])
 @admin_required
 def add_user():
     email = (request.form.get("email") or "").strip().lower()
     first_name = (request.form.get("first_name") or "").strip()
     last_name = (request.form.get("last_name") or "").strip()
+    phone = (request.form.get("phone") or "").strip()
+    temporary_password = request.form.get("temporary_password") or ""
+    account_active = request.form.get("active") == "on"
     if not email or "@" not in email or len(email) > 254:
         return "Podaj prawidłowy adres e-mail.", 400
     if not first_name or not last_name or len(first_name) > 100 or len(last_name) > 100:
         return "Imię i nazwisko są wymagane (maksymalnie 100 znaków).", 400
+    if len(phone) > 50:
+        return "Numer telefonu może mieć maksymalnie 50 znaków.", 400
+    validation_error = password_validation_error(temporary_password)
+    if validation_error:
+        return validation_error, 400
     role = request.form.get("role", "warehouse")
     if role not in ROLES:
         return "Nieprawidłowa rola.", 400
@@ -3031,17 +3466,14 @@ def add_user():
     created_in_firebase = False
     try:
         try:
-            firebase_user = auth.get_user_by_email(email)
-            firebase_user = auth.update_user(
-                firebase_user.uid,
-                disabled=False,
-                display_name=f"{first_name} {last_name}",
-            )
+            auth.get_user_by_email(email)
+            return "Konto o tym adresie e-mail już istnieje.", 409
         except auth.UserNotFoundError:
             firebase_user = auth.create_user(
                 email=email,
                 display_name=f"{first_name} {last_name}",
-                disabled=False,
+                password=temporary_password,
+                disabled=not account_active,
             )
             created_in_firebase = True
     except Exception:
@@ -3053,17 +3485,44 @@ def add_user():
     try:
         cur.execute(
             """
-            INSERT INTO users(firebase_uid, first_name, last_name, email, role, status)
-            VALUES (%s,%s,%s,%s,%s,'active')
+            INSERT INTO users(
+                firebase_uid,first_name,last_name,email,phone,role,status,
+                must_change_password,created_by
+            )
+            VALUES (%s,%s,%s,%s,%s,%s,%s,TRUE,%s)
             ON CONFLICT (email) DO UPDATE SET
                 firebase_uid=EXCLUDED.firebase_uid,
                 first_name=EXCLUDED.first_name,
                 last_name=EXCLUDED.last_name,
+                phone=EXCLUDED.phone,
                 role=EXCLUDED.role,
-                status='active',
+                status=EXCLUDED.status,
+                must_change_password=TRUE,
+                failed_login_attempts=0,
+                locked_until=NULL,
+                created_by=COALESCE(users.created_by,EXCLUDED.created_by),
                 updated_at=NOW()
+            RETURNING id
             """,
-            (firebase_user.uid, first_name, last_name, email, role),
+            (
+                firebase_user.uid,
+                first_name,
+                last_name,
+                email,
+                phone or None,
+                role,
+                "active" if account_active else "inactive",
+                session.get("user"),
+            ),
+        )
+        user_id = cur.fetchone()[0]
+        security_event(
+            cur,
+            user_id,
+            email,
+            "account_created",
+            session.get("user"),
+            {"role": role, "active": account_active, "temporary_password": True},
         )
         conn.commit()
     except Exception:
@@ -3213,17 +3672,193 @@ def send_firebase_password_reset(email):
 def reset_user_password(user_id):
     conn = db()
     cur = conn.cursor()
-    cur.execute("SELECT email FROM users WHERE id=%s", (user_id,))
+    cur.execute("SELECT email FROM users WHERE id=%s FOR UPDATE", (user_id,))
     row = cur.fetchone()
-    conn.close()
     if not row:
+        conn.close()
         return "Nie znaleziono użytkownika.", 404
     try:
         send_firebase_password_reset(row[0])
+        cur.execute(
+            """
+            UPDATE users SET password_reset_by=%s,updated_at=NOW() WHERE id=%s
+            """,
+            (session.get("user"), user_id),
+        )
+        security_event(
+            cur, user_id, row[0], "password_reset_link_sent", session.get("user")
+        )
+        conn.commit()
     except Exception:
+        conn.rollback()
         logger.exception("Password reset email failed.")
         return "Nie udało się wysłać wiadomości resetującej hasło.", 502
+    finally:
+        conn.close()
     return redirect("/users?reset=sent")
+
+
+@app.route('/users/<int:user_id>/temporary-password', methods=['POST'])
+@admin_required
+@limiter.limit("20 per hour")
+def set_temporary_password(user_id):
+    temporary_password = request.form.get("temporary_password") or ""
+    validation_error = password_validation_error(temporary_password)
+    if validation_error:
+        return validation_error, 400
+    conn = db()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT firebase_uid,email FROM users WHERE id=%s FOR UPDATE",
+            (user_id,),
+        )
+        account = cur.fetchone()
+        if not account:
+            return "Nie znaleziono użytkownika.", 404
+        auth.update_user(account[0], password=temporary_password)
+        auth.revoke_refresh_tokens(account[0])
+        cur.execute(
+            """
+            UPDATE users SET must_change_password=TRUE,password_reset_by=%s,
+                failed_login_attempts=0,locked_until=NULL,updated_at=NOW()
+            WHERE id=%s
+            """,
+            (session.get("user"), user_id),
+        )
+        security_event(
+            cur,
+            user_id,
+            account[1],
+            "temporary_password_set",
+            session.get("user"),
+        )
+        conn.commit()
+        return redirect("/users?temporary=saved")
+    except Exception:
+        conn.rollback()
+        logger.exception("Temporary password reset failed.")
+        return "Nie udało się ustawić hasła tymczasowego.", 502
+    finally:
+        conn.close()
+
+
+@app.route('/users/<int:user_id>/force-password-change', methods=['POST'])
+@admin_required
+def force_password_change(user_id):
+    conn = db()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT firebase_uid,email FROM users WHERE id=%s FOR UPDATE",
+            (user_id,),
+        )
+        account = cur.fetchone()
+        if not account:
+            return "Nie znaleziono użytkownika.", 404
+        auth.revoke_refresh_tokens(account[0])
+        cur.execute(
+            "UPDATE users SET must_change_password=TRUE,updated_at=NOW() WHERE id=%s",
+            (user_id,),
+        )
+        security_event(
+            cur,
+            user_id,
+            account[1],
+            "password_change_forced",
+            session.get("user"),
+        )
+        conn.commit()
+        return redirect("/users?force=saved")
+    except Exception:
+        conn.rollback()
+        logger.exception("Forced password change failed.")
+        return "Nie udało się wymusić zmiany hasła.", 502
+    finally:
+        conn.close()
+
+
+@app.route('/users/<int:user_id>/unlock', methods=['POST'])
+@admin_required
+def unlock_user(user_id):
+    conn = db()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT firebase_uid,email,status FROM users WHERE id=%s FOR UPDATE",
+            (user_id,),
+        )
+        account = cur.fetchone()
+        if not account:
+            return "Nie znaleziono użytkownika.", 404
+        if account[2] == "inactive":
+            return "Najpierw aktywuj konto.", 409
+        auth.update_user(account[0], disabled=False)
+        cur.execute(
+            """
+            UPDATE users SET status='active',failed_login_attempts=0,
+                locked_until=NULL,updated_at=NOW() WHERE id=%s
+            """,
+            (user_id,),
+        )
+        security_event(
+            cur, user_id, account[1], "account_unlocked", session.get("user")
+        )
+        conn.commit()
+        return redirect("/users?unlock=saved")
+    except Exception:
+        conn.rollback()
+        logger.exception("Account unlock failed.")
+        return "Nie udało się odblokować konta.", 502
+    finally:
+        conn.close()
+
+
+@app.route('/users/<int:user_id>/toggle-active', methods=['POST'])
+@admin_required
+def toggle_user_active(user_id):
+    conn = db()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT firebase_uid,email,role,status FROM users WHERE id=%s FOR UPDATE",
+            (user_id,),
+        )
+        account = cur.fetchone()
+        if not account:
+            return "Nie znaleziono użytkownika.", 404
+        uid, email, role, status = account
+        activating = status == "inactive"
+        if not activating and uid == session.get("uid"):
+            return "Nie możesz dezaktywować własnego konta.", 400
+        if not activating and role == "admin" and status == "active":
+            cur.execute("SELECT COUNT(*) FROM users WHERE role='admin' AND status='active'")
+            if cur.fetchone()[0] <= 1:
+                return "Nie można dezaktywować ostatniego administratora.", 400
+        target_status = "active" if activating else "inactive"
+        auth.update_user(uid, disabled=not activating)
+        cur.execute(
+            """
+            UPDATE users SET status=%s,failed_login_attempts=0,locked_until=NULL,
+                updated_at=NOW() WHERE id=%s
+            """,
+            (target_status, user_id),
+        )
+        security_event(
+            cur,
+            user_id,
+            email,
+            "account_activated" if activating else "account_deactivated",
+            session.get("user"),
+        )
+        conn.commit()
+        return redirect("/users?active=saved")
+    except Exception:
+        conn.rollback()
+        logger.exception("Account activation change failed.")
+        return "Nie udało się zmienić aktywności konta.", 502
+    finally:
+        conn.close()
 
 
 @app.route('/users/<int:user_id>/toggle-block', methods=['POST'])
@@ -3240,6 +3875,9 @@ def toggle_user_block(user_id):
         conn.close()
         return "Nie znaleziono użytkownika.", 404
     uid, role, status = row
+    if status == "inactive":
+        conn.close()
+        return "Nieaktywne konto należy najpierw aktywować.", 409
     if uid == session.get("uid"):
         conn.close()
         return "Nie możesz zablokować własnego konta.", 400
@@ -3252,8 +3890,20 @@ def toggle_user_block(user_id):
     try:
         auth.update_user(uid, disabled=(target_status == "blocked"))
         cur.execute(
-            "UPDATE users SET status=%s, updated_at=NOW() WHERE id=%s",
+            """
+            UPDATE users SET status=%s,failed_login_attempts=0,locked_until=NULL,
+                updated_at=NOW() WHERE id=%s
+            """,
             (target_status, user_id),
+        )
+        cur.execute("SELECT email FROM users WHERE id=%s", (user_id,))
+        email_row = cur.fetchone()
+        security_event(
+            cur,
+            user_id,
+            email_row[0] if email_row else "",
+            "account_unblocked" if target_status == "active" else "account_blocked",
+            session.get("user"),
         )
         conn.commit()
     except Exception:

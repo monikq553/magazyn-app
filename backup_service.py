@@ -12,6 +12,7 @@ from psycopg2 import sql
 BACKUP_TABLES = (
     "schema_migrations",
     "users",
+    "user_security_events",
     "products",
     "packages",
     "issue_docs",
@@ -155,6 +156,7 @@ def restore_database(connection, payload):
     insert_order = (
         "schema_migrations",
         "users",
+        "user_security_events",
         "products",
         "issue_docs",
         "costs",

@@ -526,7 +526,9 @@ class InventoryFlowTests(unittest.TestCase):
         executed_sql = " ".join(
             call.args[0] for call in cursor.execute.call_args_list if call.args
         ).lower()
-        self.assertNotIn("password", executed_sql)
+        self.assertNotIn(" password=", executed_sql)
+        self.assertNotIn(" password,", executed_sql)
+        self.assertNotIn("insert into users(password", executed_sql)
 
     def test_render_external_database_url_prefers_internal_network(self):
         external = (
