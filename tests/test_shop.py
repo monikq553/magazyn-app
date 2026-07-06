@@ -56,6 +56,7 @@ class ShopModuleTests(unittest.TestCase):
                 ("order_number", "SK/TEST/42"),
                 ("date", "2026-07-06"),
                 ("customer_name", "Klient Testowy"),
+                ("salesperson_email", "sales@example.com"),
                 ("delivery_address", "ul. Testowa 1"),
                 ("email", "klient@example.com"),
                 ("shipping_cost", "25"),
@@ -76,6 +77,7 @@ class ShopModuleTests(unittest.TestCase):
             with (
                 patch.object(warehouse_app, "db", return_value=connection),
                 patch.object(warehouse_app, "update_shop_stage") as update_stage,
+                patch.object(warehouse_app, "assign_order_salesperson") as assign_salesperson,
             ):
                 response = warehouse_app.shop_create_order()
 
@@ -94,6 +96,9 @@ class ShopModuleTests(unittest.TestCase):
             )
         )
         self.assertEqual(update_stage.call_count, 2)
+        assign_salesperson.assert_called_once_with(
+            cursor, 42, "sales@example.com", "admin@example.com"
+        )
 
     def test_incomplete_order_returns_specific_form_message(self):
         form = MultiDict(

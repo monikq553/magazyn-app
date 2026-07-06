@@ -128,18 +128,20 @@ ALLOWED_ORIGINS = {
     ).split(",")
     if origin.strip()
 }
-ROLES = {"admin", "warehouse", "shop", "accounting"}
+ROLES = {"admin", "warehouse", "shop", "accounting", "sales"}
 ROLE_LABELS = {
     "admin": "Administrator",
     "warehouse": "Magazynier",
     "shop": "Obsługa sklepu internetowego",
     "accounting": "Księgowość",
+    "sales": "Handlowiec",
 }
 ROLE_PERMISSIONS = {
-    "admin": {"dashboard", "inventory", "receive", "issue", "history", "reports", "users", "backups", "shop", "accounting"},
-    "warehouse": {"dashboard", "inventory", "receive", "issue", "history", "shop"},
+    "admin": {"dashboard", "inventory", "inventory_manage", "receive", "issue", "history", "reports", "users", "backups", "shop", "accounting"},
+    "warehouse": {"dashboard", "inventory", "inventory_manage", "receive", "issue", "history", "shop"},
     "shop": {"dashboard", "inventory", "shop", "history"},
     "accounting": {"dashboard", "history", "reports", "accounting"},
+    "sales": {"dashboard", "inventory", "shop"},
 }
 ENDPOINT_PERMISSIONS = {
     "dashboard_page_view": "dashboard",
@@ -147,16 +149,16 @@ ENDPOINT_PERMISSIONS = {
     "magazyn": "inventory",
     "packages_for_product": "inventory",
     "package_lookup": "inventory",
-    "add_product": "inventory",
-    "costs": "inventory",
-    "add_cost": "inventory",
+    "add_product": "inventory_manage",
+    "costs": "inventory_manage",
+    "add_cost": "inventory_manage",
     "przyjecie": "receive",
     "receive_doc": "receive",
     "import_excel": "receive",
     "wydanie": "issue",
     "issue_doc": "issue",
-    "inwestycja_suwaj_page_view": "inventory",
-    "inwestycja_suwaj_magazyn": "inventory",
+    "inwestycja_suwaj_page_view": "inventory_manage",
+    "inwestycja_suwaj_magazyn": "inventory_manage",
     "inwestycja_suwaj_przyjecie": "receive",
     "inwestycja_suwaj_receive_doc": "receive",
     "inwestycja_suwaj_wydanie": "issue",
@@ -431,7 +433,8 @@ def run_db_migrations():
         unit TEXT,
         warehouse TEXT,
         price_netto REAL DEFAULT 0,
-        vat REAL DEFAULT 0
+        vat REAL DEFAULT 0,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
     """)
 
@@ -620,14 +623,14 @@ def run_db_migrations():
                 FOREIGN KEY (package_id) REFERENCES packages(id) ON DELETE SET NULL NOT VALID;
             END IF;
             UPDATE users SET role='warehouse'
-            WHERE role IS NULL OR role NOT IN ('admin', 'warehouse', 'shop', 'accounting');
+            WHERE role IS NULL OR role NOT IN ('admin', 'warehouse', 'shop', 'accounting', 'sales');
             UPDATE users SET status='active'
             WHERE status IS NULL OR status NOT IN ('active', 'blocked');
             IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname='users_role_valid') THEN
                 ALTER TABLE users DROP CONSTRAINT users_role_valid;
             END IF;
             ALTER TABLE users
-            ADD CONSTRAINT users_role_valid CHECK (role IN ('admin', 'warehouse', 'shop', 'accounting'));
+            ADD CONSTRAINT users_role_valid CHECK (role IN ('admin', 'warehouse', 'shop', 'accounting', 'sales'));
             IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='users_status_valid') THEN
                 ALTER TABLE users
                 ADD CONSTRAINT users_status_valid CHECK (status IN ('active', 'blocked'));
@@ -666,7 +669,7 @@ def run_db_migrations():
     cur.execute("""
         ALTER TABLE users
         ADD CONSTRAINT users_role_valid
-        CHECK (role IN ('admin', 'warehouse', 'shop', 'accounting'))
+        CHECK (role IN ('admin', 'warehouse', 'shop', 'accounting', 'sales'))
     """)
     cur.execute("""
     CREATE TABLE IF NOT EXISTS shop_orders(
@@ -688,6 +691,10 @@ def run_db_migrations():
         stages JSONB NOT NULL DEFAULT '{}'::jsonb,
         document_confirmed BOOLEAN NOT NULL DEFAULT FALSE,
         created_by TEXT,
+        salesperson_email TEXT,
+        salesperson_name TEXT,
+        salesperson_assigned_by TEXT,
+        salesperson_assigned_at TIMESTAMPTZ,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
@@ -736,6 +743,10 @@ def run_db_migrations():
             ADD COLUMN IF NOT EXISTS stages JSONB DEFAULT '{}'::jsonb,
             ADD COLUMN IF NOT EXISTS document_confirmed BOOLEAN DEFAULT FALSE,
             ADD COLUMN IF NOT EXISTS created_by TEXT,
+            ADD COLUMN IF NOT EXISTS salesperson_email TEXT,
+            ADD COLUMN IF NOT EXISTS salesperson_name TEXT,
+            ADD COLUMN IF NOT EXISTS salesperson_assigned_by TEXT,
+            ADD COLUMN IF NOT EXISTS salesperson_assigned_at TIMESTAMPTZ,
             ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW(),
             ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW()
     """)
@@ -813,6 +824,18 @@ def run_db_migrations():
     """)
     cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_shop_orders_order_number ON shop_orders(order_number)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_shop_orders_stage ON shop_orders(stage)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_shop_orders_salesperson ON shop_orders(lower(salesperson_email))")
+    cur.execute("""
+        UPDATE shop_orders o
+        SET salesperson_email=u.email,
+            salesperson_name=trim(concat_ws(' ',u.first_name,u.last_name)),
+            salesperson_assigned_by=COALESCE(o.salesperson_assigned_by,'migracja'),
+            salesperson_assigned_at=COALESCE(o.salesperson_assigned_at,NOW())
+        FROM users u
+        WHERE o.salesperson_email IS NULL
+          AND u.role='sales'
+          AND lower(u.email)=lower(COALESCE(o.created_by,''))
+    """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_shop_order_items_order ON shop_order_items(order_id)")
     cur.execute("""
     CREATE TABLE IF NOT EXISTS shop_order_history(
@@ -830,6 +853,7 @@ def run_db_migrations():
         order_id INTEGER REFERENCES shop_orders(id) ON DELETE CASCADE,
         type TEXT NOT NULL,
         message TEXT NOT NULL,
+        recipient_email TEXT,
         resolved BOOLEAN NOT NULL DEFAULT FALSE,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
@@ -877,6 +901,36 @@ def run_db_migrations():
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
     """)
+    cur.execute("""
+        UPDATE shop_orders o
+        SET salesperson_email=u.email,
+            salesperson_name=trim(concat_ws(' ',u.first_name,u.last_name)),
+            salesperson_assigned_by=COALESCE(o.salesperson_assigned_by,'migracja'),
+            salesperson_assigned_at=COALESCE(o.salesperson_assigned_at,NOW())
+        FROM shop_accounting a,users u
+        WHERE a.order_id=o.id
+          AND o.salesperson_email IS NULL
+          AND u.role='sales'
+          AND (
+              lower(u.email)=lower(COALESCE(a.salesperson,''))
+              OR lower(trim(concat_ws(' ',u.first_name,u.last_name)))=
+                 lower(COALESCE(a.salesperson,''))
+          )
+    """)
+    cur.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()")
+    cur.execute("ALTER TABLE shop_notifications ADD COLUMN IF NOT EXISTS recipient_email TEXT")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_shop_notifications_recipient ON shop_notifications(lower(recipient_email),resolved,created_at DESC)")
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS shop_order_salesperson_history(
+        id SERIAL PRIMARY KEY,
+        order_id INTEGER NOT NULL REFERENCES shop_orders(id) ON DELETE CASCADE,
+        previous_salesperson TEXT,
+        new_salesperson TEXT,
+        changed_by TEXT NOT NULL,
+        changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_shop_salesperson_history_order ON shop_order_salesperson_history(order_id,changed_at DESC)")
     cur.execute("""
         UPDATE shop_orders o
         SET stages=jsonb_build_object(
@@ -1250,6 +1304,7 @@ SHOP_STATUS_FLOW = [
 SHOP_ROLE_LABELS = {
     "admin": "Administrator", "employee": "Pracownik", "warehouse": "Magazynier",
     "shop": "Obsługa sklepu internetowego", "accounting": "Księgowość",
+    "sales": "Handlowiec",
 }
 
 ACCOUNTING_PAYMENT_METHODS = ["Przelew", "Gotówka", "Karta", "BLIK", "Autopay", "Pobranie", "Inny"]
@@ -1273,7 +1328,7 @@ ACCOUNTING_FIELD_LABELS = {
 }
 
 SHOP_ORDER_STAGES = (
-    ("order_accepted", "Zamówienie przyjęte", "shop_edit"),
+    ("order_accepted", "Zamówienie przyjęte", "sales"),
     ("stock_checked", "Towar sprawdzony w magazynie", "warehouse"),
     ("stock_reserved", "Towar zarezerwowany", "warehouse"),
     ("payment_checked", "Płatność sprawdzona", "accounting"),
@@ -1282,7 +1337,7 @@ SHOP_ORDER_STAGES = (
     ("invoice_issued", "Faktura wystawiona", "accounting"),
     ("receipt_issued", "Paragon wystawiony", "accounting"),
     ("sales_document_generated", "Dokument sprzedaży wygenerowany", "accounting"),
-    ("document_sent", "Dokument wysłany do klienta", "shop_edit"),
+    ("document_sent", "Dokument wysłany do klienta", "sales"),
     ("sent_to_packing", "Przekazane do pakowania", "warehouse"),
     ("packed", "Spakowane", "warehouse"),
     ("shipped", "Wysłane", "warehouse"),
@@ -1362,7 +1417,7 @@ def sync_accounting_payment_status(cur, order_id):
 
 
 def current_user_role():
-    return session.get("role", "employee")
+    return session.get("role", "employee") if has_request_context() else "employee"
 
 
 def can_shop(action):
@@ -1371,9 +1426,11 @@ def can_shop(action):
         return True
     return role in {
         "shop_edit": {"shop"},
+        "sales": {"shop", "sales"},
+        "create": {"shop", "sales"},
         "warehouse": {"warehouse"},
         "accounting": {"accounting"},
-        "view": {"shop", "warehouse", "accounting"},
+        "view": {"shop", "warehouse", "accounting", "sales"},
     }.get(action, set())
 
 
@@ -1392,6 +1449,96 @@ def shop_history(cur, order_id, action, details=""):
         """,
         (order_id, actor, action, details),
     )
+
+
+def sales_can_access_order(cur, order_id):
+    if current_user_role() != "sales":
+        return True
+    cur.execute(
+        """
+        SELECT 1 FROM shop_orders
+        WHERE id=%s AND lower(COALESCE(salesperson_email,''))=lower(%s)
+        """,
+        (order_id, session.get("user", "")),
+    )
+    return cur.fetchone() is not None
+
+
+def sales_order_access_error(cur, order_id):
+    if sales_can_access_order(cur, order_id):
+        return None
+    return "Handlowiec ma dostęp wyłącznie do własnych zamówień.", 403
+
+
+def notify_order_salesperson(cur, order_id, notification_type, message):
+    cur.execute(
+        "SELECT salesperson_email FROM shop_orders WHERE id=%s",
+        (order_id,),
+    )
+    row = cur.fetchone()
+    recipient = (row[0] or "").strip().lower() if row else ""
+    if recipient:
+        cur.execute(
+            """
+            INSERT INTO shop_notifications(order_id,type,message,recipient_email)
+            VALUES (%s,%s,%s,%s)
+            """,
+            (order_id, notification_type, message, recipient),
+        )
+
+
+def assign_order_salesperson(cur, order_id, email, changed_by):
+    normalized = (email or "").strip().lower()
+    cur.execute(
+        "SELECT salesperson_email FROM shop_orders WHERE id=%s FOR UPDATE",
+        (order_id,),
+    )
+    current = cur.fetchone()
+    if not current:
+        raise ValueError("Nie znaleziono zamówienia.")
+    previous = (current[0] or "").strip().lower()
+    if normalized:
+        cur.execute(
+            """
+            SELECT trim(concat_ws(' ',first_name,last_name)),email
+            FROM users
+            WHERE lower(email)=lower(%s) AND role='sales' AND status='active'
+            """,
+            (normalized,),
+        )
+        salesperson = cur.fetchone()
+        if not salesperson:
+            raise ValueError("Wybrany handlowiec nie istnieje lub jest nieaktywny.")
+        name = salesperson[0] or salesperson[1]
+        normalized = salesperson[1].strip().lower()
+    else:
+        name = None
+    if previous == normalized:
+        return False
+    cur.execute(
+        """
+        UPDATE shop_orders
+        SET salesperson_email=%s,salesperson_name=%s,salesperson_assigned_by=%s,
+            salesperson_assigned_at=NOW(),updated_at=NOW()
+        WHERE id=%s
+        """,
+        (normalized or None, name, changed_by, order_id),
+    )
+    cur.execute(
+        """
+        INSERT INTO shop_order_salesperson_history(
+            order_id,previous_salesperson,new_salesperson,changed_by
+        ) VALUES (%s,%s,%s,%s)
+        """,
+        (order_id, previous or None, normalized or None, changed_by),
+    )
+    shop_history(
+        cur,
+        order_id,
+        "zmieniono handlowca",
+        f"{previous or 'brak'} → {normalized or 'brak'}",
+    )
+    return True
 
 
 def shop_stage_can_edit(stage_key):
@@ -1573,6 +1720,22 @@ def update_shop_stage(cur, order_id, stage_key, new_value, actor, tracking_numbe
         "zmieniono etap",
         f"{label}: {'tak' if previous else 'nie'} → {'tak' if new_value else 'nie'}",
     )
+    if new_value and stage_key in {
+        "paid", "invoice_issued", "receipt_issued", "shipped", "cancelled"
+    }:
+        notify_order_salesperson(
+            cur,
+            order_id,
+            stage_key,
+            f"{label}: zamówienie ma teraz status „{status}”.",
+        )
+    elif status != order[0]:
+        notify_order_salesperson(
+            cur,
+            order_id,
+            "zmiana statusu",
+            f"Status zamówienia zmieniono: {order[0]} → {status}.",
+        )
     return previous, new_value
 
 
@@ -2738,6 +2901,8 @@ def handle_unexpected_error(error):
 @app.route('/')
 @login_required
 def home():
+    if current_user_role() == "sales":
+        return redirect("/dashboard")
     return render_template("home.html")
 
 
@@ -2746,6 +2911,63 @@ def home():
 def dashboard_page():
     conn = db()
     cur = conn.cursor()
+    if current_user_role() == "sales":
+        email = session.get("user", "")
+        cur.execute(
+            """
+            SELECT COUNT(*),
+                   COUNT(*) FILTER (WHERE status IN ('Nowe zamówienie','Przyjęte','Oczekuje na płatność')),
+                   COUNT(*) FILTER (WHERE status NOT IN ('Nowe zamówienie','Przyjęte','Oczekuje na płatność','Zakończone','Anulowane')),
+                   COUNT(*) FILTER (WHERE status='Zakończone')
+            FROM shop_orders
+            WHERE lower(COALESCE(salesperson_email,''))=lower(%s)
+            """,
+            (email,),
+        )
+        order_counts = cur.fetchone()
+        cur.execute(
+            """
+            SELECT id,order_number,order_date,customer_name,status
+            FROM shop_orders
+            WHERE lower(COALESCE(salesperson_email,''))=lower(%s)
+            ORDER BY updated_at DESC,id DESC LIMIT 10
+            """,
+            (email,),
+        )
+        my_orders = cur.fetchall()
+        cur.execute(
+            """
+            SELECT id,name,qty,unit,warehouse
+            FROM products WHERE qty<=5 ORDER BY qty,lower(name) LIMIT 10
+            """
+        )
+        low_stock = cur.fetchall()
+        cur.execute(
+            """
+            SELECT id,name,qty,unit,warehouse
+            FROM products ORDER BY created_at DESC,id DESC LIMIT 10
+            """
+        )
+        recent_products = cur.fetchall()
+        cur.execute(
+            """
+            SELECT type,message,created_at,order_id
+            FROM shop_notifications
+            WHERE resolved=FALSE AND lower(COALESCE(recipient_email,''))=lower(%s)
+            ORDER BY created_at DESC,id DESC LIMIT 12
+            """,
+            (email,),
+        )
+        notifications = cur.fetchall()
+        conn.close()
+        return render_template(
+            "sales_dashboard.html",
+            order_counts=order_counts,
+            my_orders=my_orders,
+            low_stock=low_stock,
+            recent_products=recent_products,
+            notifications=notifications,
+        )
     cur.execute("SELECT COUNT(*), COALESCE(SUM(qty), 0) FROM products")
     total_products, total_qty = cur.fetchone()
     cur.execute("SELECT name, qty FROM products ORDER BY qty DESC LIMIT 10")
@@ -3055,14 +3277,39 @@ def magazyn(name):
     conn = db()
     cur = conn.cursor()
 
-    if name == "Wszystko":
+    search_query = (request.args.get("q") or "").strip()
+    if name == "Wszystko" and search_query:
+        like = f"%{search_query.lower()}%"
+        cur.execute(
+            """
+            SELECT DISTINCT p.* FROM products p
+            LEFT JOIN packages pk ON pk.product_id=p.id
+            WHERE lower(p.name) LIKE %s OR lower(COALESCE(pk.number,'')) LIKE %s
+            ORDER BY p.warehouse,lower(p.name),p.id
+            """,
+            (like, like),
+        )
+    elif name == "Wszystko":
         cur.execute("SELECT * FROM products ORDER BY warehouse, lower(name), id")
+    elif search_query:
+        like = f"%{search_query.lower()}%"
+        cur.execute(
+            """
+            SELECT DISTINCT p.* FROM products p
+            LEFT JOIN packages pk ON pk.product_id=p.id
+            WHERE p.warehouse=%s
+              AND (lower(p.name) LIKE %s OR lower(COALESCE(pk.number,'')) LIKE %s)
+            ORDER BY lower(p.name),p.id
+            """,
+            (name, like, like),
+        )
     else:
         cur.execute("SELECT * FROM products WHERE warehouse=%s ORDER BY lower(name), id", (name,))
 
     products = cur.fetchall()
     product_ids = [row[0] for row in products]
     package_modes = {}
+    reservations = {}
     if product_ids:
         cur.execute(
             """
@@ -3086,6 +3333,18 @@ def magazyn(name):
                 "unnumbered" if has_unnumbered else
                 "empty"
             )
+        cur.execute(
+            """
+            SELECT i.product_id,COALESCE(SUM(i.reserved_qty-i.issued_qty),0)
+            FROM shop_order_items i
+            JOIN shop_orders o ON o.id=i.order_id
+            WHERE i.product_id=ANY(%s)
+              AND o.status NOT IN ('Zakończone','Anulowane')
+            GROUP BY i.product_id
+            """,
+            (product_ids,),
+        )
+        reservations = {row[0]: max(float(row[1] or 0), 0) for row in cur.fetchall()}
     conn.close()
 
     return render_template(
@@ -3095,6 +3354,8 @@ def magazyn(name):
         package_modes=package_modes,
         warehouses=WAREHOUSES,
         units=sorted(UNITS),
+        search_query=search_query,
+        reservations=reservations,
     )
 
 
@@ -3161,7 +3422,7 @@ def package_lookup():
 
 
 @app.route('/add_product', methods=['POST'])
-@login_required
+@permission_required("inventory_manage")
 def add_product():
     name = (request.form.get("name") or "").strip()
     unit = (request.form.get("unit") or "").strip()
@@ -3931,8 +4192,8 @@ def receive_doc():
 
         # ✅ stan +
         cur.execute("""
-            UPDATE products 
-            SET qty = qty + %s 
+            UPDATE products
+            SET qty = qty + %s
             WHERE id=%s AND warehouse=%s
         """, (qty, pid, wh))
 
@@ -5071,7 +5332,7 @@ def apply_import_accounting(cur, row, data):
 @app.route('/kontrahenci')
 @login_required
 def contractors_page():
-    if session.get("role") not in {"admin", "warehouse", "accounting"}:
+    if session.get("role") not in {"admin", "warehouse", "accounting", "sales"}:
         return "Brak uprawnień.", 403
     conn = db()
     cur = conn.cursor()
@@ -5089,7 +5350,7 @@ def contractors_page():
 @app.route('/kontrahenci/<int:contractor_id>/edit', methods=['POST'])
 @login_required
 def edit_contractor(contractor_id):
-    if session.get("role") not in {"admin", "warehouse", "accounting"}:
+    if session.get("role") not in {"admin", "warehouse", "accounting", "sales"}:
         return "Brak uprawnień.", 403
     name = (request.form.get("name") or "").strip()
     if not name or len(name) > 200:
@@ -5120,6 +5381,41 @@ def edit_contractor(contractor_id):
         conn.rollback()
         logger.exception("Contractor update failed.")
         return "Nie udało się zaktualizować kontrahenta.", 500
+    finally:
+        conn.close()
+
+
+@app.route('/kontrahenci/add', methods=['POST'])
+@login_required
+def add_contractor():
+    if session.get("role") not in {"admin", "warehouse", "accounting", "sales"}:
+        return "Brak uprawnień.", 403
+    name = (request.form.get("name") or "").strip()
+    if not name or len(name) > 200:
+        return "Nazwa kontrahenta jest wymagana i może mieć maksymalnie 200 znaków.", 400
+    values = (
+        name,
+        (request.form.get("nip") or "").strip()[:30] or None,
+        (request.form.get("email") or "").strip()[:254] or None,
+        (request.form.get("phone") or "").strip()[:50] or None,
+        (request.form.get("address") or "").strip()[:500] or None,
+    )
+    conn = db()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            INSERT INTO contractors(name,nip,email,phone,address)
+            VALUES (%s,%s,%s,%s,%s)
+            """,
+            values,
+        )
+        conn.commit()
+        return redirect("/kontrahenci")
+    except Exception:
+        conn.rollback()
+        logger.exception("Contractor creation failed.")
+        return "Nie udało się dodać kontrahenta.", 500
     finally:
         conn.close()
 
@@ -5208,7 +5504,7 @@ def general_import_upload():
 
 
 @app.route('/products/<int:product_id>/edit', methods=['POST'])
-@permission_required("inventory")
+@permission_required("inventory_manage")
 def edit_product(product_id):
     name = (request.form.get("name") or "").strip()
     unit = (request.form.get("unit") or "").strip()
@@ -5276,7 +5572,7 @@ def edit_product(product_id):
 
 
 @app.route('/packages/<int:package_id>/edit', methods=['POST'])
-@permission_required("inventory")
+@permission_required("inventory_manage")
 def edit_package(package_id):
     number = (request.form.get("number") or "").strip()
     if not number or len(number) > 100:
@@ -6583,8 +6879,8 @@ def issue_doc():
 
         # ✅ stan -
         cur.execute("""
-            UPDATE products 
-            SET qty = qty - %s 
+            UPDATE products
+            SET qty = qty - %s
             WHERE id=%s AND warehouse=%s AND qty >= %s
         """, (qty, pid, wh, qty))
         if cur.rowcount == 0:
@@ -7267,6 +7563,9 @@ def shop_dashboard_data(cur, filters=None):
     q = (filters.get("q") or "").strip()
     params = []
     where = []
+    if current_user_role() == "sales":
+        where.append("lower(COALESCE(o.salesperson_email,''))=lower(%s)")
+        params.append(session.get("user", ""))
     if q:
         like = f"%{q.lower()}%"
         where.append("(lower(o.order_number) LIKE %s OR lower(o.customer_name) LIKE %s OR lower(COALESCE(o.tracking_number,'')) LIKE %s OR lower(COALESCE(o.sales_document_number,'')) LIKE %s OR EXISTS (SELECT 1 FROM shop_order_items i WHERE i.order_id=o.id AND lower(i.product_name) LIKE %s))")
@@ -7278,8 +7577,13 @@ def shop_dashboard_data(cur, filters=None):
         where.append("lower(o.customer_name) LIKE %s")
         params.append(f"%{filters['client'].lower()}%")
     if filters.get("salesperson"):
-        where.append("lower(COALESCE(a.salesperson,'')) LIKE %s")
-        params.append(f"%{filters['salesperson'].lower()}%")
+        where.append(
+            "(lower(COALESCE(o.salesperson_name,'')) LIKE %s "
+            "OR lower(COALESCE(o.salesperson_email,'')) LIKE %s "
+            "OR lower(COALESCE(a.salesperson,'')) LIKE %s)"
+        )
+        salesperson_like = f"%{filters['salesperson'].lower()}%"
+        params.extend([salesperson_like] * 3)
     if filters.get("date"):
         where.append("o.order_date=%s")
         params.append(filters["date"])
@@ -7304,7 +7608,8 @@ def shop_dashboard_data(cur, filters=None):
                sd.id,sd.document_number,o.stages,
                COALESCE(a.invoice_issued,FALSE),
                COALESCE(a.receipt_issued,FALSE),
-               COALESCE(a.paid,FALSE),a.salesperson
+               COALESCE(a.paid,FALSE),
+               COALESCE(o.salesperson_name,o.salesperson_email,a.salesperson)
         FROM shop_orders o
         LEFT JOIN shop_order_items i ON i.order_id=o.id
         LEFT JOIN shop_sales_documents sd ON sd.order_id=o.id
@@ -7316,7 +7621,22 @@ def shop_dashboard_data(cur, filters=None):
         tuple(params),
     )
     orders = cur.fetchall()
-    cur.execute("SELECT type,message,created_at FROM shop_notifications WHERE resolved=FALSE ORDER BY created_at DESC LIMIT 8")
+    if current_user_role() == "sales":
+        cur.execute(
+            """
+            SELECT type,message,created_at FROM shop_notifications
+            WHERE resolved=FALSE AND lower(COALESCE(recipient_email,''))=lower(%s)
+            ORDER BY created_at DESC LIMIT 8
+            """,
+            (session.get("user", ""),),
+        )
+    else:
+        cur.execute(
+            """
+            SELECT type,message,created_at FROM shop_notifications
+            WHERE resolved=FALSE ORDER BY created_at DESC LIMIT 8
+            """
+        )
     notifications = cur.fetchall()
     cur.execute(
         f"""
@@ -7369,6 +7689,14 @@ def render_shop_dashboard(form_error=None, status_code=200, form_data=None):
     cur = conn.cursor()
     try:
         orders, notifications, reports, products = shop_dashboard_data(cur, filters)
+        cur.execute(
+            """
+            SELECT email,trim(concat_ws(' ',first_name,last_name))
+            FROM users WHERE role='sales' AND status='active'
+            ORDER BY lower(last_name),lower(first_name),lower(email)
+            """
+        )
+        salespeople = cur.fetchall()
     finally:
         conn.close()
     return (
@@ -7384,6 +7712,7 @@ def render_shop_dashboard(form_error=None, status_code=200, form_data=None):
             filters=filters,
             form_error=form_error,
             form_data=form_data,
+            salespeople=salespeople,
         ),
         status_code,
     )
@@ -7392,7 +7721,7 @@ def render_shop_dashboard(form_error=None, status_code=200, form_data=None):
 @app.route('/sklep/orders', methods=['POST'])
 @login_required
 def shop_create_order():
-    denied = require_shop_permission("shop_edit")
+    denied = require_shop_permission("create")
     if denied: return denied
     product_ids = request.form.getlist("product_id")
     qtys = request.form.getlist("qty")
@@ -7442,6 +7771,13 @@ def shop_create_order():
             raise ValueError("Wybierz prawidłowy sposób płatności.")
         if payment_status not in {"Oczekuje na płatność", "Opłacone"}:
             raise ValueError("Wybierz prawidłowy status płatności.")
+        salesperson_email = (
+            session.get("user", "")
+            if current_user_role() == "sales"
+            else (request.form.get("salesperson_email") or "").strip().lower()
+        )
+        if not salesperson_email:
+            raise ValueError("Wybierz handlowca prowadzącego zamówienie.")
         order_date = normalized_document_date(request.form.get("date"))
         shipping = parse_nonnegative_number(
             request.form.get("shipping_cost"), "Koszt wysyłki"
@@ -7480,6 +7816,13 @@ def shop_create_order():
         )
         order_id = cur.fetchone()[0]
         shop_history(cur, order_id, "utworzono zamówienie", order_number)
+        if salesperson_email:
+            assign_order_salesperson(
+                cur,
+                order_id,
+                salesperson_email,
+                session.get("user", "system"),
+            )
         lacking = []
         for pid, qty in prepared_items:
             cur.execute("SELECT id,name,qty,warehouse,price_netto,vat FROM products WHERE id=%s FOR UPDATE", (pid,))
@@ -7524,7 +7867,9 @@ def shop_create_order():
             session.get("user", "system"),
         )
         if lacking:
-            cur.execute("INSERT INTO shop_notifications(order_id,type,message) VALUES (%s,'brak towaru',%s)", (order_id, "Brak towaru: "+", ".join(lacking)))
+            message = "Brak towaru: " + ", ".join(lacking)
+            cur.execute("INSERT INTO shop_notifications(order_id,type,message) VALUES (%s,'brak towaru',%s)", (order_id, message))
+            notify_order_salesperson(cur, order_id, "brak towaru", message)
         else:
             cur.execute("UPDATE shop_orders SET status='Towar zarezerwowany' WHERE id=%s", (order_id,))
             update_shop_stage(
@@ -7584,7 +7929,8 @@ def shop_order_detail(order_id):
         SELECT id,order_number,order_date,customer_name,delivery_address,phone,email,
                shipping_cost,payment_method,payment_status,status,sales_document_number,
                tracking_number,notes,nip,document_confirmed,created_by,created_at,updated_at,
-               stages
+               stages,salesperson_email,salesperson_name,salesperson_assigned_by,
+               salesperson_assigned_at
         FROM shop_orders WHERE id=%s
         """,
         (order_id,),
@@ -7593,6 +7939,10 @@ def shop_order_detail(order_id):
     if not order:
         conn.close()
         return "Nie znaleziono zamówienia.", 404
+    denied = sales_order_access_error(cur, order_id)
+    if denied:
+        conn.close()
+        return denied
     cur.execute(
         """
         SELECT id,order_id,product_id,product_name,qty,price_netto,price_brutto,vat,
@@ -7617,6 +7967,30 @@ def shop_order_detail(order_id):
         (order_id,),
     )
     stage_history = cur.fetchall()
+    cur.execute(
+        """
+        SELECT previous_salesperson,new_salesperson,changed_by,changed_at
+        FROM shop_order_salesperson_history
+        WHERE order_id=%s ORDER BY changed_at DESC,id DESC
+        """,
+        (order_id,),
+    )
+    salesperson_history = cur.fetchall()
+    cur.execute(
+        """
+        SELECT email,trim(concat_ws(' ',first_name,last_name))
+        FROM users WHERE role='sales' AND status='active'
+        ORDER BY lower(last_name),lower(first_name),lower(email)
+        """
+    )
+    salespeople = cur.fetchall()
+    cur.execute(
+        """
+        SELECT id,name,qty,unit,warehouse
+        FROM products ORDER BY warehouse,lower(name),id
+        """
+    )
+    products = cur.fetchall()
     conn.close()
     stages = shop_stage_dict(order[19])
     stage_rows = [
@@ -7641,7 +8015,185 @@ def shop_order_detail(order_id):
         accounting=accounting,
         payment_methods=ACCOUNTING_PAYMENT_METHODS,
         can_ship=order_can_be_shipped(accounting),
+        salesperson_history=salesperson_history,
+        salespeople=salespeople,
+        products=products,
+        can_edit_order=(
+            not order[15]
+            and (
+                current_user_role() in {"admin", "shop"}
+                or (
+                    current_user_role() == "sales"
+                    and str(order[20] or "").casefold()
+                    == str(session.get("user") or "").casefold()
+                )
+            )
+        ),
     )
+
+
+@app.route('/sklep/orders/<int:order_id>/edit', methods=['POST'])
+@login_required
+def shop_edit_order(order_id):
+    if current_user_role() not in {"admin", "shop", "sales"}:
+        return "Brak uprawnień do edycji zamówienia.", 403
+    product_ids = request.form.getlist("product_id")
+    qtys = request.form.getlist("qty")
+    try:
+        items = []
+        for index in range(max(len(product_ids), len(qtys))):
+            pid_raw = form_value(product_ids, index).strip()
+            qty_raw = form_value(qtys, index).strip()
+            if not pid_raw and not qty_raw:
+                continue
+            if not pid_raw or not qty_raw:
+                raise ValueError(f"Pozycja {index + 1}: wybierz produkt i podaj ilość.")
+            items.append((int(pid_raw), parse_positive_number(qty_raw)))
+        if not items:
+            raise ValueError("Dodaj co najmniej jeden produkt.")
+        customer_name = (request.form.get("customer_name") or "").strip()
+        delivery_address = (request.form.get("delivery_address") or "").strip()
+        if not customer_name or len(customer_name) > 200:
+            raise ValueError("Podaj prawidłową nazwę klienta.")
+        if not delivery_address or len(delivery_address) > 500:
+            raise ValueError("Podaj prawidłowy adres dostawy.")
+    except (TypeError, ValueError) as exc:
+        return str(exc), 400
+
+    conn = db()
+    cur = conn.cursor()
+    try:
+        denied = sales_order_access_error(cur, order_id)
+        if denied:
+            return denied
+        cur.execute(
+            "SELECT document_confirmed FROM shop_orders WHERE id=%s FOR UPDATE",
+            (order_id,),
+        )
+        order = cur.fetchone()
+        if not order:
+            return "Nie znaleziono zamówienia.", 404
+        if order[0]:
+            return "Zatwierdzonego zamówienia nie można już edytować.", 409
+        cur.execute("DELETE FROM shop_order_items WHERE order_id=%s", (order_id,))
+        lacking = []
+        for product_id, qty in items:
+            cur.execute(
+                """
+                SELECT id,name,qty,warehouse,price_netto,vat
+                FROM products WHERE id=%s
+                """,
+                (product_id,),
+            )
+            product = cur.fetchone()
+            if not product:
+                raise ValueError("Wybrany produkt nie istnieje.")
+            cur.execute(
+                """
+                SELECT COALESCE(SUM(i.reserved_qty-i.issued_qty),0)
+                FROM shop_order_items i
+                JOIN shop_orders o ON o.id=i.order_id
+                WHERE i.product_id=%s AND i.order_id<>%s
+                  AND o.status NOT IN ('Anulowane','Zakończone')
+                """,
+                (product_id, order_id),
+            )
+            available = float(product[2] or 0) - float(cur.fetchone()[0] or 0)
+            reserved = qty if available + 1e-9 >= qty else 0
+            if not reserved:
+                lacking.append(product[1])
+            net = float(product[4] or 0)
+            vat = float(product[5] or 0)
+            cur.execute(
+                """
+                INSERT INTO shop_order_items(
+                    order_id,product_id,product_name,qty,price_netto,price_brutto,
+                    vat,warehouse,reserved_qty
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                """,
+                (
+                    order_id, product_id, product[1], qty, net,
+                    net * (1 + vat / 100), vat, product[3], reserved,
+                ),
+            )
+        cur.execute(
+            """
+            UPDATE shop_orders
+            SET customer_name=%s,delivery_address=%s,phone=%s,email=%s,nip=%s,
+                notes=%s,updated_at=NOW()
+            WHERE id=%s
+            """,
+            (
+                customer_name, delivery_address,
+                (request.form.get("phone") or "").strip()[:50],
+                (request.form.get("email") or "").strip()[:254],
+                (request.form.get("nip") or "").strip()[:30],
+                (request.form.get("notes") or "").strip()[:2000],
+                order_id,
+            ),
+        )
+        shop_history(cur, order_id, "edytowano zamówienie", "Zmieniono dane lub pozycje.")
+        if lacking:
+            notify_order_salesperson(
+                cur,
+                order_id,
+                "brak towaru",
+                "Brak wystarczającego stanu: " + ", ".join(lacking),
+            )
+        ensure_shop_accounting_row(cur, order_id)
+        cur.execute(
+            """
+            UPDATE shop_accounting a
+            SET amount_due=(
+                SELECT COALESCE(SUM(i.qty*i.price_brutto),0)+o.shipping_cost
+                FROM shop_orders o
+                LEFT JOIN shop_order_items i ON i.order_id=o.id
+                WHERE o.id=%s GROUP BY o.id
+            ),updated_at=NOW()
+            WHERE a.order_id=%s
+            """,
+            (order_id, order_id),
+        )
+        conn.commit()
+        cache.clear()
+        return redirect(f"/sklep/orders/{order_id}?edited=1")
+    except ValueError as exc:
+        conn.rollback()
+        return str(exc), 400
+    except Exception:
+        conn.rollback()
+        logger.exception("Shop order edit failed.")
+        return "Nie udało się zapisać zmian zamówienia.", 500
+    finally:
+        conn.close()
+
+
+@app.route('/sklep/orders/<int:order_id>/salesperson', methods=['POST'])
+@login_required
+def shop_assign_salesperson(order_id):
+    if current_user_role() not in {"admin", "shop"}:
+        return "Brak uprawnień do przypisywania handlowca.", 403
+    conn = db()
+    cur = conn.cursor()
+    try:
+        assign_order_salesperson(
+            cur,
+            order_id,
+            request.form.get("salesperson_email"),
+            session.get("user", "system"),
+        )
+        conn.commit()
+        cache.clear()
+        return redirect(f"/sklep/orders/{order_id}?salesperson=saved")
+    except ValueError as exc:
+        conn.rollback()
+        return str(exc), 400
+    except Exception:
+        conn.rollback()
+        logger.exception("Salesperson assignment failed.")
+        return "Nie udało się przypisać handlowca.", 500
+    finally:
+        conn.close()
 
 
 @app.route('/sklep/orders/<int:order_id>/stage', methods=['POST'])
@@ -7658,6 +8210,9 @@ def shop_update_stage(order_id):
     conn = db()
     cur = conn.cursor()
     try:
+        denied = sales_order_access_error(cur, order_id)
+        if denied:
+            return jsonify({"ok": False, "message": denied[0]}), denied[1]
         previous, current = update_shop_stage(
             cur,
             order_id,
@@ -7697,11 +8252,14 @@ def shop_update_stage(order_id):
 @login_required
 def shop_update_details(order_id):
     role = current_user_role()
-    if role not in {"admin", "shop", "warehouse"}:
+    if role not in {"admin", "shop", "warehouse", "sales"}:
         return "Brak uprawnień do edycji danych operacyjnych.", 403
     conn = db()
     cur = conn.cursor()
     try:
+        denied = sales_order_access_error(cur, order_id)
+        if denied:
+            return denied
         cur.execute(
             """
             SELECT notes,tracking_number
@@ -7714,7 +8272,7 @@ def shop_update_details(order_id):
             return "Nie znaleziono zamówienia.", 404
         notes = (
             (request.form.get("notes") or "").strip()
-            if role in {"admin", "shop"}
+            if role in {"admin", "shop", "sales"}
             else (current[0] or "")
         )
         tracking = (
@@ -7778,6 +8336,9 @@ def shop_update_status(order_id):
     conn = db()
     cur = conn.cursor()
     try:
+        denied = sales_order_access_error(cur, order_id)
+        if denied:
+            return denied
         if stage_key:
             update_shop_stage(
                 cur,
@@ -7811,6 +8372,12 @@ def shop_update_status(order_id):
                 order_id,
                 "zmieniono status",
                 f"{current[0]} → {status}",
+            )
+            notify_order_salesperson(
+                cur,
+                order_id,
+                "zmiana statusu",
+                f"Status zamówienia zmieniono: {current[0]} → {status}.",
             )
         if status == "Dokument wystawiony":
             cur.execute(
@@ -7874,11 +8441,14 @@ def shop_confirm_document(order_id):
 @app.route('/sklep/orders/<int:order_id>/document/generate', methods=['POST'])
 @login_required
 def shop_generate_document(order_id):
-    if not (can_shop("shop_edit") or can_shop("accounting")):
+    if not (can_shop("sales") or can_shop("accounting")):
         return "Brak uprawnień do generowania dokumentu sprzedaży.", 403
     conn = db()
     cur = conn.cursor()
     try:
+        denied = sales_order_access_error(cur, order_id)
+        if denied:
+            return denied
         _document, payload = generate_shop_sales_document(
             cur, order_id, session.get("user")
         )
@@ -7921,11 +8491,69 @@ def shop_download_document(doc_id, fmt):
     if denied:
         return denied
     if fmt not in {"pdf","docx"}: return "Nieprawidłowy format.", 400
-    conn=db(); cur=conn.cursor(); cur.execute(f"SELECT document_number,{fmt} FROM shop_sales_documents WHERE id=%s", (doc_id,)); row=cur.fetchone(); conn.close()
+    conn=db(); cur=conn.cursor()
+    if current_user_role() == "sales":
+        cur.execute(
+            f"""
+            SELECT d.document_number,d.{fmt}
+            FROM shop_sales_documents d
+            JOIN shop_orders o ON o.id=d.order_id
+            WHERE d.id=%s AND lower(COALESCE(o.salesperson_email,''))=lower(%s)
+            """,
+            (doc_id, session.get("user", "")),
+        )
+    else:
+        cur.execute(
+            f"SELECT document_number,{fmt} FROM shop_sales_documents WHERE id=%s",
+            (doc_id,),
+        )
+    row=cur.fetchone(); conn.close()
     if not row or row[1] is None: return "Nie znaleziono dokumentu.", 404
     mimetype = "application/pdf" if fmt == "pdf" else "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     filename = secure_filename(str(row[0] or "dokument")) or "dokument"
     return Response(bytes(row[1]), mimetype=mimetype, headers={"Content-Disposition": f'attachment; filename="{filename}.{fmt}"'})
+
+
+@app.route('/handlowiec/raport')
+@login_required
+def salesperson_report():
+    if current_user_role() not in {"admin", "sales"}:
+        return "Brak uprawnień do raportu handlowca.", 403
+    params = []
+    where = ""
+    if current_user_role() == "sales":
+        where = "WHERE lower(COALESCE(o.salesperson_email,''))=lower(%s)"
+        params.append(session.get("user", ""))
+    conn = db()
+    cur = conn.cursor()
+    cur.execute(
+        f"""
+        WITH order_values AS (
+            SELECT o.id,o.status,o.salesperson_email,o.salesperson_name,
+                   COALESCE((
+                       SELECT SUM(i.qty*i.price_brutto)
+                       FROM shop_order_items i WHERE i.order_id=o.id
+                   ),0)+COALESCE(o.shipping_cost,0) AS total
+            FROM shop_orders o
+            {where}
+        )
+        SELECT COALESCE(salesperson_name,salesperson_email,'Nieprzypisany'),
+               COUNT(*),COALESCE(SUM(total),0),
+               COUNT(*) FILTER (WHERE status='Zakończone'),
+               COUNT(*) FILTER (
+                   WHERE status NOT IN ('Zakończone','Anulowane')
+               ),
+               COUNT(*) FILTER (WHERE status='Anulowane')
+        FROM order_values
+        GROUP BY COALESCE(salesperson_name,salesperson_email,'Nieprzypisany')
+        ORDER BY 1
+        """,
+        tuple(params),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return render_template("sales_report.html", rows=rows)
+
 
 @app.route('/historia')
 @login_required

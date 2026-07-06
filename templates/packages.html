@@ -14,7 +14,7 @@
         <td>{{ p[2] }}</td>
         <td>{{ 'aktywna' if p[3] == 'active' else 'wydana' if p[3] == 'issued' else 'anulowana' }}</td>
     </tr>
-    {% if can('inventory') %}
+    {% if can('inventory_manage') %}
     <tr>
         <td colspan="3">
             <form method="POST" action="/packages/{{ p[0] }}/edit" onsubmit="return updatePackage(event, this);"
