@@ -614,6 +614,22 @@ class InventoryFlowTests(unittest.TestCase):
         }
         self.assertTrue(expected.issubset(BACKUP_TABLES))
 
+    def test_manual_backup_failure_redirects_with_reason(self):
+        with warehouse_app.app.test_request_context("/admin/backups/create", method="POST"):
+            warehouse_app.session["user"] = "admin@example.com"
+            warehouse_app.session["role"] = "admin"
+
+            with patch.object(
+                warehouse_app,
+                "perform_database_backup",
+                side_effect=RuntimeError("Firebase Storage odrzucił zapis"),
+            ):
+                response = warehouse_app.create_manual_backup()
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/admin/backups?failed=1", response.location)
+        self.assertIn("Firebase+Storage", response.headers["Location"])
+
     def test_migration_defines_only_one_canonical_shop_schema(self):
         source = Path(warehouse_app.__file__).read_text(encoding="utf-8").lower()
         self.assertEqual(source.count("create table if not exists shop_orders("), 1)

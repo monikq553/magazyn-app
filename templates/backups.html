@@ -6,6 +6,14 @@
 {% if request.args.get('created') %}
 <div class="card" style="margin-bottom:14px;color:#166534;">Kopia została zaszyfrowana i zapisana w prywatnym Firebase Storage.</div>
 {% endif %}
+{% if request.args.get('failed') %}
+<div class="card" style="margin-bottom:14px;color:#991b1b;">
+    Nie udało się utworzyć kopii zapasowej.
+    {% if request.args.get('error') %}
+    <br><strong>Powód:</strong> {{ request.args.get('error') }}
+    {% endif %}
+</div>
+{% endif %}
 {% if request.args.get('restored') %}
 <div class="card" style="margin-bottom:14px;color:#166534;">Baza została przywrócona z kopii.</div>
 {% endif %}

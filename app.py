@@ -27,7 +27,7 @@ import io
 import pandas as pd
 from urllib import request as urlrequest
 from urllib import error as urlerror
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote_plus, urlencode, urlsplit, urlunsplit
 from dotenv import load_dotenv
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.platypus import (
@@ -8513,9 +8513,12 @@ def backups_page():
 def create_manual_backup():
     try:
         perform_database_backup(session.get("user") or "administrator")
-    except Exception:
+    except Exception as exc:
         logger.exception("Manual database backup failed.")
-        return "Nie udało się utworzyć kopii zapasowej.", 500
+        return redirect(
+            "/admin/backups?failed=1&error="
+            + quote_plus(str(exc)[:300] or "Nie udało się utworzyć kopii zapasowej.")
+        )
     return redirect("/admin/backups?created=1")
 
 
