@@ -457,6 +457,38 @@ class InventoryFlowTests(unittest.TestCase):
         self.assertEqual(response.headers["X-Frame-Options"], "DENY")
         self.assertIn("frame-ancestors 'none'", response.headers["Content-Security-Policy"])
 
+    def test_pwa_assets_are_public_without_firebase_session(self):
+        client = warehouse_app.app.test_client()
+
+        manifest = client.get("/manifest.json")
+        self.assertEqual(manifest.status_code, 200)
+        self.assertEqual(manifest.content_type, "application/manifest+json")
+        self.assertEqual(manifest.get_json()["name"], "Pmagazyn")
+        icon_paths = [icon["src"] for icon in manifest.get_json()["icons"]]
+        self.assertIn("/static/icons/icon-192.png", icon_paths)
+        self.assertIn("/static/icons/icon-512.png", icon_paths)
+
+        worker = client.get("/service-worker.js")
+        self.assertEqual(worker.status_code, 200)
+        self.assertIn("application/javascript", worker.content_type)
+        self.assertEqual(worker.headers["Service-Worker-Allowed"], "/")
+        body = worker.get_data(as_text=True)
+        self.assertIn('request.method !== "GET"', body)
+        self.assertIn('"/auth/"', body)
+        self.assertIn('url.pathname.startsWith("/static/")', body)
+
+    def test_base_template_contains_responsive_mobile_shell(self):
+        source = Path(warehouse_app.app.root_path, "templates", "base.html").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("width=device-width, initial-scale=1, viewport-fit=cover", source)
+        self.assertIn('<link rel="manifest" href="/manifest.json">', source)
+        self.assertIn("mobile-menu-button", source)
+        self.assertIn("navigator.serviceWorker.register", source)
+        self.assertIn("document.querySelectorAll(\"table\")", source)
+        self.assertIn(".table-scroll", source)
+        self.assertIn("@media (max-width: 640px)", source)
+
     def test_production_http_is_redirected_to_https(self):
         client = warehouse_app.app.test_client()
         with patch.object(warehouse_app, "IS_PRODUCTION", True):

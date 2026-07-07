@@ -1,0 +1,131 @@
+{% extends "base.html" %}
+{% block content %}
+<style>
+.reservation-row { display:grid; grid-template-columns:2fr 1fr 1fr 1fr; gap:8px; margin-top:8px; }
+.reservation-actions { display:flex; flex-wrap:wrap; gap:8px; }
+@media (max-width:640px) {
+  .reservation-row { grid-template-columns:1fr; }
+  .reservation-actions { flex-direction:column; }
+}
+</style>
+
+<h2>Rezerwacje</h2>
+
+{% if can_edit_reservations %}
+<div class="card" style="margin-bottom:16px;">
+  <h3>Nowa rezerwacja</h3>
+  <form method="POST" action="/rezerwacje" style="display:grid;gap:10px;">
+    <div class="field-grid">
+      <input name="customer_name" placeholder="Klient / zamówienie" required>
+      {% if session.get('role') == 'sales' %}
+      <input value="{{ session.get('user') }}" disabled>
+      {% else %}
+      <select name="salesperson_email" required>
+        <option value="">Handlowiec prowadzący</option>
+        {% for person in salespeople %}
+        <option value="{{ person[0] }}">{{ person[1] or person[0] }}</option>
+        {% endfor %}
+      </select>
+      {% endif %}
+      <input type="date" name="date">
+      <select name="warehouse" required>
+        <option value="">Magazyn</option>
+        {% for warehouse in warehouses %}
+        <option>{{ warehouse }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <input name="notes" placeholder="Uwagi do rezerwacji">
+    <strong>Pozycje</strong>
+    <div id="reservationItems">
+      {% for row in range(3) %}
+      <div class="reservation-row">
+        <select name="product_id" class="reservation-product">
+          <option value="">Towar</option>
+          {% for product in products %}
+          <option value="{{ product[0] }}" data-warehouse="{{ product[4] }}">
+            {{ product[4] }} · {{ product[1] }} · stan {{ product[2] }} {{ product[3] }}
+          </option>
+          {% endfor %}
+        </select>
+        <select name="package_id" class="reservation-package">
+          <option value="">Bez wskazania paczki</option>
+          {% for product_id, packages in packages_by_product.items() %}
+            {% for package in packages %}
+            <option value="{{ package[0] }}" data-product="{{ product_id }}">
+              {{ package[2] }} · {{ package[3] }} {{ package[4] }}
+            </option>
+            {% endfor %}
+          {% endfor %}
+        </select>
+        <input name="qty" type="number" min="0.001" step="0.001" placeholder="Ilość">
+        <input name="dimension" placeholder="Wymiar">
+        <input name="location" placeholder="Lokalizacja">
+        <input name="item_note" placeholder="Uwagi pozycji" style="grid-column:1/-1;">
+      </div>
+      {% endfor %}
+    </div>
+    <div class="reservation-actions">
+      <button name="action" value="draft" type="submit">Zapisz roboczą</button>
+      <button name="action" value="approve" type="submit">Zatwierdź i generuj PDF</button>
+    </div>
+  </form>
+</div>
+{% endif %}
+
+<div class="card" style="margin-bottom:16px;">
+  <h3>Filtry</h3>
+  <form method="GET" action="/rezerwacje" class="field-grid">
+    <input name="client" value="{{ filters.client }}" placeholder="Klient">
+    <input name="salesperson" value="{{ filters.salesperson }}" placeholder="Handlowiec">
+    <select name="warehouse"><option value="">Magazyn</option>{% for warehouse in warehouses %}<option {% if filters.warehouse == warehouse %}selected{% endif %}>{{ warehouse }}</option>{% endfor %}</select>
+    <select name="status"><option value="">Status</option>{% for status in statuses %}<option {% if filters.status == status %}selected{% endif %}>{{ status }}</option>{% endfor %}</select>
+    <input type="date" name="date" value="{{ filters.date }}">
+    <input name="package" value="{{ filters.package }}" placeholder="Numer paczki">
+    <input name="product" value="{{ filters.product }}" placeholder="Produkt">
+    <button>Filtruj</button>
+    <a href="/rezerwacje" style="align-self:center;">Wyczyść</a>
+  </form>
+</div>
+
+<div class="card">
+  <h3>Lista rezerwacji</h3>
+  <table>
+    <tr>
+      <th>Numer rezerwacji</th><th>Data</th><th>Klient</th><th>Handlowiec</th>
+      <th>Magazyn</th><th>Wartość / ilość</th><th>Status</th>
+      <th>PDF dla magazyniera</th><th>Uwagi</th>
+    </tr>
+    {% for reservation in reservations %}
+    <tr>
+      <td><a href="/rezerwacje/{{ reservation[0] }}">{{ reservation[1] }}</a></td>
+      <td>{{ reservation[2] }}</td>
+      <td>{{ reservation[3] }}</td>
+      <td>{{ reservation[4] }}</td>
+      <td>{{ reservation[5] }}</td>
+      <td>{{ '%.2f'|format(reservation[6] or 0) }} zł / {{ reservation[7] or 0 }}</td>
+      <td>{{ reservation[8] }}</td>
+      <td><a href="/rezerwacje/{{ reservation[0] }}/pdf">PDF</a></td>
+      <td>{{ reservation[10] or '' }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="9">Brak rezerwacji.</td></tr>
+    {% endfor %}
+  </table>
+</div>
+
+<script>
+function filterPackageSelect(row) {
+  const productId = row.querySelector('.reservation-product').value;
+  row.querySelectorAll('.reservation-package option').forEach(option => {
+    option.hidden = option.value && option.dataset.product !== productId;
+  });
+  const selected = row.querySelector('.reservation-package').selectedOptions[0];
+  if (selected && selected.hidden) row.querySelector('.reservation-package').value = '';
+}
+document.querySelectorAll('.reservation-row').forEach(row => {
+  filterPackageSelect(row);
+  row.querySelector('.reservation-product').addEventListener('change', () => filterPackageSelect(row));
+});
+</script>
+{% endblock %}

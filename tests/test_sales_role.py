@@ -91,6 +91,7 @@ class SalesRoleTests(unittest.TestCase):
             (42,),
             (1, "Deska", 10.0, "Drewno", 100.0, 23.0),
             (0.0,),
+            (0.0,),
         ]
         connection = MagicMock()
         connection.cursor.return_value = cursor

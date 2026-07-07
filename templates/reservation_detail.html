@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block content %}
+<style>
+.pick-row { display:grid; grid-template-columns:auto 1fr 1fr; gap:8px; align-items:start; }
+.reservation-actions { display:flex; flex-wrap:wrap; gap:8px; }
+@media (max-width:640px) {
+  .pick-row { grid-template-columns:1fr; }
+  .reservation-actions { flex-direction:column; }
+}
+</style>
+
+<h2>Rezerwacja {{ reservation[1] }}</h2>
+
+<div class="card" style="margin-bottom:16px;">
+  <p><strong>Klient:</strong> {{ reservation[3] }}</p>
+  <p><strong>Handlowiec:</strong> {{ reservation[5] or reservation[4] or '' }}</p>
+  <p><strong>Magazyn:</strong> {{ reservation[6] }} · <strong>Status:</strong> {{ reservation[7] }}</p>
+  <p><strong>Uwagi:</strong> {{ reservation[8] or '' }}</p>
+  {% if reservation[9] %}<p><strong>Powód anulowania:</strong> {{ reservation[9] }}</p>{% endif %}
+  <div class="reservation-actions">
+    <a class="button" href="/rezerwacje/{{ reservation[0] }}/pdf">PDF dla magazyniera</a>
+    <form method="POST" action="/rezerwacje/{{ reservation[0] }}/pdf/generate"><button>Generuj PDF dla magazyniera</button></form>
+    {% if can_pick and reservation[7] != 'wydana' and reservation[7] != 'anulowana' %}
+    <form method="POST" action="/rezerwacje/{{ reservation[0] }}/complete"><button>Oznacz jako skompletowaną</button></form>
+    <form method="POST" action="/rezerwacje/{{ reservation[0] }}/issue" onsubmit="return confirm('Wydać rezerwację i zdjąć towar ze stanu?');"><button>Wydaj z rezerwacji</button></form>
+    {% endif %}
+  </div>
+</div>
+
+<div class="card" style="margin-bottom:16px;">
+  <h3>Pozycje do przygotowania</h3>
+  {% for item in items %}
+  <form method="POST" action="/rezerwacje/{{ reservation[0] }}/items/{{ item[0] }}" class="pick-row" style="border-bottom:1px solid #e5e7eb;padding:10px 0;">
+    <label>
+      <input type="checkbox" name="prepared" {% if item[10] %}checked{% endif %} {% if not can_pick %}disabled{% endif %}>
+      Przygotowane
+    </label>
+    <div>
+      <strong>{{ item[3] }}</strong><br>
+      Paczka: {{ item[4] or 'bez wskazania' }} · Wymiar: {{ item[5] or '' }}<br>
+      Ilość: {{ item[6] }} {{ item[7] }} · Lokalizacja: {{ item[9] or '' }}
+      {% if item[11] %}<br><small>Odhaczył: {{ item[11] }} · {{ item[12] }}</small>{% endif %}
+    </div>
+    <div>
+      <input name="warehouse_note" value="{{ item[13] or '' }}" placeholder="Uwaga magazyniera" {% if not can_pick %}disabled{% endif %}>
+      {% if can_pick %}<button>Zapisz pozycję</button>{% endif %}
+    </div>
+  </form>
+  {% else %}
+  <p>Brak pozycji.</p>
+  {% endfor %}
+</div>
+
+{% if can_edit_reservations and reservation[7] not in ['anulowana','wydana'] %}
+<div class="card" style="margin-bottom:16px;">
+  <h3>Anulowanie rezerwacji</h3>
+  <form method="POST" action="/rezerwacje/{{ reservation[0] }}/cancel" class="field-grid">
+    <input name="reason" placeholder="Powód anulowania" minlength="3" required>
+    <button style="background:#ef4444;color:white;">Anuluj rezerwację</button>
+  </form>
+</div>
+{% endif %}
+
+<div class="card">
+  <h3>Historia</h3>
+  <table>
+    <tr><th>Data i godzina</th><th>Kto</th><th>Akcja</th><th>Szczegóły</th></tr>
+    {% for entry in history %}
+    <tr><td>{{ entry[3] }}</td><td>{{ entry[0] }}</td><td>{{ entry[1] }}</td><td>{{ entry[2] or '' }}</td></tr>
+    {% else %}
+    <tr><td colspan="4">Brak historii.</td></tr>
+    {% endfor %}
+  </table>
+</div>
+{% endblock %}

@@ -1,5 +1,29 @@
 {% extends "base.html" %}
 {% block content %}
+<style>
+.shop-product-row {
+  display:flex;
+  gap:8px;
+  margin-top:8px;
+}
+.shop-order-actions {
+  display:flex;
+  flex-direction:column;
+  gap:8px;
+  align-items:stretch;
+}
+.shop-stage-list {
+  white-space:nowrap;
+}
+@media (max-width:640px) {
+  .shop-product-row {
+    flex-direction:column;
+  }
+  .shop-stage-list {
+    white-space:normal;
+  }
+}
+</style>
 <h2>Sklep internetowy</h2>
 <div class="tiles" style="margin-bottom:16px;">
   <div class="tile"><strong>Oczekuje na płatność</strong><br>{{ reports[0] or 0 }}</div>
@@ -56,7 +80,7 @@
     <div style="grid-column:1/-1;">
       <strong>Produkty</strong>
       {% for i in range([3, selected_products|length]|max) %}
-      <div style="display:flex;gap:8px;margin-top:8px;">
+      <div class="shop-product-row">
         <select name="product_id">
           <option value="">-- produkt --</option>
           {% for p in products %}
@@ -98,7 +122,7 @@
   <tr>
     <td><a href="/sklep/orders/{{ o[0] }}">{{ o[1] }}</a></td><td>{{ o[2] }}</td>
     <td>{{ o[3] }}</td><td>{{ o[15] or 'Nieprzypisany' }}</td><td>{{ o[4] }}</td>
-    <td style="white-space:nowrap;">
+    <td class="shop-stage-list">
       {% set stages = o[11] or {} %}
       <span title="Zapłacone">{{ '✓' if o[14] else '□' }} Płatność</span><br>
       <span title="Faktura">{{ '✓' if o[12] else '□' }} Faktura</span>
@@ -109,9 +133,9 @@
     <td>{{ o[5] }}</td>
     <td>{{ o[10] or o[6] or '' }}</td><td>{{ o[7] or '' }}</td>
     <td>{{ '%.2f'|format(o[8] or 0) }}</td>
-    <td>
+    <td class="shop-order-actions">
       {% if session.get('role') in ['admin','shop','accounting','sales'] %}
-      <form method="POST" action="/sklep/orders/{{ o[0] }}/document/generate" style="display:inline;">
+      <form method="POST" action="/sklep/orders/{{ o[0] }}/document/generate">
         <button>{{ 'Generuj ponownie' if o[9] else 'Generuj dokument' }}</button>
       </form>
       {% endif %}

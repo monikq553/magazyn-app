@@ -1,0 +1,149 @@
+{% extends "base.html" %}
+{% block content %}
+<style>
+.accounting-status-form label:has(input[type="checkbox"]),
+.accounting-delete-form label {
+  display:flex;
+  align-items:center;
+  gap:10px;
+  padding:10px;
+  border:1px solid #e5e7eb;
+  border-radius:8px;
+  min-height:48px;
+  background:#fff;
+}
+.accounting-document-row {
+  padding:12px 0;
+  border-bottom:1px solid #e5e7eb;
+}
+@media (max-width:640px) {
+  .accounting-status-form label:has(input[type="checkbox"]),
+  .accounting-delete-form label {
+    align-items:flex-start;
+  }
+}
+</style>
+<h2>Księgowość · {{ order[1] }}</h2>
+{% if request.args.get('saved') %}<div class="card" style="margin-bottom:12px;color:#166534;">Etapy księgowe zostały zapisane.</div>{% endif %}
+{% if request.args.get('edited') %}<div class="card" style="margin-bottom:12px;color:#166534;">Dokument i pozycje zostały zaktualizowane.</div>{% endif %}
+{% if request.args.get('deleted') %}<div class="card" style="margin-bottom:12px;color:#166534;">Dokument został anulowany bez usuwania danych.</div>{% endif %}
+{% if request.args.get('restored') %}<div class="card" style="margin-bottom:12px;color:#166534;">Dokument został przywrócony.</div>{% endif %}
+
+<div class="card" style="margin-bottom:16px;">
+  <p><strong>Klient:</strong> {{ order[3] }} · {{ order[6] or '' }} · {{ order[5] or '' }}</p>
+  <p><strong>Adres:</strong> {{ order[4] }} {% if order[13] %}· NIP: {{ order[13] }}{% endif %}</p>
+  <p><strong>Status płatności:</strong> {{ order[9] }} · <strong>Status zamówienia:</strong> {{ order[10] }}</p>
+  <p><strong>Handlowiec:</strong> {{ order[14] or order[15] or 'Nieprzypisany' }}</p>
+  <p>
+    <strong>Wydanie:</strong>
+    {% if can_ship %}<span style="color:#166534;">odblokowane</span>
+    {% else %}<span style="color:#b91c1c;">zablokowane do czasu zapłaty lub pobrania i oznaczenia gotowości</span>{% endif %}
+  </p>
+</div>
+
+<div class="card" style="margin-bottom:16px;">
+  <h3>Etapy i płatność</h3>
+  <form method="POST" action="/ksiegowosc/orders/{{ order[0] }}" class="accounting-status-form" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:9px;">
+    <label><input type="checkbox" name="proforma_issued" {% if accounting[1] %}checked{% endif %}> Proforma wystawiona</label>
+    <label><input type="checkbox" name="reserved_by_proforma" {% if accounting[2] %}checked{% endif %}> Towar zarezerwowany na podstawie proformy</label>
+    <label><input type="checkbox" name="waiting_for_payment" {% if accounting[3] %}checked{% endif %}> Oczekiwanie na płatność</label>
+    <label><input type="checkbox" name="partial_payment" {% if accounting[4] %}checked{% endif %}> Płatność częściowa</label>
+    <label><input type="checkbox" name="paid" {% if accounting[5] %}checked{% endif %}> Zapłacono</label>
+    <label><input type="checkbox" name="invoice_issued" {% if accounting[7] %}checked{% endif %}> Faktura wystawiona</label>
+    <label><input type="checkbox" name="receipt_issued" {% if accounting[8] %}checked{% endif %}> Paragon wystawiony</label>
+    <label><input type="checkbox" name="invoice_sent" {% if accounting[9] %}checked{% endif %}> Faktura wysłana do klienta</label>
+    <label><input type="checkbox" name="document_to_warehouse" {% if accounting[10] %}checked{% endif %}> Dokument przekazany do magazynu</label>
+    <label><input type="checkbox" name="sales_document_generated" {% if accounting[24] %}checked{% endif %}> Dokument sprzedaży wygenerowany</label>
+    <label><input type="checkbox" name="document_sent" {% if accounting[25] %}checked{% endif %}> Dokument wysłany do klienta</label>
+    <label><input type="checkbox" name="ready_to_ship" {% if accounting[11] %}checked{% endif %}> Zamówienie gotowe do wysyłki</label>
+    <label><input type="checkbox" name="settled" {% if accounting[12] %}checked{% endif %}> Zamówienie rozliczone</label>
+    <select name="payment_method">
+      <option value="">Sposób płatności</option>
+      {% for method in payment_methods %}<option {% if accounting[6] == method %}selected{% endif %}>{{ method }}</option>{% endfor %}
+    </select>
+    <input name="salesperson" placeholder="Handlowiec prowadzący" value="{{ accounting[21] or order[14] or order[15] or '' }}">
+    <input name="proforma_number" placeholder="Numer proformy" value="{{ accounting[13] or '' }}">
+    <input name="invoice_number" placeholder="Numer faktury" value="{{ accounting[14] or '' }}">
+    <input name="receipt_number" placeholder="Numer paragonu" value="{{ accounting[15] or '' }}">
+    <label>Data wystawienia<input type="date" name="document_issue_date" value="{{ accounting[16] or '' }}"></label>
+    <label>Data wpływu płatności<input type="date" name="payment_received_date" value="{{ accounting[17] or '' }}"></label>
+    <label>Termin płatności<input type="date" name="payment_due_date" value="{{ accounting[26] or '' }}"></label>
+    <input name="amount_paid" type="number" min="0" step="0.01" placeholder="Kwota zapłacona" value="{{ accounting[18] or 0 }}">
+    <input name="amount_due" type="number" min="0" step="0.01" placeholder="Kwota do zapłaty" value="{{ accounting[19] or 0 }}">
+    <input name="accounting_notes" placeholder="Uwagi księgowości" value="{{ accounting[20] or '' }}" style="grid-column:1/-1;">
+    <button type="submit">Zapisz</button>
+    <a href="/ksiegowosc" style="align-self:center;">Anuluj zmiany</a>
+  </form>
+</div>
+
+<details class="card" style="margin-bottom:16px;">
+  <summary style="cursor:pointer;font-weight:700;">Edytuj dokument, klienta i pozycje</summary>
+  <form method="POST" action="/ksiegowosc/orders/{{ order[0] }}/edit" style="display:grid;gap:9px;margin-top:14px;">
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:8px;">
+      <input name="customer_name" value="{{ order[3] }}" placeholder="Klient" required>
+      <input name="delivery_address" value="{{ order[4] }}" placeholder="Adres" required>
+      <input name="phone" value="{{ order[5] or '' }}" placeholder="Telefon">
+      <input name="email" type="email" value="{{ order[6] or '' }}" placeholder="E-mail">
+      <input name="nip" value="{{ order[13] or '' }}" placeholder="NIP">
+      <input name="shipping_cost" type="number" min="0" step="0.01" value="{{ order[7] or 0 }}" placeholder="Koszt wysyłki">
+      <select name="payment_method"><option value="">Sposób płatności</option>{% for method in payment_methods %}<option {% if accounting[6] == method %}selected{% endif %}>{{ method }}</option>{% endfor %}</select>
+      <input type="date" name="payment_due_date" value="{{ accounting[26] or '' }}">
+      <input name="notes" value="{{ order[12] or '' }}" placeholder="Uwagi zamówienia">
+      <input name="accounting_notes" value="{{ accounting[20] or '' }}" placeholder="Uwagi księgowości">
+    </div>
+    <div style="overflow:auto;">
+      <table width="100%">
+        <tr><th>Produkt</th><th>Ilość</th><th>Netto</th><th>Brutto</th><th>VAT</th><th>Magazyn</th><th>Wydano</th></tr>
+        {% for item in items %}
+        <tr>
+          <td><input type="hidden" name="item_id" value="{{ item[0] }}"><input name="product_name" value="{{ item[2] }}" required></td>
+          <td><input name="qty" type="number" min="0.001" step="any" value="{{ item[3] }}" required></td>
+          <td><input name="price_netto" type="number" min="0" step="0.01" value="{{ item[4] }}" required></td>
+          <td><input name="price_brutto" type="number" min="0" step="0.01" value="{{ item[5] }}" required></td>
+          <td><input name="vat" type="number" min="0" max="100" step="0.01" value="{{ item[6] }}" required></td>
+          <td>{{ item[7] }}</td><td>{{ item[9] }}</td>
+        </tr>
+        {% endfor %}
+      </table>
+    </div>
+    <div><button type="submit">Zapisz</button> <a href="/ksiegowosc/orders/{{ order[0] }}">Anuluj zmiany</a></div>
+  </form>
+</details>
+
+<div class="card" style="margin-bottom:16px;">
+  <h3>Dokumenty</h3>
+  {% for document in documents %}
+  <div class="accounting-document-row">
+    <strong>{{ {'proforma':'Proforma','invoice':'Faktura','receipt':'Paragon','sales':'Dokument sprzedaży'}.get(document[1],document[1]) }}</strong>
+    · {{ document[2] or 'bez numeru' }} ·
+    {% if document[3] == 'cancelled' %}<span style="color:#b91c1c;">Anulowany</span>{% elif document[3] == 'active' %}<span style="color:#166534;">Aktywny</span>{% else %}Roboczy{% endif %}
+    {% if document[1] == 'sales' and sales_document and not sales_document[1] %}
+      · <a href="/sklep/documents/{{ sales_document[0] }}/pdf">PDF</a>
+      · <a href="/sklep/documents/{{ sales_document[0] }}/docx">DOCX</a>
+    {% endif %}
+    {% if document[3] != 'cancelled' %}
+    <form method="POST" action="/ksiegowosc/documents/{{ document[0] }}/delete" class="accounting-delete-form" style="display:grid;grid-template-columns:2fr 1fr auto;gap:8px;margin-top:8px;" onsubmit="return confirm('Dokument jest powiązany z: {{ document_warnings.get(document[0],[])|join(', ') }}. Czy na pewno go anulować?');">
+      <input name="reason" placeholder="Wymagany powód usunięcia" minlength="3" required>
+      <label><input type="checkbox" name="confirm_links" required> Potwierdzam powiązania</label>
+      <button type="submit" style="background:#ef4444;color:white;">Usuń</button>
+    </form>
+    {% else %}
+      <p>Powód: {{ document[4] }} · {{ document[5] }} · {{ document[6] }}</p>
+      {% if session.get('role') == 'admin' %}
+      <form method="POST" action="/ksiegowosc/documents/{{ document[0] }}/restore"><button type="submit">Przywróć</button></form>
+      {% endif %}
+    {% endif %}
+  </div>
+  {% else %}<p>Brak utworzonych dokumentów księgowych.</p>{% endfor %}
+</div>
+
+<div class="card" style="overflow:auto;">
+  <h3>Historia zmian</h3>
+  <table width="100%">
+    <tr><th>Data i godzina</th><th>Użytkownik</th><th>Obszar</th><th>Pole</th><th>Poprzednio</th><th>Po zmianie</th></tr>
+    {% for change in accounting_history %}
+    <tr><td>{{ change[5] }}</td><td>{{ change[4] }}</td><td>{{ change[0] }}</td><td>{{ change[1] }}</td><td>{{ change[2] or '—' }}</td><td>{{ change[3] or '—' }}</td></tr>
+    {% else %}<tr><td colspan="6">Brak zmian księgowych.</td></tr>{% endfor %}
+  </table>
+</div>
+{% endblock %}

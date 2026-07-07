@@ -1,5 +1,34 @@
 {% extends "base.html" %}
 {% block content %}
+<style>
+.order-inline-form {
+  display:flex;
+  gap:8px;
+  flex-wrap:wrap;
+}
+.order-item-row {
+  display:flex;
+  gap:8px;
+}
+.stage-option {
+  display:flex;
+  align-items:center;
+  gap:10px;
+  padding:10px;
+  border:1px solid #e5e7eb;
+  border-radius:8px;
+  min-height:48px;
+}
+@media (max-width:640px) {
+  .order-inline-form,
+  .order-item-row {
+    flex-direction:column;
+  }
+  .stage-option {
+    align-items:flex-start;
+  }
+}
+</style>
 <h2>Zamówienie {{ order[1] }}</h2>
 {% if request.args.get('created') %}
 <div class="card" style="margin-bottom:16px;color:#166534;">
@@ -29,7 +58,7 @@
   <p><strong>Uwagi:</strong> {{ order[13] or '' }}</p>
   <p><strong>Handlowiec prowadzący:</strong> {{ order[21] or order[20] or 'Nieprzypisany' }}</p>
   {% if session.get('role') in ['admin','shop'] %}
-  <form method="POST" action="/sklep/orders/{{ order[0] }}/salesperson" style="display:flex;gap:8px;margin-bottom:10px;">
+  <form method="POST" action="/sklep/orders/{{ order[0] }}/salesperson" class="order-inline-form" style="margin-bottom:10px;">
     <select name="salesperson_email" required>
       <option value="">Wybierz handlowca</option>
       {% for person in salespeople %}
@@ -65,7 +94,7 @@
     <strong>Pozycje</strong>
     {% for row in range([5, items|length]|max) %}
     {% set item = items[row] if row < items|length else none %}
-    <div style="display:flex;gap:8px;">
+    <div class="order-item-row">
       <select name="product_id">
         <option value="">-- produkt --</option>
         {% for product in products %}
@@ -101,6 +130,8 @@
     <label><input type="checkbox" name="paid" {% if accounting[5] %}checked{% endif %}> Zapłacono</label>
     <label><input type="checkbox" name="invoice_issued" {% if accounting[7] %}checked{% endif %}> Faktura wystawiona</label>
     <label><input type="checkbox" name="receipt_issued" {% if accounting[8] %}checked{% endif %}> Paragon wystawiony</label>
+    <label><input type="checkbox" name="sales_document_generated" {% if accounting[24] %}checked{% endif %}> Dokument sprzedaży wygenerowany</label>
+    <label><input type="checkbox" name="document_sent" {% if accounting[25] %}checked{% endif %}> Dokument wysłany do klienta</label>
     <label><input type="checkbox" name="invoice_sent" {% if accounting[9] %}checked{% endif %}> Faktura wysłana do klienta</label>
     <label><input type="checkbox" name="document_to_warehouse" {% if accounting[10] %}checked{% endif %}> Dokument przekazany do magazynu</label>
     <label><input type="checkbox" name="ready_to_ship" {% if accounting[11] %}checked{% endif %}> Zamówienie gotowe do wysyłki</label>
@@ -112,11 +143,13 @@
     <input name="receipt_number" placeholder="Nr paragonu" value="{{ accounting[15] or '' }}">
     <input type="date" name="document_issue_date" value="{{ accounting[16] or '' }}">
     <input type="date" name="payment_received_date" value="{{ accounting[17] or '' }}">
+    <input type="date" name="payment_due_date" value="{{ accounting[26] or '' }}">
     <input name="amount_paid" placeholder="Kwota zapłacona" value="{{ accounting[18] or 0 }}">
     <input name="amount_due" placeholder="Kwota pozostała" value="{{ accounting[19] or 0 }}">
     <input name="accounting_notes" placeholder="Uwagi księgowości" value="{{ accounting[20] or '' }}" style="grid-column:1/-1;">
     <button>Zapisz księgowość</button>
   </form>
+  <p><a href="/ksiegowosc/orders/{{ order[0] }}">Otwórz pełny panel księgowy zamówienia</a></p>
   {% endif %}
 </div>
 {% endif %}
@@ -126,7 +159,7 @@
   <p id="stage-save-message" role="status" style="min-height:20px;color:#166534;"></p>
   <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:9px;">
     {% for stage in stage_rows %}
-    <label style="display:flex;align-items:center;gap:8px;padding:8px;border:1px solid #e5e7eb;border-radius:8px;">
+    <label class="stage-option">
       <input type="checkbox"
              class="order-stage-checkbox"
              data-stage="{{ stage.key }}"
@@ -141,7 +174,7 @@
 {% if session.get('role') != 'sales' %}
 <div class="card" style="margin-bottom:16px;">
   <h3>Proces</h3>
-  <form method="POST" action="/sklep/orders/{{ order[0] }}/status" style="display:flex;gap:8px;">
+  <form method="POST" action="/sklep/orders/{{ order[0] }}/status" class="order-inline-form">
     <select name="status">{% for s in statuses %}<option {% if order[10] == s %}selected{% endif %}>{{ s }}</option>{% endfor %}</select>
     <input id="tracking-number" name="tracking_number" placeholder="Numer listu przewozowego" value="{{ order[12] or '' }}">
     <button>Zmień status</button>
@@ -158,7 +191,7 @@
   {% if document %}
     <p>Numer: {{ document[1] }} · {{ 'zatwierdzony' if document[3] else 'do edycji/zatwierdzenia' }}</p>
     {% if session.get('role') in ['admin','accounting'] %}
-    <form method="POST" action="/sklep/orders/{{ order[0] }}/document" style="display:flex;gap:8px;">
+    <form method="POST" action="/sklep/orders/{{ order[0] }}/document" class="order-inline-form">
       <input name="sales_document_number" placeholder="Numer faktury lub paragonu" value="{{ order[11] or document[1] }}">
       <button>Zatwierdź dokument</button>
     </form>

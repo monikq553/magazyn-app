@@ -46,7 +46,9 @@ class ShopModuleTests(unittest.TestCase):
             (42,),
             (1, "Deska dębowa", 10.0, "Drewno", 100.0, 23.0),
             (0.0,),
+            (0.0,),
             (2, "Olej do drewna", 20.0, "Farby", 20.0, 23.0),
+            (0.0,),
             (0.0,),
         ]
         connection = MagicMock()
@@ -160,7 +162,12 @@ class ShopModuleTests(unittest.TestCase):
 
     def test_generated_document_is_upserted_and_saved_at_order(self):
         cursor = MagicMock()
-        cursor.fetchone.side_effect = [sample_order(), (77, "DS/SK/TEST/42")]
+        cursor.fetchone.side_effect = [
+            None,
+            sample_order(),
+            (77, "DS/SK/TEST/42"),
+            (88, "active"),
+        ]
         cursor.fetchall.return_value = sample_items()
 
         with patch.object(warehouse_app, "update_shop_stage") as update_stage:
@@ -349,6 +356,107 @@ class ShopModuleTests(unittest.TestCase):
         self.assertIn("a.receipt_issued", order_query)
         self.assertIn("o.stages->>'shipped'", order_query)
         self.assertIn("o.stages->>'packed'", order_query)
+
+    def test_reservation_permissions_and_home_tile_are_available(self):
+        self.assertIn("reservations", warehouse_app.ROLE_PERMISSIONS["admin"])
+        self.assertIn("reservations", warehouse_app.ROLE_PERMISSIONS["warehouse"])
+        self.assertIn("reservations", warehouse_app.ROLE_PERMISSIONS["shop"])
+        self.assertIn("reservations", warehouse_app.ROLE_PERMISSIONS["sales"])
+        home = Path(warehouse_app.app.root_path, "templates", "home.html").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("/rezerwacje", home)
+        self.assertIn("Rezerwacje", home)
+
+    def test_reservation_pdf_is_checklist_for_warehouse(self):
+        reservation = (
+            7, "REZ/TEST/7", "2026-07-07", "Klient", "Anna Sprzedaż",
+            "anna@example.com", "Drewno", "zatwierdzona", "Pilne",
+        )
+        items = [
+            (
+                1, 7, 11, 21, "Deska", "PACZKA-1", "20x120", 2.5, "m2",
+                "Drewno", "A-01", 100, 123, False, None, "Bez uszkodzeń",
+            )
+        ]
+
+        pdf = warehouse_app.reservation_pdf_bytes(reservation, items)
+
+        self.assertTrue(pdf.startswith(b"%PDF"))
+        self.assertGreater(len(pdf), 1000)
+
+    def test_reserved_product_qty_combines_shop_and_reservation_modules(self):
+        class Cursor:
+            def __init__(self):
+                self.calls = 0
+
+            def execute(self, *_args):
+                self.calls += 1
+
+            def fetchone(self):
+                return (3.0,) if self.calls == 1 else (2.0,)
+
+        reserved = warehouse_app.reserved_product_qty(Cursor(), 11)
+
+        self.assertEqual(reserved, 5.0)
+
+    def test_approved_reservation_rejects_quantity_above_available_stock(self):
+        cursor = MagicMock()
+        cursor.fetchone.side_effect = [
+            ("Anna Sprzedaż",),
+            (7,),
+            (11, "Deska", 1.0, "m2", "Drewno", 100.0, 23.0),
+            (0.0,),
+            (0.0,),
+        ]
+        connection = MagicMock()
+        connection.cursor.return_value = cursor
+        form = MultiDict(
+            [
+                ("action", "approve"),
+                ("customer_name", "Klient"),
+                ("salesperson_email", "anna@example.com"),
+                ("date", "2026-07-07"),
+                ("warehouse", "Drewno"),
+                ("product_id", "11"),
+                ("qty", "2"),
+            ]
+        )
+
+        with warehouse_app.app.test_request_context(
+            "/rezerwacje", method="POST", data=form
+        ):
+            warehouse_app.session["user"] = "admin@example.com"
+            warehouse_app.session["role"] = "admin"
+            with patch.object(warehouse_app, "db", return_value=connection):
+                response = warehouse_app.create_reservation()
+
+        self.assertEqual(response[1], 400)
+        self.assertIn("dostępne jest tylko 1", response[0])
+        connection.rollback.assert_called_once()
+
+    def test_reservation_issue_reduces_product_and_package_stock(self):
+        cursor = MagicMock()
+        cursor.fetchone.return_value = ("skompletowana",)
+        cursor.fetchall.return_value = [(1, 11, 21, 2.0, "Drewno")]
+        cursor.rowcount = 1
+        connection = MagicMock()
+        connection.cursor.return_value = cursor
+
+        with warehouse_app.app.test_request_context(
+            "/rezerwacje/7/issue", method="POST"
+        ):
+            warehouse_app.session["user"] = "warehouse@example.com"
+            warehouse_app.session["role"] = "warehouse"
+            with patch.object(warehouse_app, "db", return_value=connection):
+                response = warehouse_app.issue_reservation(7)
+
+        self.assertEqual(response.status_code, 302)
+        executed = "\n".join(call.args[0] for call in cursor.execute.call_args_list)
+        self.assertIn("UPDATE products SET qty=qty-%s", executed)
+        self.assertIn("UPDATE packages SET qty=qty-%s", executed)
+        self.assertIn("status='wydana'", executed)
+        connection.commit.assert_called_once()
 
     def test_order_detail_renders_all_stages_and_immediate_save_endpoint(self):
         order = sample_order() + (

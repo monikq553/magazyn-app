@@ -10,6 +10,8 @@
     border:1px solid #e5e7eb;
     box-shadow:0 12px 24px rgba(15,23,42,0.05);
     max-width:900px;
+    width:100%;
+    min-width:0;
 }
 
 input, select {
@@ -38,6 +40,7 @@ button {
     border-radius:10px;
     margin-bottom:12px;
     border:1px solid #e2e8f0;
+    min-width:0;
 }
 
 .info {
@@ -52,6 +55,25 @@ button {
 
 .suggestions div:hover {
     background:#f1f5f9;
+}
+
+.item-actions {
+    display:flex;
+    gap:8px;
+    flex-wrap:wrap;
+}
+
+@media (max-width:640px) {
+    .box {
+        padding:14px;
+        border-radius:8px;
+    }
+    .item {
+        padding:12px;
+    }
+    .item-actions {
+        flex-direction:column;
+    }
 }
 </style>
 
@@ -120,7 +142,7 @@ button {
 <input type="text" class="package-number-input" maxlength="100"
        placeholder="Wpisz numer paczki" onblur="lookupPackage(this)">
 <input type="hidden" name="package_id">
-<button type="button" onclick="lookupPackage(this.previousElementSibling.previousElementSibling)">Wyszukaj paczkę</button>
+<button type="button" onclick="lookupPackage(this.closest('.item').querySelector('.package-number-input'))">Wyszukaj paczkę</button>
 
 <div class="info package-info"></div>
 
@@ -140,7 +162,9 @@ button {
 </select>
 
 <!-- USUŃ -->
-<button type="button" onclick="removeItem(this)" style="background:red;">Usuń</button>
+<div class="item-actions">
+    <button type="button" onclick="removeItem(this)" style="background:red;">Usuń</button>
+</div>
 
 </div>
 
@@ -152,7 +176,7 @@ button {
 
 <h3>Zdjęcia wydania</h3>
 <p class="info">Dodaj zdjęcia paczki, towaru, załadunku lub uszkodzeń. Działa na telefonie, tablecie i komputerze.</p>
-<input name="photos" type="file" accept="image/*" multiple>
+<input name="photos" type="file" accept="image/*" capture="environment" multiple>
 <input name="photo_note" placeholder="Opis zdjęć (opcjonalnie)">
 
 <hr>
@@ -295,7 +319,7 @@ function addItem() {
 
 // ❌ USUŃ
 function removeItem(btn) {
-    btn.parentElement.remove();
+    btn.closest(".item").remove();
 }
 
 document.addEventListener("input", function(e){

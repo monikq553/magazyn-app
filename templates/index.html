@@ -11,6 +11,7 @@
     box-shadow:0 12px 24px rgba(15,23,42,0.05);
     max-width:900px;
     margin:auto;
+    min-width:0;
 }
 
 h2 { margin-bottom:20px; }
@@ -29,6 +30,7 @@ th {
 td {
     padding:12px;
     border-bottom:1px solid #eee;
+    vertical-align:top;
 }
 
 tr:hover { background:#fafafa; }
@@ -45,7 +47,7 @@ tr:hover { background:#fafafa; }
 
 input {
     width:100%;
-    padding:6px;
+    padding:10px;
     border-radius:6px;
     border:1px solid #ddd;
 }
@@ -61,6 +63,43 @@ input {
 
 #suggestions div:hover {
     background:#f1f2f6;
+}
+
+.product-actions {
+    display:flex;
+    gap:5px;
+    flex-wrap:wrap;
+}
+
+.product-editor {
+    position:absolute;
+    background:white;
+    padding:12px;
+    border:1px solid #ddd;
+    z-index:20;
+    display:grid;
+    gap:6px;
+    min-width:260px;
+    max-width:min(92vw, 340px);
+    box-shadow:0 16px 32px rgba(15,23,42,0.16);
+}
+
+@media (max-width:640px) {
+    .box {
+        padding:14px;
+        margin:0;
+    }
+    .product-actions {
+        flex-direction:column;
+    }
+    .product-editor {
+        position:fixed;
+        left:10px;
+        right:10px;
+        top:72px;
+        max-height:calc(100vh - 96px);
+        overflow:auto;
+    }
 }
 </style>
 
@@ -146,11 +185,11 @@ input {
 <td>{{ (p[5]*(1+p[6]/100))|round(2) }} zł</td>
 <td>{% set mode = package_modes.get(p[0], 'empty') %}{% if mode == 'numbered' %}z numerem{% elif mode == 'unnumbered' %}bez numeru paczki{% elif mode == 'mixed' %}z numerem i bez numeru{% else %}brak stanu{% endif %}</td>
 
-<td style="display:flex; gap:5px;">
+<td class="product-actions">
     {% if can('inventory_manage') %}
     <details>
         <summary class="btn">Edytuj</summary>
-        <div style="position:absolute;background:white;padding:12px;border:1px solid #ddd;z-index:20;display:grid;gap:6px;min-width:260px;">
+        <div class="product-editor">
             <input name="name" value="{{ p[1] }}" maxlength="200" required>
             <input name="qty" value="{{ p[2] }}" type="number" min="0" step="any" required>
             <select name="unit">{% for unit in units %}<option {% if p[3] == unit %}selected{% endif %}>{{ unit }}</option>{% endfor %}</select>
@@ -195,7 +234,7 @@ align-items:center;
 
 <div onclick="event.stopPropagation()" style="
 background:white;
-width:400px;
+width:min(400px, calc(100vw - 24px));
 max-height:80%;
 overflow:auto;
 border-radius:12px;
