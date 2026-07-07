@@ -607,6 +607,9 @@ class InventoryFlowTests(unittest.TestCase):
             "issue_imports",
             "issue_import_rows",
             "issue_import_effects",
+            "reservations",
+            "reservation_items",
+            "reservation_history",
             "app_settings",
         }
         self.assertTrue(expected.issubset(BACKUP_TABLES))

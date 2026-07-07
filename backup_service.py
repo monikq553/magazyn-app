@@ -27,6 +27,8 @@ BACKUP_TABLES = (
     "shop_notifications",
     "shop_sales_documents",
     "shop_accounting",
+    "accounting_documents",
+    "accounting_history",
     "issue_doc_photos",
     "issue_doc_history",
     "contractors",
@@ -36,6 +38,9 @@ BACKUP_TABLES = (
     "issue_imports",
     "issue_import_rows",
     "issue_import_effects",
+    "reservations",
+    "reservation_items",
+    "reservation_history",
     "system_settings",
     "backup_runs",
 )
@@ -173,6 +178,8 @@ def restore_database(connection, payload):
         "shop_notifications",
         "shop_sales_documents",
         "shop_accounting",
+        "accounting_documents",
+        "accounting_history",
         "issue_doc_photos",
         "issue_doc_history",
         "contractors",
@@ -181,6 +188,9 @@ def restore_database(connection, payload):
         "issue_imports",
         "issue_import_rows",
         "issue_import_effects",
+        "reservations",
+        "reservation_items",
+        "reservation_history",
         "backup_runs",
     )
     for table_name in insert_order:
