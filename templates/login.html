@@ -2,6 +2,9 @@
 
 {% block content %}
 <div style="max-width:420px; margin:60px auto; background:white; padding:28px; border-radius:12px; box-shadow:0 4px 15px rgba(0,0,0,0.1);">
+    <a href="/" aria-label="Pmagazyn Primadera - strona główna" style="display:block;text-align:center;margin-bottom:22px;">
+        <img src="{{ url_for('static', filename='primadera-logo.png') }}" alt="Primadera" style="width:min(280px,100%);height:auto;">
+    </a>
     <h2 style="margin-bottom:18px;">Logowanie</h2>
     <input id="email" type="email" placeholder="E-mail" style="width:100%; padding:10px; margin-bottom:10px;">
     <input id="password" type="password" placeholder="Hasło" style="width:100%; padding:10px; margin-bottom:15px;">

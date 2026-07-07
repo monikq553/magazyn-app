@@ -12,7 +12,14 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import (
+    Image as ReportLabImage,
+    Paragraph,
+    SimpleDocTemplate,
+    Spacer,
+    Table,
+    TableStyle,
+)
 
 from general_import import (
     FIELD_LABELS,
@@ -199,6 +206,15 @@ def _pdf_fonts():
     return "Helvetica", "Helvetica-Bold"
 
 
+def _primadera_pdf_logo(width=58 * mm, align="CENTER"):
+    path = os.path.join(os.path.dirname(__file__), "static", "primadera-logo.png")
+    if not os.path.isfile(path):
+        return None
+    image = ReportLabImage(path, width=width, height=width * 86 / 392)
+    image.hAlign = align
+    return image
+
+
 def issue_history_pdf(rows):
     body_font, bold_font = _pdf_fonts()
     output = io.BytesIO()
@@ -284,10 +300,14 @@ def issue_history_pdf(rows):
             ]
         )
     )
-    story = [
+    story = []
+    logo = _primadera_pdf_logo()
+    if logo:
+        story.extend([logo, Spacer(1, 4 * mm)])
+    story.extend([
         Paragraph("Historia importów wydań towaru", title_style),
         Spacer(1, 5 * mm),
         table,
-    ]
+    ])
     document.build(story)
     return output.getvalue()

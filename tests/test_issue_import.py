@@ -290,6 +290,7 @@ class IssueImportTests(unittest.TestCase):
         self.assertEqual(sheet["B2"].value, "wydania.xlsx")
         self.assertEqual(sheet["E2"].value, 3)
         self.assertTrue(pdf.startswith(b"%PDF"))
+        self.assertIn(b"/Subtype /Image", pdf)
         self.assertGreater(len(pdf), 2000)
 
         unsafe_rows = [

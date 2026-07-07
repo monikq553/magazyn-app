@@ -465,14 +465,22 @@ class InventoryFlowTests(unittest.TestCase):
         self.assertEqual(manifest.content_type, "application/manifest+json")
         self.assertEqual(manifest.get_json()["name"], "Pmagazyn")
         icon_paths = [icon["src"] for icon in manifest.get_json()["icons"]]
+        self.assertIn("/static/icons/icon-180.png", icon_paths)
         self.assertIn("/static/icons/icon-192.png", icon_paths)
         self.assertIn("/static/icons/icon-512.png", icon_paths)
+
+        favicon = client.get("/favicon.ico")
+        self.assertEqual(favicon.status_code, 200)
+        self.assertEqual(favicon.content_type, "image/x-icon")
+        self.assertGreater(len(favicon.data), 100)
 
         worker = client.get("/service-worker.js")
         self.assertEqual(worker.status_code, 200)
         self.assertIn("application/javascript", worker.content_type)
         self.assertEqual(worker.headers["Service-Worker-Allowed"], "/")
         body = worker.get_data(as_text=True)
+        self.assertIn('"/static/favicon.ico"', body)
+        self.assertIn('"/static/icons/icon-180.png"', body)
         self.assertIn('request.method !== "GET"', body)
         self.assertIn('"/auth/"', body)
         self.assertIn('url.pathname.startsWith("/static/")', body)
@@ -483,6 +491,10 @@ class InventoryFlowTests(unittest.TestCase):
         )
         self.assertIn("width=device-width, initial-scale=1, viewport-fit=cover", source)
         self.assertIn('<link rel="manifest" href="/manifest.json">', source)
+        self.assertIn("primadera-logo.png", source)
+        self.assertIn("brand-logo", source)
+        self.assertIn("Pmagazyn", source)
+        self.assertIn("Primadera", source)
         self.assertIn("mobile-menu-button", source)
         self.assertIn("navigator.serviceWorker.register", source)
         self.assertIn("document.querySelectorAll(\"table\")", source)
@@ -594,6 +606,14 @@ class InventoryFlowTests(unittest.TestCase):
         self.assertEqual(payload["total_net"], 200.0)
         self.assertEqual(payload["total_gross"], 261.0)
         self.assertEqual(payload["shipping"], 15.0)
+
+    def test_accounting_pdf_export_contains_primadera_logo(self):
+        pdf = warehouse_app.accounting_report_pdf(
+            {"totals": [0] * 14, "orders": []},
+            {},
+        )
+        self.assertTrue(pdf.startswith(b"%PDF"))
+        self.assertIn(b"/Subtype /Image", pdf)
 
     def test_backup_includes_all_relational_module_tables(self):
         expected = {

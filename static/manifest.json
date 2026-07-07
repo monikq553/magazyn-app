@@ -1,7 +1,7 @@
 {
   "name": "Pmagazyn",
   "short_name": "Pmagazyn",
-  "description": "Panel magazynowy Pmagazyn",
+  "description": "Panel magazynowy Pmagazyn Primadera",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
@@ -10,6 +10,12 @@
   "theme_color": "#FFC067",
   "categories": ["business", "productivity"],
   "icons": [
+    {
+      "src": "/static/icons/icon-180.png",
+      "sizes": "180x180",
+      "type": "image/png",
+      "purpose": "any"
+    },
     {
       "src": "/static/icons/icon-192.png",
       "sizes": "192x192",

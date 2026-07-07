@@ -39,7 +39,7 @@ from reportlab.platypus import (
     TableStyle,
 )
 from reportlab.lib import colors
-from reportlab.lib.enums import TA_RIGHT
+from reportlab.lib.enums import TA_CENTER, TA_RIGHT
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
@@ -1941,6 +1941,19 @@ def notify_order_salesperson(cur, order_id, notification_type, message):
         )
 
 
+def primadera_logo_path():
+    return os.path.join(app.root_path, "static", "primadera-logo.png")
+
+
+def primadera_pdf_logo(width=64 * mm, align="LEFT"):
+    path = primadera_logo_path()
+    if not os.path.isfile(path):
+        return None
+    image = ReportLabImage(path, width=width, height=width * 86 / 392)
+    image.hAlign = align
+    return image
+
+
 def reservation_pdf_bytes(reservation, items):
     output = io.BytesIO()
     document = SimpleDocTemplate(
@@ -1955,7 +1968,11 @@ def reservation_pdf_bytes(reservation, items):
     title_style = styles["Title"]
     normal = styles["Normal"]
     small = ParagraphStyle("reservation-small", parent=normal, fontSize=8, leading=10)
-    story = [
+    story = []
+    logo = primadera_pdf_logo(62 * mm)
+    if logo:
+        story.extend([logo, Spacer(1, 5)])
+    story.extend([
         Paragraph("Rezerwacja - checklista magazyniera", title_style),
         Spacer(1, 8),
         Paragraph(f"Numer rezerwacji: {escape(str(reservation[1]))}", normal),
@@ -1965,7 +1982,7 @@ def reservation_pdf_bytes(reservation, items):
         Paragraph(f"Magazyn: {escape(str(reservation[6]))}", normal),
         Paragraph(f"Uwagi: {escape(str(reservation[8] or ''))}", normal),
         Spacer(1, 10),
-    ]
+    ])
     data = [[
         "", "Paczka", "Produkt", "Wymiar", "Ilość", "Jm", "Lokalizacja", "Uwagi",
     ]]
@@ -2345,7 +2362,7 @@ def simple_docx_bytes(payload):
     from docx.oxml.ns import qn
     from docx.shared import Mm, Pt, RGBColor
 
-    logo_path = os.path.join(app.root_path, "static", "primadera-logo.png")
+    logo_path = primadera_logo_path()
     if not os.path.isfile(logo_path):
         raise FileNotFoundError("Brak logo Primadera.")
 
@@ -2517,7 +2534,7 @@ def shop_pdf_fonts():
 def shop_pdf_bytes(payload):
     from xml.sax.saxutils import escape
 
-    logo_path = os.path.join(app.root_path, "static", "primadera-logo.png")
+    logo_path = primadera_logo_path()
     if not os.path.isfile(logo_path):
         raise FileNotFoundError("Brak logo Primadera.")
     body_font, bold_font = shop_pdf_fonts()
@@ -3725,7 +3742,9 @@ def require_login_for_private_app():
 
 @app.route('/favicon.ico')
 def favicon():
-    return Response(status=204)
+    response = make_response(app.send_static_file("favicon.ico"))
+    response.headers["Content-Type"] = "image/x-icon"
+    return response
 
 
 @app.route('/health')
@@ -8893,7 +8912,11 @@ def accounting_report_pdf(data, filters):
         textColor=colors.HexColor("#422D00"),alignment=TA_CENTER,
     )
     totals = data["totals"]
-    story = [
+    story = []
+    logo = primadera_pdf_logo(58 * mm, "CENTER")
+    if logo:
+        story.extend([logo, Spacer(1, 3*mm)])
+    story.extend([
         Paragraph("Raport księgowości Primadera", title_style),
         Spacer(1, 3*mm),
         Paragraph(
@@ -8906,7 +8929,7 @@ def accounting_report_pdf(data, filters):
             cell_style,
         ),
         Spacer(1, 3*mm),
-    ]
+    ])
     table_data = [[
         Paragraph(label, header_style)
         for label in (
@@ -11265,12 +11288,16 @@ def report_pdf():
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4)
     styles = getSampleStyleSheet()
-    elements = [
+    elements = []
+    logo = primadera_pdf_logo(58 * mm, "CENTER")
+    if logo:
+        elements.extend([logo, Spacer(1, 8)])
+    elements.extend([
         Paragraph("Raport dzienny magazynu", styles["Title"]),
         Spacer(1, 8),
         Paragraph(f"Data: {selected_date}", styles["Normal"]),
         Spacer(1, 12),
-    ]
+    ])
 
     data = [["Data", "Kontrahent", "Produkt", "Ilość", "Magazyn"]]
     for row in operations:

@@ -383,6 +383,7 @@ class ShopModuleTests(unittest.TestCase):
         pdf = warehouse_app.reservation_pdf_bytes(reservation, items)
 
         self.assertTrue(pdf.startswith(b"%PDF"))
+        self.assertIn(b"/Subtype /Image", pdf)
         self.assertGreater(len(pdf), 1000)
 
     def test_reserved_product_qty_combines_shop_and_reservation_modules(self):
