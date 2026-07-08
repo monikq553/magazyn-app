@@ -188,22 +188,29 @@ def issue_history_xlsx(rows):
 
 
 def _pdf_fonts():
+    root_path = os.path.dirname(__file__)
     regular_candidates = (
+        os.environ.get("PDF_DEJAVUSANS_TTF_PATH", ""),
+        os.path.join(root_path, "static", "fonts", "DejaVuSans.ttf"),
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        r"C:\Windows\Fonts\arial.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
     )
     bold_candidates = (
+        os.environ.get("PDF_DEJAVUSANS_BOLD_TTF_PATH", ""),
+        os.path.join(root_path, "static", "fonts", "DejaVuSans-Bold.ttf"),
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        r"C:\Windows\Fonts\arialbd.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
     )
     regular = next((path for path in regular_candidates if os.path.isfile(path)), None)
-    bold = next((path for path in bold_candidates if os.path.isfile(path)), None)
-    if regular and bold:
-        if "IssueImportSans" not in pdfmetrics.getRegisteredFontNames():
-            pdfmetrics.registerFont(TTFont("IssueImportSans", regular))
-            pdfmetrics.registerFont(TTFont("IssueImportSans-Bold", bold))
-        return "IssueImportSans", "IssueImportSans-Bold"
-    return "Helvetica", "Helvetica-Bold"
+    bold = next((path for path in bold_candidates if os.path.isfile(path)), None) or regular
+    if not regular:
+        raise RuntimeError(
+            "Brak fontu TTF z obsługą polskich znaków dla eksportu PDF importów."
+        )
+    if "IssueImportSans" not in pdfmetrics.getRegisteredFontNames():
+        pdfmetrics.registerFont(TTFont("IssueImportSans", regular))
+        pdfmetrics.registerFont(TTFont("IssueImportSans-Bold", bold))
+    return "IssueImportSans", "IssueImportSans-Bold"
 
 
 def _primadera_pdf_logo(width=58 * mm, align="CENTER"):
