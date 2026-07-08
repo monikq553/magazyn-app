@@ -40,6 +40,16 @@
   Dokument sprzedaży został wygenerowany i zapisany przy zamówieniu.
 </div>
 {% endif %}
+{% if request.args.get('document') == 'sent' %}
+<div class="card" style="margin-bottom:16px;color:#166534;">
+  Dokument sprzedaży został wysłany do klienta.
+</div>
+{% endif %}
+{% if request.args.get('document') == 'email-skipped' %}
+<div class="card" style="margin-bottom:16px;color:#166534;">
+  Dokument sprzedaży został wygenerowany. Brak adresu e-mail, więc wysyłka została pominięta.
+</div>
+{% endif %}
 {% if request.args.get('details') == 'saved' %}
 <div class="card" style="margin-bottom:16px;color:#166534;">
   Dane operacyjne zamówienia zostały zapisane.
@@ -48,26 +58,11 @@
 {% if request.args.get('edited') %}
 <div class="card" style="margin-bottom:16px;color:#166534;">Zmiany zamówienia zostały zapisane.</div>
 {% endif %}
-{% if request.args.get('salesperson') == 'saved' %}
-<div class="card" style="margin-bottom:16px;color:#166534;">Handlowiec został przypisany.</div>
-{% endif %}
 <div class="card" style="margin-bottom:16px;">
   <p><strong>Klient:</strong> {{ order[3] }} · {{ order[6] }} · {{ order[5] }}</p>
   <p><strong>Adres:</strong> {{ order[4] }} {% if order[14] %}· NIP: {{ order[14] }}{% endif %}</p>
   <p><strong>Status:</strong> {{ order[10] }} · <strong>Płatność:</strong> {{ order[9] }} · <strong>List:</strong> {{ order[12] or '' }}</p>
   <p><strong>Uwagi:</strong> {{ order[13] or '' }}</p>
-  <p><strong>Handlowiec prowadzący:</strong> {{ order[21] or order[20] or 'Nieprzypisany' }}</p>
-  {% if session.get('role') in ['admin','shop'] %}
-  <form method="POST" action="/sklep/orders/{{ order[0] }}/salesperson" class="order-inline-form" style="margin-bottom:10px;">
-    <select name="salesperson_email" required>
-      <option value="">Wybierz handlowca</option>
-      {% for person in salespeople %}
-      <option value="{{ person[0] }}" {% if order[20] == person[0] %}selected{% endif %}>{{ person[1] or person[0] }}</option>
-      {% endfor %}
-    </select>
-    <button type="submit">Przypisz handlowca</button>
-  </form>
-  {% endif %}
   {% if session.get('role') in ['admin','shop','warehouse','sales'] %}
   <form method="POST" action="/sklep/orders/{{ order[0] }}/details"
         style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px;">
@@ -118,7 +113,6 @@
 <div class="card" style="margin-bottom:16px;">
   <h3>Panel księgowy</h3>
   <p><strong>Można wydać:</strong> {{ 'TAK' if can_ship else 'NIE — wymagane opłacenie lub pobranie oraz oznaczenie gotowości do wysyłki' }}</p>
-  <p><strong>Handlowiec prowadzący:</strong> {{ order[21] or order[20] or 'Nieprzypisany' }}</p>
   <p><strong>Proforma:</strong> {{ accounting[13] or '—' }} · <strong>Faktura:</strong> {{ accounting[14] or '—' }} · <strong>Paragon:</strong> {{ accounting[15] or '—' }}</p>
   <p><strong>Zapłacono:</strong> {{ '%.2f'|format(accounting[18] or 0) }} · <strong>Pozostało:</strong> {{ '%.2f'|format(accounting[19] or 0) }} · <strong>Sposób:</strong> {{ accounting[6] or '—' }}</p>
   {% if session.get('role') in ['admin', 'accounting'] %}
@@ -136,7 +130,6 @@
     <label><input type="checkbox" name="document_to_warehouse" {% if accounting[10] %}checked{% endif %}> Dokument przekazany do magazynu</label>
     <label><input type="checkbox" name="ready_to_ship" {% if accounting[11] %}checked{% endif %}> Zamówienie gotowe do wysyłki</label>
     <label><input type="checkbox" name="settled" {% if accounting[12] %}checked{% endif %}> Zamówienie rozliczone</label>
-    <input name="salesperson" placeholder="Handlowiec prowadzący" value="{{ accounting[21] or '' }}">
     <select name="payment_method"><option value="">Sposób płatności</option>{% for m in payment_methods %}<option {% if accounting[6] == m %}selected{% endif %}>{{ m }}</option>{% endfor %}</select>
     <input name="proforma_number" placeholder="Nr proformy" value="{{ accounting[13] or '' }}">
     <input name="invoice_number" placeholder="Nr faktury" value="{{ accounting[14] or '' }}">
@@ -197,20 +190,14 @@
     </form>
     {% endif %}
     <p><a href="/sklep/documents/{{ document[0] }}/pdf">Pobierz PDF</a> · <a href="/sklep/documents/{{ document[0] }}/docx">Pobierz DOCX</a></p>
+    {% if order[6] %}
+    <form method="POST" action="/sklep/orders/{{ order[0] }}/document/send" class="order-inline-form">
+      <button type="submit">Wyślij dokument do klienta</button>
+    </form>
+    {% endif %}
   {% else %}
     <p>Dokument nie został jeszcze wygenerowany.</p>
   {% endif %}
-</div>
-<div class="card" style="margin-bottom:16px;overflow:auto;">
-  <h3>Historia przypisania handlowca</h3>
-  <table width="100%">
-    <tr><th>Data i godzina</th><th>Zmienił</th><th>Poprzedni</th><th>Nowy</th></tr>
-    {% for h in salesperson_history %}
-    <tr><td>{{ h[3] }}</td><td>{{ h[2] }}</td><td>{{ h[0] or 'brak' }}</td><td>{{ h[1] or 'brak' }}</td></tr>
-    {% else %}
-    <tr><td colspan="4">Brak zmian przypisania.</td></tr>
-    {% endfor %}
-  </table>
 </div>
 <div class="card" style="margin-bottom:16px;overflow:auto;">
   <h3>Historia etapów</h3>
