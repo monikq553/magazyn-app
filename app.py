@@ -595,6 +595,10 @@ def run_db_migrations():
     cur.execute("ALTER TABLE issue_docs ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW()")
     cur.execute("ALTER TABLE issue_docs ADD COLUMN IF NOT EXISTS voided_at TIMESTAMPTZ")
     cur.execute("ALTER TABLE issue_docs ADD COLUMN IF NOT EXISTS voided_by TEXT")
+    cur.execute("ALTER TABLE issue_docs ADD COLUMN IF NOT EXISTS void_reason TEXT")
+    cur.execute("ALTER TABLE issue_docs ADD COLUMN IF NOT EXISTS void_previous_status TEXT")
+    cur.execute("ALTER TABLE issue_docs ADD COLUMN IF NOT EXISTS restored_at TIMESTAMPTZ")
+    cur.execute("ALTER TABLE issue_docs ADD COLUMN IF NOT EXISTS restored_by TEXT")
     cur.execute("ALTER TABLE issue_items ADD COLUMN IF NOT EXISTS package_number TEXT")
     cur.execute("ALTER TABLE issue_items ADD COLUMN IF NOT EXISTS dimension TEXT")
     cur.execute("ALTER TABLE issue_items ADD COLUMN IF NOT EXISTS species TEXT")
@@ -1016,6 +1020,7 @@ def run_db_migrations():
         status TEXT NOT NULL DEFAULT 'draft',
         data JSONB NOT NULL DEFAULT '{}'::jsonb,
         void_reason TEXT,
+        void_previous_status TEXT,
         voided_by TEXT,
         voided_at TIMESTAMPTZ,
         restored_by TEXT,
@@ -1306,6 +1311,8 @@ def run_db_migrations():
     )
     cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS can_import_warehouse BOOLEAN NOT NULL DEFAULT FALSE")
     cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS can_import_accounting BOOLEAN NOT NULL DEFAULT FALSE")
+    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS can_delete_documents BOOLEAN NOT NULL DEFAULT FALSE")
+    cur.execute("ALTER TABLE accounting_documents ADD COLUMN IF NOT EXISTS void_previous_status TEXT")
     cur.execute("""
     CREATE TABLE IF NOT EXISTS contractors(
         id SERIAL PRIMARY KEY,
@@ -2857,6 +2864,21 @@ def admin_required(f):
     return decorated
 
 
+def can_delete_documents():
+    return session.get('role') == 'admin' or bool(session.get('can_delete_documents'))
+
+
+def document_delete_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if 'user' not in session:
+            return redirect('/login')
+        if not can_delete_documents():
+            return "Brak uprawnień do usuwania dokumentów.", 403
+        return f(*args, **kwargs)
+    return decorated
+
+
 def current_user_can(permission):
     role = session.get("role")
     return permission in ROLE_PERMISSIONS.get(role, set())
@@ -3249,7 +3271,11 @@ def firebase_password_sign_in(email, password):
 
 @app.context_processor
 def inject_permissions():
-    return {"can": current_user_can, "role_labels": ROLE_LABELS}
+    return {
+        "can": current_user_can,
+        "can_delete_documents": can_delete_documents,
+        "role_labels": ROLE_LABELS,
+    }
 
 
 # 🔐 LOGIN
@@ -3478,7 +3504,7 @@ def create_session():
         cur.execute(
             """
             SELECT role,status,can_import_warehouse,can_import_accounting,
-                   must_change_password,id,
+                   can_delete_documents,must_change_password,id,
                    (locked_until IS NOT NULL AND locked_until>NOW())
             FROM users
             WHERE firebase_uid=%s OR lower(email)=lower(%s)
@@ -3502,6 +3528,7 @@ def create_session():
             role = "admin"
             can_import_warehouse = True
             can_import_accounting = True
+            can_delete_documents_value = True
             must_change_password = False
             cur.execute(
                 """
@@ -3519,9 +3546,10 @@ def create_session():
             role, status = row[:2]
             can_import_warehouse = bool(row[2]) if len(row) > 2 else False
             can_import_accounting = bool(row[3]) if len(row) > 3 else False
-            must_change_password = bool(row[4]) if len(row) > 4 else False
-            user_id = row[5] if len(row) > 5 else None
-            is_temporarily_locked = bool(row[6]) if len(row) > 6 else False
+            can_delete_documents_value = bool(row[4]) if len(row) > 4 else False
+            must_change_password = bool(row[5]) if len(row) > 5 else False
+            user_id = row[6] if len(row) > 6 else None
+            is_temporarily_locked = bool(row[7]) if len(row) > 7 else False
             if role == "employee":
                 role = "warehouse"
             if status != "active":
@@ -3564,6 +3592,7 @@ def create_session():
     session['uid'] = uid
     session['can_import_warehouse'] = role == "admin" or can_import_warehouse
     session['can_import_accounting'] = role == "admin" or can_import_accounting
+    session['can_delete_documents'] = role == "admin" or can_delete_documents_value
     session['must_change_password'] = bool(must_change_password)
     response = make_response(jsonify({
         "ok": True,
@@ -3730,7 +3759,7 @@ def require_login_for_private_app():
             cur.execute(
                 """
                 SELECT role,status,can_import_warehouse,can_import_accounting,
-                       must_change_password,
+                       can_delete_documents,must_change_password,
                        (locked_until IS NOT NULL AND locked_until>NOW())
                 FROM users
                 WHERE firebase_uid=%s AND lower(email)=lower(%s)
@@ -3751,7 +3780,7 @@ def require_login_for_private_app():
                 title="Aplikacja chwilowo niedostępna",
                 message="Nie udało się połączyć z bazą danych. Spróbuj ponownie później.",
             ), 503
-        if account and account[1] == "active" and not bool(account[5]):
+        if account and account[1] == "active" and not bool(account[6]):
             session["user"] = email
             session["uid"] = uid
             session["role"] = account[0]
@@ -3761,7 +3790,10 @@ def require_login_for_private_app():
             session["can_import_accounting"] = (
                 account[0] == "admin" or (bool(account[3]) if len(account) > 3 else False)
             )
-            session["must_change_password"] = bool(account[4])
+            session["can_delete_documents"] = (
+                account[0] == "admin" or (bool(account[4]) if len(account) > 4 else False)
+            )
+            session["must_change_password"] = bool(account[5])
             if request.endpoint == "login":
                 return redirect("/")
         else:
@@ -3771,6 +3803,7 @@ def require_login_for_private_app():
         session.pop("user", None)
         session.pop("uid", None)
         session.pop("role", None)
+        session.pop("can_delete_documents", None)
         if request.endpoint == "login":
             return None
         if request.path.startswith("/api/") or request.is_json:
@@ -4026,7 +4059,7 @@ def users():
     cur.execute(
         """
         SELECT id, firebase_uid, first_name, last_name, email, role, status,
-               can_import_warehouse, can_import_accounting,phone,
+               can_import_warehouse, can_import_accounting, can_delete_documents, phone,
                must_change_password,last_login_at,password_changed_at,created_by,
                password_reset_by,failed_login_attempts,locked_until
         FROM users ORDER BY lower(last_name), lower(first_name), lower(email)
@@ -4218,19 +4251,20 @@ def update_user_role(user_id):
         UPDATE users SET role=%s,
             can_import_warehouse=CASE WHEN %s='warehouse' THEN can_import_warehouse ELSE FALSE END,
             can_import_accounting=CASE WHEN %s='accounting' THEN can_import_accounting ELSE FALSE END,
+            can_delete_documents=CASE WHEN %s='admin' THEN TRUE ELSE FALSE END,
             updated_at=NOW()
         WHERE id=%s
         """,
-        (new_role, new_role, new_role, user_id),
+        (new_role, new_role, new_role, new_role, user_id),
     )
     conn.commit()
     conn.close()
     return redirect('/users')
 
 
-@app.route('/users/<int:user_id>/import-permissions', methods=['POST'])
+@app.route('/users/<int:user_id>/permissions', methods=['POST'])
 @admin_required
-def update_user_import_permissions(user_id):
+def update_user_permissions(user_id):
     conn = db()
     cur = conn.cursor()
     try:
@@ -4246,20 +4280,22 @@ def update_user_import_permissions(user_id):
             user[0] == "accounting"
             and request.form.get("can_import_accounting") == "on"
         )
+        delete_allowed = user[0] != "admin" and request.form.get("can_delete_documents") == "on"
         cur.execute(
             """
             UPDATE users
-            SET can_import_warehouse=%s, can_import_accounting=%s, updated_at=NOW()
+            SET can_import_warehouse=%s, can_import_accounting=%s,
+                can_delete_documents=%s, updated_at=NOW()
             WHERE id=%s
             """,
-            (warehouse_allowed, accounting_allowed, user_id),
+            (warehouse_allowed, accounting_allowed, delete_allowed, user_id),
         )
         conn.commit()
         return redirect("/users")
     except Exception:
         conn.rollback()
-        logger.exception("Import permissions update failed.")
-        return "Nie udało się zapisać uprawnień importu.", 500
+        logger.exception("User permissions update failed.")
+        return "Nie udało się zapisać uprawnień użytkownika.", 500
     finally:
         conn.close()
 
@@ -8199,6 +8235,23 @@ def doc_detail(id):
         WHERE i.doc_id=%s
     """, (id,))
     items = cur.fetchall()
+    cur.execute(
+        """
+        SELECT void_reason, voided_by, voided_at, void_previous_status,
+               restored_at, restored_by
+        FROM issue_docs WHERE id=%s
+        """,
+        (id,),
+    )
+    doc_meta_row = cur.fetchone() or (None, None, None, None, None, None)
+    doc_meta = {
+        "void_reason": doc_meta_row[0],
+        "voided_by": doc_meta_row[1],
+        "voided_at": doc_meta_row[2],
+        "void_previous_status": doc_meta_row[3],
+        "restored_at": doc_meta_row[4],
+        "restored_by": doc_meta_row[5],
+    }
     issue_document = is_issue_document(doc[6] if len(doc) > 6 else None, doc[5])
     photos = []
     history = []
@@ -8233,6 +8286,7 @@ def doc_detail(id):
         issue_document=issue_document,
         photos=photos,
         history=history,
+        doc_meta=doc_meta,
     )
 
 
@@ -8320,6 +8374,9 @@ def edit_doc(id):
 
 
 def void_document(document_id):
+    reason = (request.form.get("reason") or "").strip()
+    if len(reason) < 3:
+        return "Podaj powód anulowania dokumentu.", 400
     conn = db()
     cur = conn.cursor()
     try:
@@ -8341,6 +8398,7 @@ def void_document(document_id):
             else "WZ" if document_number.startswith("WZ")
             else "PZ"
         )
+        previous_status = "Aktywny"
         cur.execute(
             """
             SELECT product_id, qty, warehouse, package_id
@@ -8374,31 +8432,40 @@ def void_document(document_id):
                     (qty, product_id, warehouse, qty),
                 )
                 if cur.rowcount != 1:
-                    raise ValueError("Nie można anulować przyjęcia: część towaru została już wydana.")
+                    raise ValueError("Nie można anulować PZ: część towaru została już wydana.")
                 if package_id:
-                    cur.execute(
-                        "SELECT qty FROM packages WHERE id=%s FOR UPDATE",
-                        (package_id,),
-                    )
-                    package = cur.fetchone()
-                    if not package or package[0] + 1e-9 < qty:
-                        raise ValueError("Nie można anulować przyjęcia: paczka została już częściowo wydana.")
                     cur.execute(
                         """
                         UPDATE packages
-                        SET qty=0, status='cancelled', archived_at=NOW()
-                        WHERE id=%s
+                        SET qty=qty-%s,
+                            status=CASE WHEN qty-%s <= 0 THEN 'cancelled' ELSE status END,
+                            archived_at=CASE WHEN qty-%s <= 0 THEN NOW() ELSE archived_at END
+                        WHERE id=%s AND qty >= %s
                         """,
-                        (package_id,),
+                        (qty, qty, qty, package_id, qty),
                     )
+                    if cur.rowcount != 1:
+                        raise ValueError("Nie można anulować PZ: paczka została już częściowo wydana.")
         cur.execute(
-            "UPDATE issue_docs SET voided_at=NOW(), voided_by=%s WHERE id=%s",
-            (session.get("user"), document_id),
+            """
+            UPDATE issue_docs
+            SET voided_at=NOW(), voided_by=%s, void_reason=%s,
+                void_previous_status=%s, restored_at=NULL, restored_by=NULL
+            WHERE id=%s
+            """,
+            (session.get("user"), reason, previous_status, document_id),
         )
-        log_action("document.voided", "issue_doc", document_id, {"movement_type": movement_type, "doc_number": document[1]}, conn)
+        issue_doc_history(cur, document_id, "anulowano dokument", f"{reason} (poprzedni status: {previous_status})")
+        log_action(
+            "document.voided",
+            "issue_doc",
+            document_id,
+            {"movement_type": movement_type, "doc_number": document[1], "reason": reason, "previous_status": previous_status},
+            conn,
+        )
         conn.commit()
         cache.clear()
-        return redirect(f"/doc/{document_id}")
+        return redirect(f"/doc/{document_id}?deleted=1")
     except ValueError as exc:
         conn.rollback()
         return str(exc), 409
@@ -8411,46 +8478,108 @@ def void_document(document_id):
 
 
 @app.route('/doc/<int:id>/delete', methods=['POST'])
-@admin_required
+@document_delete_required
 def delete_doc(id):
     return void_document(id)
 
+
+@app.route('/doc/<int:id>/restore', methods=['POST'])
+@document_delete_required
+def restore_doc(id):
     conn = db()
     cur = conn.cursor()
-
-    cur.execute("SELECT id, date, kontrahent, warehouse, image, doc_number FROM issue_docs WHERE id=%s", (id,))
-    doc = cur.fetchone()
-    if not doc:
+    try:
+        cur.execute(
+            """
+            SELECT movement_type, doc_number, voided_at, void_previous_status
+            FROM issue_docs WHERE id=%s FOR UPDATE
+            """,
+            (id,),
+        )
+        document = cur.fetchone()
+        if not document:
+            return redirect("/historia?deleted=1")
+        if not document[2]:
+            return redirect(f"/doc/{id}")
+        document_number = str(document[1] or "").upper()
+        movement_type = document[0] or (
+            "RW" if document_number.startswith("RW")
+            else "WZ" if document_number.startswith("WZ")
+            else "PZ"
+        )
+        cur.execute(
+            """
+            SELECT product_id, qty, warehouse, package_id
+            FROM issue_items WHERE doc_id=%s ORDER BY id FOR UPDATE
+            """,
+            (id,),
+        )
+        items = cur.fetchall()
+        if movement_type in {"WZ", "RW"}:
+            for product_id, qty, warehouse, package_id in items:
+                cur.execute(
+                    """
+                    UPDATE products SET qty=qty-%s
+                    WHERE id=%s AND warehouse=%s AND qty >= %s
+                    """,
+                    (qty, product_id, warehouse, qty),
+                )
+                if cur.rowcount != 1:
+                    raise ValueError("Nie można przywrócić dokumentu: brakuje towaru w magazynie.")
+                if package_id:
+                    cur.execute(
+                        """
+                        UPDATE packages SET qty=qty-%s
+                        WHERE id=%s AND qty >= %s
+                        """,
+                        (qty, package_id, qty),
+                    )
+                    if cur.rowcount != 1:
+                        raise ValueError("Nie można przywrócić dokumentu: brakuje ilości w paczce.")
+        else:
+            for product_id, qty, warehouse, package_id in items:
+                cur.execute(
+                    "UPDATE products SET qty=qty+%s WHERE id=%s AND warehouse=%s",
+                    (qty, product_id, warehouse),
+                )
+                if package_id:
+                    cur.execute(
+                        """
+                        UPDATE packages
+                        SET qty=qty+%s, status='active', archived_at=NULL
+                        WHERE id=%s
+                        """,
+                        (qty, package_id),
+                    )
+        cur.execute(
+            """
+            UPDATE issue_docs
+            SET voided_at=NULL, voided_by=NULL, void_reason=NULL,
+                restored_at=NOW(), restored_by=%s
+            WHERE id=%s
+            """,
+            (session.get("user"), id),
+        )
+        issue_doc_history(cur, id, "przywrócono dokument", f"poprzedni status: {document[3] or 'Aktywny'}")
+        log_action(
+            "document.restored",
+            "issue_doc",
+            id,
+            {"movement_type": movement_type, "doc_number": document[1]},
+            conn,
+        )
+        conn.commit()
+        cache.clear()
+        return redirect(f"/doc/{id}?restored=1")
+    except ValueError as exc:
+        conn.rollback()
+        return str(exc), 409
+    except Exception:
+        conn.rollback()
+        logger.exception("Document restore failed.")
+        return "Nie udało się przywrócić dokumentu.", 500
+    finally:
         conn.close()
-        return redirect('/historia')
-
-    cur.execute("""
-        SELECT product_id, qty, warehouse, package_id
-        FROM issue_items
-        WHERE doc_id=%s
-    """, (id,))
-    items = cur.fetchall()
-
-    is_issue_doc = str(doc[5] or "").startswith("WZ")
-
-    for product_id, qty, warehouse, package_id in items:
-        wh = warehouse or ""
-        sign = 1 if is_issue_doc else -1
-        cur.execute("""
-            UPDATE products
-            SET qty = qty + %s
-            WHERE id=%s AND warehouse=%s
-        """, (sign * qty, product_id, wh))
-
-        if package_id and is_issue_doc:
-            cur.execute("UPDATE packages SET qty = qty + %s WHERE id=%s", (qty, package_id))
-
-    cur.execute("DELETE FROM issue_items WHERE doc_id=%s", (id,))
-    cur.execute("DELETE FROM issue_docs WHERE id=%s", (id,))
-    cur.execute("DELETE FROM packages WHERE qty <= 0")
-    conn.commit()
-    conn.close()
-    return redirect('/historia')
 
 
 def backup_bucket():
@@ -9549,7 +9678,7 @@ def update_order_accounting(order_id):
 
 @app.route('/ksiegowosc/documents/<int:document_id>/delete', methods=['POST'])
 @login_required
-@accounting_required
+@document_delete_required
 def soft_delete_accounting_document(document_id):
     reason = (request.form.get("reason") or "").strip()
     if len(reason) < 3:
@@ -9580,10 +9709,11 @@ def soft_delete_accounting_document(document_id):
         cur.execute(
             """
             UPDATE accounting_documents SET status='cancelled',void_reason=%s,
-                voided_by=%s,voided_at=NOW(),updated_by=%s,updated_at=NOW()
+                void_previous_status=%s,voided_by=%s,voided_at=NOW(),
+                updated_by=%s,updated_at=NOW()
             WHERE id=%s
             """,
-            (reason,session.get("user"),session.get("user"),document_id),
+            (reason,status,session.get("user"),session.get("user"),document_id),
         )
         column_by_type = {
             "proforma": "proforma_issued",
@@ -9637,6 +9767,13 @@ def soft_delete_accounting_document(document_id):
             cur,order_id,"anulowano dokument",
             f"{document_type}: {reason}",
         )
+        log_action(
+            "accounting_document.voided",
+            "accounting_document",
+            document_id,
+            {"order_id": order_id, "document_type": document_type, "reason": reason, "previous_status": status},
+            conn,
+        )
         conn.commit()
         cache.clear()
         return redirect(f"/ksiegowosc/orders/{order_id}?deleted=1")
@@ -9652,7 +9789,7 @@ def soft_delete_accounting_document(document_id):
 
 
 @app.route('/ksiegowosc/documents/<int:document_id>/restore', methods=['POST'])
-@admin_required
+@document_delete_required
 def restore_accounting_document(document_id):
     conn = db()
     cur = conn.cursor()
@@ -9720,6 +9857,13 @@ def restore_accounting_document(document_id):
             cur,order_id,"document",document_id,"status","cancelled","active"
         )
         shop_history(cur,order_id,"przywrócono dokument",document_type)
+        log_action(
+            "accounting_document.restored",
+            "accounting_document",
+            document_id,
+            {"order_id": order_id, "document_type": document_type},
+            conn,
+        )
         conn.commit()
         cache.clear()
         return redirect(f"/ksiegowosc/orders/{order_id}?restored=1")
@@ -11347,7 +11491,11 @@ def historia():
     conn = db()
     cur = conn.cursor()
 
-    cur.execute("SELECT * FROM issue_docs ORDER BY id DESC")
+    show_deleted = request.args.get("deleted") == "1"
+    if show_deleted:
+        cur.execute("SELECT * FROM issue_docs WHERE voided_at IS NOT NULL ORDER BY id DESC")
+    else:
+        cur.execute("SELECT * FROM issue_docs WHERE voided_at IS NULL ORDER BY id DESC")
     docs = cur.fetchall()
     conn.close()
 
@@ -11355,7 +11503,7 @@ def historia():
     for d in docs:
         days.setdefault(d[1], []).append(d)
 
-    return render_template("historia.html", days=days)
+    return render_template("historia.html", days=days, show_deleted=show_deleted)
 
 
 @app.route('/report')

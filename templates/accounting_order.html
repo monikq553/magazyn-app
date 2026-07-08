@@ -122,15 +122,17 @@
       · <a href="/sklep/documents/{{ sales_document[0] }}/docx">DOCX</a>
     {% endif %}
     {% if document[3] != 'cancelled' %}
-    <form method="POST" action="/ksiegowosc/documents/{{ document[0] }}/delete" class="accounting-delete-form" style="display:grid;grid-template-columns:2fr 1fr auto;gap:8px;margin-top:8px;" onsubmit="return confirm('Dokument jest powiązany z: {{ document_warnings.get(document[0],[])|join(', ') }}. Czy na pewno go anulować?');">
-      <input name="reason" placeholder="Wymagany powód usunięcia" minlength="3" required>
-      <label><input type="checkbox" name="confirm_links" required> Potwierdzam powiązania</label>
-      <button type="submit" style="background:#ef4444;color:white;">Usuń</button>
-    </form>
+      {% if can_delete_documents() %}
+      <form method="POST" action="/ksiegowosc/documents/{{ document[0] }}/delete" class="accounting-delete-form" style="display:grid;grid-template-columns:2fr 1fr auto;gap:8px;margin-top:8px;" onsubmit="return confirm('Dokument jest powiązany z: {{ document_warnings.get(document[0],[])|join(', ') }}. Czy na pewno go anulować?');">
+        <input name="reason" placeholder="Wymagany powód usunięcia" minlength="3" required>
+        <label><input type="checkbox" name="confirm_links" required> Potwierdzam powiązania</label>
+        <button type="submit" style="background:#ef4444;color:white;">Usuń / Anuluj dokument</button>
+      </form>
+      {% endif %}
     {% else %}
       <p>Powód: {{ document[4] }} · {{ document[5] }} · {{ document[6] }}</p>
-      {% if session.get('role') == 'admin' %}
-      <form method="POST" action="/ksiegowosc/documents/{{ document[0] }}/restore"><button type="submit">Przywróć</button></form>
+      {% if can_delete_documents() %}
+      <form method="POST" action="/ksiegowosc/documents/{{ document[0] }}/restore"><button type="submit">Przywróć dokument</button></form>
       {% endif %}
     {% endif %}
   </div>

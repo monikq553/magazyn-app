@@ -97,15 +97,15 @@ input, select {
     <div>
         <strong>{{u[2]}} {{u[3]}}</strong>
         <div>{{u[4]}}</div>
-        {% if u[9] %}<div>{{ u[9] }}</div>{% endif %}
+        {% if u[10] %}<div>{{ u[10] }}</div>{% endif %}
         <div class="role">
             {{ role_labels.get(u[5], u[5]) }}
             · {{ 'aktywne' if u[6] == 'active' else 'nieaktywne' if u[6] == 'inactive' else 'zablokowane' }}
-            {% if u[10] %}· wymagana zmiana hasła{% endif %}
+            {% if u[11] %}· wymagana zmiana hasła{% endif %}
         </div>
-        <div class="role">Ostatnie logowanie: {{ u[11] or 'brak' }} · Ostatnia zmiana hasła: {{ u[12] or 'brak' }}</div>
-        <div class="role">Utworzył: {{ u[13] or 'brak danych' }} · Ostatni reset: {{ u[14] or 'brak' }}</div>
-        <div class="role">Nieudane logowania: {{ u[15] or 0 }} {% if u[16] %}· blokada do {{ u[16] }}{% endif %}</div>
+        <div class="role">Ostatnie logowanie: {{ u[12] or 'brak' }} · Ostatnia zmiana hasła: {{ u[13] or 'brak' }}</div>
+        <div class="role">Utworzył: {{ u[14] or 'brak danych' }} · Ostatni reset: {{ u[15] or 'brak' }}</div>
+        <div class="role">Nieudane logowania: {{ u[16] or 0 }} {% if u[17] %}· blokada do {{ u[17] }}{% endif %}</div>
     </div>
 
     <div class="actions">
@@ -120,17 +120,18 @@ input, select {
             <button class="btn">Zmień rolę</button>
         </form>
 
-        {% if u[5] in ['warehouse', 'accounting'] %}
-        <form method="POST" action="/users/{{u[0]}}/import-permissions" style="display:flex;gap:8px;align-items:center;">
+        <form method="POST" action="/users/{{u[0]}}/permissions" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
             {% if u[5] == 'warehouse' %}
             <label><input type="checkbox" name="can_import_warehouse" {% if u[7] %}checked{% endif %}> Import magazynowy</label>
             {% endif %}
             {% if u[5] == 'accounting' %}
             <label><input type="checkbox" name="can_import_accounting" {% if u[8] %}checked{% endif %}> Import księgowy/sklepowy</label>
             {% endif %}
-            <button class="btn">Zapisz import</button>
+            {% if u[5] != 'admin' %}
+            <label><input type="checkbox" name="can_delete_documents" {% if u[9] %}checked{% endif %}> Usuwanie dokumentów</label>
+            {% endif %}
+            <button class="btn">Zapisz uprawnienia</button>
         </form>
-        {% endif %}
 
         <form method="POST" action="/users/{{u[0]}}/reset-password">
             <button class="btn">Wyślij link resetu</button>
@@ -145,7 +146,7 @@ input, select {
             <button class="btn">Wymuś zmianę hasła</button>
         </form>
 
-        {% if u[6] == 'blocked' or u[16] %}
+        {% if u[6] == 'blocked' or u[17] %}
         <form method="POST" action="/users/{{u[0]}}/unlock">
             <button class="btn">Odblokuj</button>
         </form>
@@ -155,7 +156,7 @@ input, select {
         <form method="POST" action="/users/{{u[0]}}/toggle-active">
             <button class="btn">{{ 'Aktywuj' if u[6] == 'inactive' else 'Dezaktywuj' }}</button>
         </form>
-        {% if u[6] == 'active' and not u[16] %}
+        {% if u[6] == 'active' and not u[17] %}
         <form method="POST" action="/users/{{u[0]}}/toggle-block">
             <button class="btn">Zablokuj</button>
         </form>

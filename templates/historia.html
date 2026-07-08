@@ -2,7 +2,14 @@
 
 {% block content %}
 
-<h2 style="margin-bottom:20px;">Historia dokumentów</h2>
+<h2 style="margin-bottom:12px;">Historia dokumentów</h2>
+<div style="margin-bottom:20px;display:flex;gap:10px;flex-wrap:wrap;">
+    {% if show_deleted %}
+    <a class="btn" href="/historia">Pokaż aktywne dokumenty</a>
+    {% else %}
+    <a class="btn" href="/historia?deleted=1">Pokaż usunięte dokumenty</a>
+    {% endif %}
+</div>
 
 <style>
 .day {
@@ -47,6 +54,9 @@
 }
 </style>
 
+{% if not days %}
+<p>{{ 'Brak usuniętych/anulowanych dokumentów.' if show_deleted else 'Brak aktywnych dokumentów.' }}</p>
+{% endif %}
 {% for day, docs in days.items() %}
 <details class="day" open>
     <summary class="day-title">{{ day }} ({{ docs|length }})</summary>
