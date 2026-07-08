@@ -2041,7 +2041,7 @@ def reservation_pdf_bytes(reservation, items):
     if logo:
         story.extend([logo, Spacer(1, 5)])
     story.extend([
-        Paragraph("Rezerwacja - checklista magazyniera", title_style),
+        Paragraph("Rezerwacje magazyn", title_style),
         Spacer(1, 8),
         Paragraph(f"Numer rezerwacji: {escape(str(reservation[1]))}", normal),
         Paragraph(f"Data: {escape(str(reservation[2]))}", normal),
@@ -2091,7 +2091,7 @@ def reservation_pdf_bytes(reservation, items):
         Spacer(1, 8),
         Paragraph("Podpis: ________________________________", normal),
         Spacer(1, 8),
-        Paragraph("Uwagi magazyniera: ________________________________________________", normal),
+        Paragraph("Uwagi magazyn: ________________________________________________", normal),
     ])
     document.build(story)
     return output.getvalue()
@@ -2132,7 +2132,7 @@ def generate_and_store_reservation_pdf(cur, reservation_id, actor):
         """,
         (psycopg2.Binary(content), actor, reservation_id),
     )
-    reservation_history(cur, reservation_id, "wygenerowano PDF", "Checklista magazyniera")
+    reservation_history(cur, reservation_id, "wygenerowano PDF", "Rezerwacje magazyn")
     return content
 
 

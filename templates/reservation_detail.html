@@ -18,8 +18,8 @@
   <p><strong>Uwagi:</strong> {{ reservation[8] or '' }}</p>
   {% if reservation[9] %}<p><strong>Powód anulowania:</strong> {{ reservation[9] }}</p>{% endif %}
   <div class="reservation-actions">
-    <a class="button" href="/rezerwacje/{{ reservation[0] }}/pdf">PDF dla magazyniera</a>
-    <form method="POST" action="/rezerwacje/{{ reservation[0] }}/pdf/generate"><button>Generuj PDF dla magazyniera</button></form>
+    <a class="button" href="/rezerwacje/{{ reservation[0] }}/pdf">PDF dla magazynu</a>
+    <form method="POST" action="/rezerwacje/{{ reservation[0] }}/pdf/generate"><button>Generuj PDF dla magazynu</button></form>
     {% if can_pick and reservation[7] != 'wydana' and reservation[7] != 'anulowana' %}
     <form method="POST" action="/rezerwacje/{{ reservation[0] }}/complete"><button>Oznacz jako skompletowaną</button></form>
     <form method="POST" action="/rezerwacje/{{ reservation[0] }}/issue" onsubmit="return confirm('Wydać rezerwację i zdjąć towar ze stanu?');"><button>Wydaj z rezerwacji</button></form>
@@ -42,7 +42,7 @@
       {% if item[11] %}<br><small>Odhaczył: {{ item[11] }} · {{ item[12] }}</small>{% endif %}
     </div>
     <div>
-      <input name="warehouse_note" value="{{ item[13] or '' }}" placeholder="Uwaga magazyniera" {% if not can_pick %}disabled{% endif %}>
+      <input name="warehouse_note" value="{{ item[13] or '' }}" placeholder="Uwaga magazyn" {% if not can_pick %}disabled{% endif %}>
       {% if can_pick %}<button>Zapisz pozycję</button>{% endif %}
     </div>
   </form>
