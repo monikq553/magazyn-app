@@ -3,6 +3,8 @@ import logging
 import math
 import secrets
 import threading
+import smtplib
+from email.message import EmailMessage
 from flask import (
     Flask,
     Response,
@@ -2319,6 +2321,62 @@ def update_shop_stage(cur, order_id, stage_key, new_value, actor, tracking_numbe
         )
     return previous, new_value
 
+
+
+def normalize_optional_customer_email(value):
+    email = (value or "").strip()
+    if not email:
+        return None
+    if "@" not in email or len(email) > 254:
+        raise ValueError("Podaj prawidłowy adres e-mail klienta.")
+    return email
+
+
+def send_shop_sales_document_email(recipient, payload, pdf_bytes=None, docx_bytes=None):
+    recipient = normalize_optional_customer_email(recipient)
+    if not recipient:
+        return False
+    host = os.environ.get("SMTP_HOST") or os.environ.get("MAIL_SERVER")
+    if not host:
+        logger.info("SMTP is not configured; skipping shop sales document email.")
+        return False
+    port = int(os.environ.get("SMTP_PORT") or os.environ.get("MAIL_PORT") or "587")
+    username = os.environ.get("SMTP_USERNAME") or os.environ.get("MAIL_USERNAME")
+    password = os.environ.get("SMTP_PASSWORD") or os.environ.get("MAIL_PASSWORD")
+    sender = os.environ.get("SMTP_FROM") or os.environ.get("MAIL_DEFAULT_SENDER") or username
+    if not sender:
+        logger.info("SMTP sender is not configured; skipping shop sales document email.")
+        return False
+    message = EmailMessage()
+    message["From"] = sender
+    message["To"] = recipient
+    message["Subject"] = f"Dokument sprzedaży {payload.get('document_number', '')}".strip()
+    message.set_content(
+        "Dzień dobry,\n\n"
+        f"w załączniku przesyłamy dokument sprzedaży do zamówienia {payload.get('order_number', '')}.\n\n"
+        "Pozdrawiamy,\nPrimadera"
+    )
+    safe_number = secure_filename(str(payload.get("document_number") or "dokument")) or "dokument"
+    if pdf_bytes:
+        message.add_attachment(pdf_bytes, maintype="application", subtype="pdf", filename=f"{safe_number}.pdf")
+    if docx_bytes:
+        message.add_attachment(
+            docx_bytes,
+            maintype="application",
+            subtype="vnd.openxmlformats-officedocument.wordprocessingml.document",
+            filename=f"{safe_number}.docx",
+        )
+    try:
+        with smtplib.SMTP(host, port, timeout=10) as smtp:
+            if str(os.environ.get("SMTP_STARTTLS") or os.environ.get("MAIL_USE_TLS") or "1").lower() not in {"0", "false", "no"}:
+                smtp.starttls()
+            if username:
+                smtp.login(username, password or "")
+            smtp.send_message(message)
+        return True
+    except Exception:
+        logger.exception("Shop sales document email sending failed; operation will continue without blocking.")
+        return False
 
 def create_shop_document_payload(order, items):
     subtotal_net = sum((item[4] or 0) * (item[3] or 0) for item in items)
@@ -10405,7 +10463,7 @@ def shop_create_order():
         ).strip()
         customer_name = (request.form.get("customer_name") or "").strip()
         delivery_address = (request.form.get("delivery_address") or "").strip()
-        email = (request.form.get("email") or "").strip()
+        email = normalize_optional_customer_email(request.form.get("email"))
         phone = (request.form.get("phone") or "").strip()
         nip = (request.form.get("nip") or "").strip()
         payment_method = (request.form.get("payment_method") or "").strip()
@@ -10418,8 +10476,6 @@ def shop_create_order():
             raise ValueError("Nazwa klienta jest wymagana i może mieć maksymalnie 200 znaków.")
         if not delivery_address or len(delivery_address) > 500:
             raise ValueError("Adres dostawy jest wymagany i może mieć maksymalnie 500 znaków.")
-        if email and ("@" not in email or len(email) > 254):
-            raise ValueError("Podaj prawidłowy adres e-mail klienta.")
         if len(phone) > 50 or len(nip) > 30:
             raise ValueError("Telefon lub NIP jest zbyt długi.")
         if payment_method and payment_method not in ACCOUNTING_PAYMENT_METHODS:
@@ -10431,8 +10487,6 @@ def shop_create_order():
             if current_user_role() == "sales"
             else (request.form.get("salesperson_email") or "").strip().lower()
         )
-        if not salesperson_email:
-            raise ValueError("Wybierz handlowca prowadzącego zamówienie.")
         order_date = normalized_document_date(request.form.get("date"))
         shipping = parse_nonnegative_number(
             request.form.get("shipping_cost"), "Koszt wysyłki"
@@ -10785,7 +10839,7 @@ def shop_edit_order(order_id):
             (
                 customer_name, delivery_address,
                 (request.form.get("phone") or "").strip()[:50],
-                (request.form.get("email") or "").strip()[:254],
+                normalize_optional_customer_email(request.form.get("email")),
                 (request.form.get("nip") or "").strip()[:30],
                 (request.form.get("notes") or "").strip()[:2000],
                 order_id,
@@ -11111,6 +11165,19 @@ def shop_generate_document(order_id):
         _document, payload = generate_shop_sales_document(
             cur, order_id, session.get("user")
         )
+        email_sent = False
+        if payload.get("email"):
+            cur.execute("SELECT pdf,docx FROM shop_sales_documents WHERE id=%s", (_document[0],))
+            document_files = cur.fetchone()
+            if document_files:
+                email_sent = send_shop_sales_document_email(
+                    payload.get("email"),
+                    payload,
+                    bytes(document_files[0] or b""),
+                    bytes(document_files[1] or b""),
+                )
+        if email_sent:
+            update_shop_stage(cur, order_id, "document_sent", True, session.get("user", "system"))
         shop_history(cur, order_id, "wygenerowano dokument", payload["document_number"])
         cur.execute(
             """
@@ -11139,6 +11206,61 @@ def shop_generate_document(order_id):
                 "Dane zamówienia pozostały bez zmian. Sprawdź produkty i spróbuj ponownie."
             ),
         ), 500
+    finally:
+        conn.close()
+
+
+@app.route('/sklep/orders/<int:order_id>/document/send', methods=['POST'])
+@login_required
+def shop_send_document(order_id):
+    if not (can_shop("sales") or can_shop("accounting")):
+        return "Brak uprawnień do wysyłki dokumentu sprzedaży.", 403
+    conn = db()
+    cur = conn.cursor()
+    try:
+        denied = sales_order_access_error(cur, order_id)
+        if denied:
+            return denied
+        cur.execute(
+            """
+            SELECT o.email,d.id,d.document_number,d.editable_data,d.pdf,d.docx
+            FROM shop_orders o
+            JOIN shop_sales_documents d ON d.order_id=o.id
+            WHERE o.id=%s AND d.voided_at IS NULL
+            """,
+            (order_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return "Najpierw wygeneruj dokument sprzedaży.", 404
+        recipient = normalize_optional_customer_email(row[0])
+        if not recipient:
+            return redirect(f"/sklep/orders/{order_id}?document=email-skipped")
+        payload = row[3] or {}
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        payload.setdefault("document_number", row[2])
+        sent = send_shop_sales_document_email(
+            recipient,
+            payload,
+            bytes(row[4] or b""),
+            bytes(row[5] or b""),
+        )
+        if sent:
+            update_shop_stage(cur, order_id, "document_sent", True, session.get("user", "system"))
+            shop_history(cur, order_id, "wysłano dokument", recipient)
+            conn.commit()
+            cache.clear()
+            return redirect(f"/sklep/orders/{order_id}?document=sent")
+        conn.commit()
+        return redirect(f"/sklep/orders/{order_id}?document=email-skipped")
+    except ValueError as exc:
+        conn.rollback()
+        return str(exc), 400
+    except Exception:
+        conn.rollback()
+        logger.exception("Shop sales document email failed.")
+        return redirect(f"/sklep/orders/{order_id}?document=email-skipped")
     finally:
         conn.close()
 
