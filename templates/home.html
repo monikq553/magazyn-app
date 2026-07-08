@@ -1,8 +1,5 @@
 {% extends "base.html" %}
 {% block content %}
-<a href="/" aria-label="Pmagazyn Primadera - strona główna" style="display:inline-block;margin-bottom:20px;">
-    <img src="{{ url_for('static', filename='primadera-logo.png') }}" alt="Primadera" style="display:block;width:min(360px,100%);height:auto;">
-</a>
 <h2 style="margin-bottom:25px;">Panel główny</h2>
 <div class="tiles">
 {% if can('inventory') %}
