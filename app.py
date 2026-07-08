@@ -1963,6 +1963,65 @@ def primadera_pdf_logo(width=64 * mm, align="LEFT"):
     return image
 
 
+PDF_FONT_REGULAR = "PrimaderaSans"
+PDF_FONT_BOLD = "PrimaderaSans-Bold"
+
+
+def pdf_font_candidates(filename):
+    return [
+        os.environ.get(f"PDF_{filename.upper().replace('-', '_').replace('.', '_')}_PATH", ""),
+        os.path.join(app.root_path, "static", "fonts", filename),
+        os.path.join("/usr/share/fonts/truetype/dejavu", filename),
+        os.path.join("/usr/share/fonts/truetype/liberation2", filename),
+        os.path.join("/usr/share/fonts/truetype/liberation", filename),
+        os.path.join(os.path.expanduser("~"), ".fonts", filename),
+    ]
+
+
+def first_existing_font(*filenames):
+    for filename in filenames:
+        for path in pdf_font_candidates(filename):
+            if path and os.path.isfile(path):
+                return path
+    return None
+
+
+def register_pdf_fonts():
+    regular = first_existing_font(
+        "DejaVuSans.ttf",
+        "LiberationSans-Regular.ttf",
+        "NotoSans-Regular.ttf",
+    )
+    bold = first_existing_font(
+        "DejaVuSans-Bold.ttf",
+        "LiberationSans-Bold.ttf",
+        "NotoSans-Bold.ttf",
+    ) or regular
+    if not regular:
+        raise RuntimeError(
+            "Brak fontu TTF z obsługą polskich znaków dla PDF. "
+            "Dodaj static/fonts/DejaVuSans.ttf albo ustaw PDF_DEJAVUSANS_TTF_PATH."
+        )
+    registered = set(pdfmetrics.getRegisteredFontNames())
+    if PDF_FONT_REGULAR not in registered:
+        pdfmetrics.registerFont(TTFont(PDF_FONT_REGULAR, regular))
+    if PDF_FONT_BOLD not in registered:
+        pdfmetrics.registerFont(TTFont(PDF_FONT_BOLD, bold))
+    return PDF_FONT_REGULAR, PDF_FONT_BOLD
+
+
+def pdf_styles():
+    body_font, bold_font = register_pdf_fonts()
+    styles = getSampleStyleSheet()
+    for style_name in ("Normal", "BodyText", "Italic"):
+        if style_name in styles:
+            styles[style_name].fontName = body_font
+    for style_name in ("Title", "Heading1", "Heading2", "Heading3", "Heading4"):
+        if style_name in styles:
+            styles[style_name].fontName = bold_font
+    return styles, body_font, bold_font
+
+
 def reservation_pdf_bytes(reservation, items):
     output = io.BytesIO()
     document = SimpleDocTemplate(
@@ -1973,7 +2032,7 @@ def reservation_pdf_bytes(reservation, items):
         topMargin=12 * mm,
         bottomMargin=12 * mm,
     )
-    styles = getSampleStyleSheet()
+    styles, body_font, bold_font = pdf_styles()
     title_style = styles["Title"]
     normal = styles["Normal"]
     small = ParagraphStyle("reservation-small", parent=normal, fontSize=8, leading=10)
@@ -2015,6 +2074,8 @@ def reservation_pdf_bytes(reservation, items):
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#FFC067")),
         ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#9CA3AF")),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("FONTNAME", (0, 0), (-1, -1), body_font),
+        ("FONTNAME", (0, 0), (-1, 0), bold_font),
         ("ALIGN", (0, 1), (0, -1), "CENTER"),
         ("ALIGN", (4, 1), (4, -1), "RIGHT"),
         ("FONTSIZE", (0, 0), (-1, -1), 8),
@@ -2578,22 +2639,7 @@ def simple_docx_bytes(payload):
 
 
 def shop_pdf_fonts():
-    regular_candidates = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        r"C:\Windows\Fonts\arial.ttf",
-    ]
-    bold_candidates = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        r"C:\Windows\Fonts\arialbd.ttf",
-    ]
-    regular = next((path for path in regular_candidates if os.path.isfile(path)), None)
-    bold = next((path for path in bold_candidates if os.path.isfile(path)), None)
-    if regular and bold:
-        if "ShopSans" not in pdfmetrics.getRegisteredFontNames():
-            pdfmetrics.registerFont(TTFont("ShopSans", regular))
-            pdfmetrics.registerFont(TTFont("ShopSans-Bold", bold))
-        return "ShopSans", "ShopSans-Bold"
-    return "Helvetica", "Helvetica-Bold"
+    return register_pdf_fonts()
 
 
 def shop_pdf_bytes(payload):
@@ -2614,7 +2660,7 @@ def shop_pdf_bytes(payload):
         title=f"Dokument sprzedaży {payload['document_number']}",
         author="Primadera",
     )
-    styles = getSampleStyleSheet()
+    styles, body_font, bold_font = pdf_styles()
     normal = ParagraphStyle(
         "ShopNormal",
         parent=styles["Normal"],
@@ -9085,7 +9131,7 @@ def accounting_report_pdf(data, filters):
         topMargin=10*mm,bottomMargin=10*mm,title="Raport księgowości Primadera",
         author="Primadera",
     )
-    styles = getSampleStyleSheet()
+    styles, body_font, bold_font = pdf_styles()
     title_style = ParagraphStyle(
         "AccountingTitle",parent=styles["Title"],fontName=bold_font,fontSize=16,
         leading=20,textColor=colors.HexColor("#422D00"),alignment=TA_CENTER,
@@ -11557,28 +11603,37 @@ def report_pdf():
 
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4)
-    styles = getSampleStyleSheet()
+    styles, body_font, bold_font = pdf_styles()
+    title_style = styles["Title"]
+    normal_style = styles["Normal"]
     elements = []
     logo = primadera_pdf_logo(58 * mm, "CENTER")
     if logo:
         elements.extend([logo, Spacer(1, 8)])
     elements.extend([
-        Paragraph("Raport dzienny magazynu", styles["Title"]),
+        Paragraph("Raport dzienny magazynu", title_style),
         Spacer(1, 8),
-        Paragraph(f"Data: {selected_date}", styles["Normal"]),
+        Paragraph(f"Data: {selected_date}", normal_style),
         Spacer(1, 12),
     ])
 
     data = [["Data", "Kontrahent", "Produkt", "Ilość", "Magazyn"]]
     for row in operations:
-        data.append([str(row[0]), str(row[1]), str(row[2]), str(row[3]), str(row[4])])
+        data.append([
+            Paragraph(escape(str(row[0])), normal_style),
+            Paragraph(escape(str(row[1])), normal_style),
+            Paragraph(escape(str(row[2])), normal_style),
+            Paragraph(escape(str(row[3])), normal_style),
+            Paragraph(escape(str(row[4])), normal_style),
+        ])
 
     table = Table(data, repeatRows=1)
     table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#FFC067")),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
         ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTNAME", (0, 0), (-1, -1), body_font),
+        ("FONTNAME", (0, 0), (-1, 0), bold_font),
         ("ALIGN", (3, 1), (3, -1), "RIGHT"),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
     ]))
