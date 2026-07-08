@@ -1,11 +1,5 @@
-const CACHE_NAME = "pmagazyn-shell-v2";
-const SHELL_ASSETS = [
-  "/static/favicon.ico",
-  "/static/icons/icon-180.png",
-  "/static/icons/icon-192.png",
-  "/static/icons/icon-512.png",
-  "/static/primadera-logo.png"
-];
+const CACHE_NAME = "pmagazyn-shell-v3";
+const SHELL_ASSETS = [];
 
 const BYPASS_PREFIXES = [
   "/auth/",
@@ -71,8 +65,6 @@ self.addEventListener("push", event => {
   event.waitUntil(
     self.registration.showNotification(payload.title || "Pmagazyn", {
       body: payload.body || "Nowa rezerwacja do przygotowania",
-      icon: "/static/icons/icon-192.png",
-      badge: "/static/icons/icon-192.png",
       data: payload.url || "/rezerwacje"
     })
   );
