@@ -51,14 +51,6 @@
     <input name="order_number" value="{{ fd.get('order_number','') }}" placeholder="Numer zamówienia (auto)">
     <input type="date" name="date" value="{{ fd.get('date','') }}">
     <input name="customer_name" value="{{ fd.get('customer_name','') }}" placeholder="Klient" required>
-    {% if session.get('role') != 'sales' %}
-    <select name="salesperson_email" required>
-      <option value="">Handlowiec prowadzący</option>
-      {% for person in salespeople %}
-      <option value="{{ person[0] }}" {% if fd.get('salesperson_email') == person[0] %}selected{% endif %}>{{ person[1] or person[0] }}</option>
-      {% endfor %}
-    </select>
-    {% endif %}
     <input name="delivery_address" value="{{ fd.get('delivery_address','') }}" placeholder="Adres dostawy" required>
     <input name="phone" value="{{ fd.get('phone','') }}" placeholder="Telefon">
     <input name="email" value="{{ fd.get('email','') }}" type="email" placeholder="E-mail">
@@ -98,12 +90,6 @@
   <form method="GET" action="/sklep" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;margin-bottom:12px;">
     <input name="q" value="{{ filters.q }}" placeholder="Zamówienie, dokument, produkt">
     <input name="client" value="{{ filters.client }}" placeholder="Klient">
-    <select name="salesperson">
-      <option value="">Wszyscy handlowcy</option>
-      {% for person in salespeople %}
-      <option value="{{ person[0] }}" {% if filters.salesperson == person[0] %}selected{% endif %}>{{ person[1] or person[0] }}</option>
-      {% endfor %}
-    </select>
     <input type="date" name="date" value="{{ filters.date }}">
     <select name="status"><option value="">Wszystkie statusy</option>{% for s in statuses %}<option {% if filters.status == s %}selected{% endif %}>{{ s }}</option>{% endfor %}</select>
     {% for field, label in [('invoice','Faktura'),('receipt','Paragon'),('paid','Płatność'),('shipped','Wysyłka'),('packed','Pakowanie')] %}
@@ -117,11 +103,11 @@
     <a href="/sklep" style="align-self:center;">Wyczyść filtry</a>
   </form>
   <div style="overflow:auto;">
-  <table width="100%"><tr><th>Numer</th><th>Data</th><th>Klient</th><th>Handlowiec</th><th>Status</th><th>Kluczowe etapy</th><th>Płatność</th><th>Dokument</th><th>Paczka</th><th>Wartość</th><th>Akcja</th></tr>
+  <table width="100%"><tr><th>Numer</th><th>Data</th><th>Klient</th><th>Status</th><th>Kluczowe etapy</th><th>Płatność</th><th>Dokument</th><th>Paczka</th><th>Wartość</th><th>Akcja</th></tr>
   {% for o in orders %}
   <tr>
     <td><a href="/sklep/orders/{{ o[0] }}">{{ o[1] }}</a></td><td>{{ o[2] }}</td>
-    <td>{{ o[3] }}</td><td>{{ o[15] or 'Nieprzypisany' }}</td><td>{{ o[4] }}</td>
+    <td>{{ o[3] }}</td><td>{{ o[4] }}</td>
     <td class="shop-stage-list">
       {% set stages = o[11] or {} %}
       <span title="Zapłacone">{{ '✓' if o[14] else '□' }} Płatność</span><br>
@@ -142,6 +128,11 @@
       {% if o[9] %}
       <a href="/sklep/documents/{{ o[9] }}/pdf">PDF</a>
       <a href="/sklep/documents/{{ o[9] }}/docx">DOCX</a>
+      {% if o[16] %}
+      <form method="POST" action="/sklep/orders/{{ o[0] }}/document/send">
+        <button>Wyślij e-mail</button>
+      </form>
+      {% endif %}
       {% endif %}
     </td>
   </tr>
