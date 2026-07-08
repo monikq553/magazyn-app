@@ -8,9 +8,6 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Pmagazyn">
 <link rel="manifest" href="/manifest.json">
-<link rel="apple-touch-icon" sizes="180x180" href="{{ url_for('static', filename='icons/icon-180.png') }}">
-<link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}" sizes="any">
-<link rel="icon" type="image/png" sizes="192x192" href="{{ url_for('static', filename='icons/icon-192.png') }}">
 <title>Pmagazyn</title>
 
 <style>
@@ -62,23 +59,7 @@ body {
     margin-bottom: 24px;
 }
 
-.brand-logo {
-    display: block;
-    width: 112px;
-    max-width: 100%;
-    height: auto;
-    flex: 0 0 auto;
-}
 
-.brand-logo-mark {
-    width: 42px;
-    height: 42px;
-    object-fit: contain;
-    border-radius: 8px;
-    background: #ffffff;
-    padding: 4px;
-    flex: 0 0 auto;
-}
 
 .brand-copy {
     min-width: 0;
@@ -91,13 +72,6 @@ body {
     font-weight: 800;
 }
 
-.brand-company {
-    display: block;
-    margin-top: 3px;
-    font-size: 12px;
-    font-weight: 600;
-    color: #6b4a0b;
-}
 
 .nav a {
     display: block;
@@ -484,8 +458,10 @@ td {
 
     <!-- SIDEBAR -->
     <div class="sidebar">
-        <a class="brand-link" href="/" aria-label="Pmagazyn Primadera - strona główna">
-            <img class="brand-logo" src="{{ url_for('static', filename='primadera-logo.png') }}" alt="Primadera">
+        <a class="brand-link" href="/" aria-label="Pmagazyn - strona główna">
+            <span class="brand-copy">
+                <span class="brand-app">Pmagazyn</span>
+            </span>
         </a>
 
         <div class="nav">
@@ -523,11 +499,9 @@ td {
 
         <div class="topbar">
             <button class="mobile-menu-button" type="button" aria-label="Otwórz menu" aria-expanded="false">☰</button>
-            <a class="brand-link topbar-brand" href="/" aria-label="Pmagazyn Primadera - strona główna">
-                <img class="brand-logo-mark" src="{{ url_for('static', filename='icons/icon-192.png') }}" alt="">
+            <a class="brand-link topbar-brand" href="/" aria-label="Pmagazyn - strona główna">
                 <span class="brand-copy">
                     <span class="brand-app">Pmagazyn</span>
-                    <span class="brand-company">Primadera</span>
                 </span>
             </a>
         </div>
