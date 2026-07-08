@@ -1,0 +1,342 @@
+name: Codex one-time logo and shop hotfix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/codex-hotfix-logo-shop.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apply-hotfix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Apply logo and shop fixes
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+          import json
+
+          def read(path):
+              return Path(path).read_text(encoding="utf-8")
+
+          def write(path, text):
+              Path(path).write_text(text, encoding="utf-8", newline="\n")
+
+          def replace(text, old, new, label):
+              if old not in text:
+                  raise SystemExit(f"Missing expected block: {label}")
+              return text.replace(old, new)
+
+          base_path = Path("templates/base.html")
+          base = read(base_path)
+          for line in [
+              '<link rel="apple-touch-icon" sizes="180x180" href="{{ url_for(\'static\', filename=\'icons/icon-180.png\') }}">\n',
+              '<link rel="icon" href="{{ url_for(\'static\', filename=\'favicon.ico\') }}" sizes="any">\n',
+              '<link rel="icon" type="image/png" sizes="192x192" href="{{ url_for(\'static\', filename=\'icons/icon-192.png\') }}">\n',
+          ]:
+              base = base.replace(line, "")
+          base = re.sub(r"\n\.brand-logo \{.*?\n\}\n", "\n", base, flags=re.S)
+          base = re.sub(r"\n\.brand-logo-mark \{.*?\n\}\n", "\n", base, flags=re.S)
+          base = re.sub(r"\n\.brand-company \{.*?\n\}\n", "\n", base, flags=re.S)
+          base = replace(base,
+          '''        <a class="brand-link" href="/" aria-label="Pmagazyn Primadera - strona główna">
+              <img class="brand-logo" src="{{ url_for('static', filename='primadera-logo.png') }}" alt="Primadera">
+          </a>''',
+          '''        <a class="brand-link" href="/" aria-label="Pmagazyn - strona główna">
+              <span class="brand-copy">
+                  <span class="brand-app">Pmagazyn</span>
+              </span>
+          </a>''', "sidebar logo")
+          base = replace(base,
+          '''            <a class="brand-link topbar-brand" href="/" aria-label="Pmagazyn Primadera - strona główna">
+                  <img class="brand-logo-mark" src="{{ url_for('static', filename='icons/icon-192.png') }}" alt="">
+                  <span class="brand-copy">
+                      <span class="brand-app">Pmagazyn</span>
+                      <span class="brand-company">Primadera</span>
+                  </span>
+              </a>''',
+          '''            <a class="brand-link topbar-brand" href="/" aria-label="Pmagazyn - strona główna">
+                  <span class="brand-copy">
+                      <span class="brand-app">Pmagazyn</span>
+                  </span>
+              </a>''', "topbar logo")
+          write(base_path, base)
+
+          home_path = Path("templates/home.html")
+          home = read(home_path)
+          home = re.sub(r"\A\{% extends \"base.html\" %\}\n\{% block content %\}\n<a href=\"/\" aria-label=\"Pmagazyn Primadera - strona główna\".*?</a>\n", "{% extends \"base.html\" %}\n{% block content %}\n", home, flags=re.S)
+          write(home_path, home)
+
+          login_path = Path("templates/login.html")
+          login = read(login_path)
+          login = re.sub(r"\n    <a href=\"/\" aria-label=\"Pmagazyn Primadera - strona główna\".*?</a>\n", "\n", login, flags=re.S)
+          write(login_path, login)
+
+          shop_path = Path("templates/shop.html")
+          shop = read(shop_path)
+          shop = re.sub(r"\n    \{% if session\.get\('role'\) != 'sales' %\}\n    <select name=\"salesperson_email\" required>.*?\n    \{% endif %\}", "", shop, flags=re.S)
+          shop = re.sub(r"\n    <select name=\"salesperson\">.*?\n    </select>", "", shop, flags=re.S)
+          shop = shop.replace("<th>Handlowiec</th>", "")
+          shop = shop.replace("<td>{{ o[3] }}</td><td>{{ o[15] or 'Nieprzypisany' }}</td><td>{{ o[4] }}</td>", "<td>{{ o[3] }}</td><td>{{ o[4] }}</td>")
+          shop = shop.replace(
+          '''      {% if o[9] %}
+            <a href="/sklep/documents/{{ o[9] }}/pdf">PDF</a>
+            <a href="/sklep/documents/{{ o[9] }}/docx">DOCX</a>
+            {% endif %}''',
+          '''      {% if o[9] %}
+            <a href="/sklep/documents/{{ o[9] }}/pdf">PDF</a>
+            <a href="/sklep/documents/{{ o[9] }}/docx">DOCX</a>
+            {% if o[6] %}
+            <form method="POST" action="/sklep/orders/{{ o[0] }}/document/send">
+              <button>Wyślij e-mail</button>
+            </form>
+            {% endif %}
+            {% endif %}''')
+          write(shop_path, shop)
+
+          order_path = Path("templates/shop_order.html")
+          order = read(order_path)
+          order = re.sub(r"\n\{% if request\.args\.get\('salesperson'\) == 'saved' %\}.*?\{% endif %\}", "", order, flags=re.S)
+          order = re.sub(r"\n  <p><strong>Handlowiec prowadzący:</strong>.*?</p>", "", order)
+          order = re.sub(r"\n  \{% if session\.get\('role'\) in \['admin','shop'\] %\}\n  <form method=\"POST\" action=\"/sklep/orders/\{\{ order\[0\] \}\}/salesperson\".*?\n  \{% endif %\}", "", order, flags=re.S)
+          order = re.sub(r"\n  <p><strong>Handlowiec prowadzący:</strong>.*?</p>", "", order)
+          order = re.sub(r"\n    <input name=\"salesperson\" placeholder=\"Handlowiec prowadzący\" value=\"\{\{ accounting\[21\] or '' \}\}\">", "", order)
+          order = re.sub(r"\n<div class=\"card\" style=\"margin-bottom:16px;overflow:auto;\">\n  <h3>Historia przypisania handlowca</h3>.*?\n</div>", "", order, flags=re.S)
+          order = order.replace(
+          '''{% if request.args.get('document') == 'generated' %}
+          <div class="card" style="margin-bottom:16px;color:#166534;">
+            Dokument sprzedaży został wygenerowany i zapisany przy zamówieniu.
+          </div>
+          {% endif %}''',
+          '''{% if request.args.get('document') == 'generated' %}
+          <div class="card" style="margin-bottom:16px;color:#166534;">
+            Dokument sprzedaży został wygenerowany i zapisany przy zamówieniu.
+          </div>
+          {% endif %}
+          {% if request.args.get('document') == 'sent' %}
+          <div class="card" style="margin-bottom:16px;color:#166534;">
+            Dokument sprzedaży został wysłany do klienta.
+          </div>
+          {% endif %}
+          {% if request.args.get('document') == 'email-skipped' %}
+          <div class="card" style="margin-bottom:16px;color:#166534;">
+            Dokument sprzedaży został wygenerowany. Brak adresu e-mail, więc wysyłka została pominięta.
+          </div>
+          {% endif %}''')
+          order = order.replace(
+          '''    <p><a href="/sklep/documents/{{ document[0] }}/pdf">Pobierz PDF</a> · <a href="/sklep/documents/{{ document[0] }}/docx">Pobierz DOCX</a></p>''',
+          '''    <p><a href="/sklep/documents/{{ document[0] }}/pdf">Pobierz PDF</a> · <a href="/sklep/documents/{{ document[0] }}/docx">Pobierz DOCX</a></p>
+              {% if order[6] %}
+              <form method="POST" action="/sklep/orders/{{ order[0] }}/document/send" class="order-inline-form">
+                <button type="submit">Wyślij dokument do klienta</button>
+              </form>
+              {% endif %}''')
+          write(order_path, order)
+
+          manifest_path = Path("static/manifest.json")
+          manifest = json.loads(read(manifest_path))
+          manifest["description"] = "Panel magazynowy Pmagazyn"
+          manifest["icons"] = []
+          write(manifest_path, json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+
+          sw_path = Path("static/service-worker.js")
+          sw = read(sw_path)
+          sw = re.sub(r"const CACHE_NAME = \"pmagazyn-shell-v\d+\";", 'const CACHE_NAME = "pmagazyn-shell-v3";', sw)
+          sw = re.sub(r"const SHELL_ASSETS = \[.*?\];", "const SHELL_ASSETS = [];", sw, flags=re.S)
+          sw = sw.replace('      icon: "/static/icons/icon-192.png",\n      badge: "/static/icons/icon-192.png",\n', "")
+          write(sw_path, sw)
+
+          app_path = Path("app.py")
+          app = read(app_path)
+          if "from email.message import EmailMessage" not in app:
+              app = app.replace("import threading\n", "import threading\nimport smtplib\nfrom email.message import EmailMessage\n")
+          helper = r'''
+
+def normalize_optional_customer_email(value):
+    email = (value or "").strip()
+    if not email:
+        return None
+    if "@" not in email or len(email) > 254:
+        raise ValueError("Podaj prawidłowy adres e-mail klienta.")
+    return email
+
+
+def send_shop_sales_document_email(recipient, payload, pdf_bytes=None, docx_bytes=None):
+    recipient = normalize_optional_customer_email(recipient)
+    if not recipient:
+        return False
+    host = os.environ.get("SMTP_HOST") or os.environ.get("MAIL_SERVER")
+    if not host:
+        logger.info("SMTP is not configured; skipping shop sales document email.")
+        return False
+    port = int(os.environ.get("SMTP_PORT") or os.environ.get("MAIL_PORT") or "587")
+    username = os.environ.get("SMTP_USERNAME") or os.environ.get("MAIL_USERNAME")
+    password = os.environ.get("SMTP_PASSWORD") or os.environ.get("MAIL_PASSWORD")
+    sender = os.environ.get("SMTP_FROM") or os.environ.get("MAIL_DEFAULT_SENDER") or username
+    if not sender:
+        logger.info("SMTP sender is not configured; skipping shop sales document email.")
+        return False
+    message = EmailMessage()
+    message["From"] = sender
+    message["To"] = recipient
+    message["Subject"] = f"Dokument sprzedaży {payload.get('document_number', '')}".strip()
+    message.set_content(
+        "Dzień dobry,\n\n"
+        f"w załączniku przesyłamy dokument sprzedaży do zamówienia {payload.get('order_number', '')}.\n\n"
+        "Pozdrawiamy,\nPrimadera"
+    )
+    safe_number = secure_filename(str(payload.get("document_number") or "dokument")) or "dokument"
+    if pdf_bytes:
+        message.add_attachment(pdf_bytes, maintype="application", subtype="pdf", filename=f"{safe_number}.pdf")
+    if docx_bytes:
+        message.add_attachment(
+            docx_bytes,
+            maintype="application",
+            subtype="vnd.openxmlformats-officedocument.wordprocessingml.document",
+            filename=f"{safe_number}.docx",
+        )
+    try:
+        with smtplib.SMTP(host, port, timeout=10) as smtp:
+            if str(os.environ.get("SMTP_STARTTLS") or os.environ.get("MAIL_USE_TLS") or "1").lower() not in {"0", "false", "no"}:
+                smtp.starttls()
+            if username:
+                smtp.login(username, password or "")
+            smtp.send_message(message)
+        return True
+    except Exception:
+        logger.exception("Shop sales document email sending failed; operation will continue without blocking.")
+        return False
+'''
+          if "def normalize_optional_customer_email" not in app:
+              app = app.replace("\ndef create_shop_document_payload(order, items):", helper + "\ndef create_shop_document_payload(order, items):")
+          app = app.replace('        email = (request.form.get("email") or "").strip()\n', '        email = normalize_optional_customer_email(request.form.get("email"))\n')
+          app = app.replace('        if email and ("@" not in email or len(email) > 254):\n            raise ValueError("Podaj prawidłowy adres e-mail klienta.")\n', '')
+          app = app.replace('        if not salesperson_email:\n            raise ValueError("Wybierz handlowca prowadzącego zamówienie.")\n', '')
+          app = app.replace('                (request.form.get("email") or "").strip()[:254],\n', '                normalize_optional_customer_email(request.form.get("email")),\n')
+          app = app.replace(
+          '''        _document, payload = generate_shop_sales_document(
+              cur, order_id, session.get("user")
+          )
+          shop_history(cur, order_id, "wygenerowano dokument", payload["document_number"])''',
+          '''        _document, payload = generate_shop_sales_document(
+              cur, order_id, session.get("user")
+          )
+          email_sent = False
+          if payload.get("email"):
+              cur.execute("SELECT pdf,docx FROM shop_sales_documents WHERE id=%s", (_document[0],))
+              document_files = cur.fetchone()
+              if document_files:
+                  email_sent = send_shop_sales_document_email(
+                      payload.get("email"),
+                      payload,
+                      bytes(document_files[0] or b""),
+                      bytes(document_files[1] or b""),
+                  )
+          if email_sent:
+              update_shop_stage(cur, order_id, "document_sent", True, session.get("user", "system"))
+          shop_history(cur, order_id, "wygenerowano dokument", payload["document_number"])''')
+          send_route = r'''
+
+@app.route('/sklep/orders/<int:order_id>/document/send', methods=['POST'])
+@login_required
+def shop_send_document(order_id):
+    if not (can_shop("sales") or can_shop("accounting")):
+        return "Brak uprawnień do wysyłki dokumentu sprzedaży.", 403
+    conn = db()
+    cur = conn.cursor()
+    try:
+        denied = sales_order_access_error(cur, order_id)
+        if denied:
+            return denied
+        cur.execute(
+            """
+            SELECT o.email,d.id,d.document_number,d.editable_data,d.pdf,d.docx
+            FROM shop_orders o
+            JOIN shop_sales_documents d ON d.order_id=o.id
+            WHERE o.id=%s AND d.voided_at IS NULL
+            """,
+            (order_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return "Najpierw wygeneruj dokument sprzedaży.", 404
+        recipient = normalize_optional_customer_email(row[0])
+        if not recipient:
+            return redirect(f"/sklep/orders/{order_id}?document=email-skipped")
+        payload = row[3] or {}
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        payload.setdefault("document_number", row[2])
+        sent = send_shop_sales_document_email(
+            recipient,
+            payload,
+            bytes(row[4] or b""),
+            bytes(row[5] or b""),
+        )
+        if sent:
+            update_shop_stage(cur, order_id, "document_sent", True, session.get("user", "system"))
+            shop_history(cur, order_id, "wysłano dokument", recipient)
+            conn.commit()
+            cache.clear()
+            return redirect(f"/sklep/orders/{order_id}?document=sent")
+        conn.commit()
+        return redirect(f"/sklep/orders/{order_id}?document=email-skipped")
+    except ValueError as exc:
+        conn.rollback()
+        return str(exc), 400
+    except Exception:
+        conn.rollback()
+        logger.exception("Shop sales document email failed.")
+        return redirect(f"/sklep/orders/{order_id}?document=email-skipped")
+    finally:
+        conn.close()
+'''
+          if "def shop_send_document" not in app:
+              app = app.replace("\n\n@app.route('/sklep/documents/<int:doc_id>/<fmt>')", send_route + "\n\n@app.route('/sklep/documents/<int:doc_id>/<fmt>')")
+          write(app_path, app)
+
+          forbidden_checks = [
+              ("templates/base.html", "primadera-logo.png"),
+              ("templates/base.html", "static/icons"),
+              ("templates/home.html", "primadera-logo.png"),
+              ("templates/login.html", "primadera-logo.png"),
+              ("templates/shop.html", "Handlowiec prowadzący"),
+              ("templates/shop_order.html", "Handlowiec prowadzący"),
+              ("static/service-worker.js", "primadera-logo.png"),
+              ("static/service-worker.js", "static/icons"),
+              ("static/manifest.json", "static/icons"),
+          ]
+          for path, needle in forbidden_checks:
+              if needle in read(path):
+                  raise SystemExit(f"Forbidden text still present in {path}: {needle}")
+          PY
+
+      - name: Validate syntax and diff
+        shell: bash
+        run: |
+          python3 -m py_compile app.py
+          git diff --check
+
+      - name: Commit and push hotfix
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          git config user.name "codex-hotfix"
+          git config user.email "codex-hotfix@users.noreply.github.com"
+          git rm .github/workflows/codex-hotfix-logo-shop.yml
+          git add app.py templates/base.html templates/home.html templates/login.html templates/shop.html templates/shop_order.html static/manifest.json static/service-worker.js
+          git commit -m "Fix interface logo usage and shop order email flow"
+          git push
