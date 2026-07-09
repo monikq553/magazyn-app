@@ -190,6 +190,11 @@
     </form>
     {% endif %}
     <p><a href="/sklep/documents/{{ document[0] }}/pdf">Pobierz PDF</a> · <a href="/sklep/documents/{{ document[0] }}/docx">Pobierz DOCX</a></p>
+    {% if can_delete_documents() %}
+    <form method="POST" action="/sklep/documents/{{ document[0] }}/delete" onsubmit="return confirm('Czy na pewno chcesz usunąć ten dokument? Tej operacji nie można cofnąć.');" style="margin-bottom:12px;">
+      <button type="submit" style="background:#ef4444;color:white;">Usuń dokument</button>
+    </form>
+    {% endif %}
     {% if order[6] %}
     <form method="POST" action="/sklep/orders/{{ order[0] }}/document/send" class="order-inline-form">
       <button type="submit">Wyślij dokument do klienta</button>

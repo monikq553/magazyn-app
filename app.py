@@ -1049,8 +1049,33 @@ def run_db_migrations():
         changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
     """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS accounting_proformas(
+        id SERIAL PRIMARY KEY,
+        proforma_number TEXT NOT NULL,
+        issue_date DATE NOT NULL,
+        client TEXT NOT NULL,
+        netto_amount REAL NOT NULL DEFAULT 0,
+        vat_amount REAL NOT NULL DEFAULT 0,
+        brutto_amount REAL NOT NULL DEFAULT 0,
+        payment_method TEXT,
+        payment_due_date DATE,
+        notes TEXT,
+        paid BOOLEAN NOT NULL DEFAULT FALSE,
+        bank_transfer BOOLEAN NOT NULL DEFAULT FALSE,
+        sent_to_client BOOLEAN NOT NULL DEFAULT FALSE,
+        payment_date DATE,
+        paid_amount REAL NOT NULL DEFAULT 0,
+        sent_date DATE,
+        created_by TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_by TEXT,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_accounting_documents_order ON accounting_documents(order_id,status,document_type)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_accounting_history_order ON accounting_history(order_id,changed_at DESC)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_accounting_proformas_filters ON accounting_proformas(lower(proforma_number),lower(client),issue_date,payment_due_date,paid,bank_transfer,sent_to_client)")
     cur.execute("""
         UPDATE shop_accounting a
         SET sales_document_generated=EXISTS(
@@ -1680,10 +1705,7 @@ def sync_accounting_document(
         ) VALUES (%s,%s,%s,%s,%s::jsonb,%s,%s)
         ON CONFLICT (order_id,document_type) DO UPDATE SET
             document_number=EXCLUDED.document_number,
-            status=CASE
-                WHEN accounting_documents.status='cancelled' THEN 'cancelled'
-                ELSE EXCLUDED.status
-            END,
+            status=EXCLUDED.status,
             data=EXCLUDED.data,
             updated_by=EXCLUDED.updated_by,
             updated_at=NOW()
@@ -2911,7 +2933,7 @@ def admin_required(f):
 
 
 def can_delete_documents():
-    return session.get('role') == 'admin' or bool(session.get('can_delete_documents'))
+    return session.get('role') == 'admin'
 
 
 def document_delete_required(f):
@@ -8419,16 +8441,13 @@ def edit_doc(id):
     return redirect(f"/doc/{id}")
 
 
-def void_document(document_id):
-    reason = (request.form.get("reason") or "").strip()
-    if len(reason) < 3:
-        return "Podaj powód anulowania dokumentu.", 400
+def hard_delete_document(document_id):
     conn = db()
     cur = conn.cursor()
     try:
         cur.execute(
             """
-            SELECT movement_type, doc_number, voided_at
+            SELECT movement_type, doc_number
             FROM issue_docs WHERE id=%s FOR UPDATE
             """,
             (document_id,),
@@ -8436,89 +8455,17 @@ def void_document(document_id):
         document = cur.fetchone()
         if not document:
             return redirect("/historia")
-        if document[2]:
-            return redirect(f"/doc/{document_id}")
-        document_number = str(document[1] or "").upper()
-        movement_type = document[0] or (
-            "RW" if document_number.startswith("RW")
-            else "WZ" if document_number.startswith("WZ")
-            else "PZ"
-        )
-        previous_status = "Aktywny"
-        cur.execute(
-            """
-            SELECT product_id, qty, warehouse, package_id
-            FROM issue_items WHERE doc_id=%s ORDER BY id FOR UPDATE
-            """,
-            (document_id,),
-        )
-        items = cur.fetchall()
-        if movement_type in {"WZ", "RW"}:
-            for product_id, qty, warehouse, package_id in items:
-                cur.execute(
-                    "UPDATE products SET qty=qty+%s WHERE id=%s AND warehouse=%s",
-                    (qty, product_id, warehouse),
-                )
-                if package_id:
-                    cur.execute(
-                        """
-                        UPDATE packages
-                        SET qty=qty+%s, status='active', archived_at=NULL
-                        WHERE id=%s
-                        """,
-                        (qty, package_id),
-                    )
-        else:
-            for product_id, qty, warehouse, package_id in items:
-                cur.execute(
-                    """
-                    UPDATE products SET qty=qty-%s
-                    WHERE id=%s AND warehouse=%s AND qty >= %s
-                    """,
-                    (qty, product_id, warehouse, qty),
-                )
-                if cur.rowcount != 1:
-                    raise ValueError("Nie można anulować PZ: część towaru została już wydana.")
-                if package_id:
-                    cur.execute(
-                        """
-                        UPDATE packages
-                        SET qty=qty-%s,
-                            status=CASE WHEN qty-%s <= 0 THEN 'cancelled' ELSE status END,
-                            archived_at=CASE WHEN qty-%s <= 0 THEN NOW() ELSE archived_at END
-                        WHERE id=%s AND qty >= %s
-                        """,
-                        (qty, qty, qty, package_id, qty),
-                    )
-                    if cur.rowcount != 1:
-                        raise ValueError("Nie można anulować PZ: paczka została już częściowo wydana.")
-        cur.execute(
-            """
-            UPDATE issue_docs
-            SET voided_at=NOW(), voided_by=%s, void_reason=%s,
-                void_previous_status=%s, restored_at=NULL, restored_by=NULL
-            WHERE id=%s
-            """,
-            (session.get("user"), reason, previous_status, document_id),
-        )
-        issue_doc_history(cur, document_id, "anulowano dokument", f"{reason} (poprzedni status: {previous_status})")
-        log_action(
-            "document.voided",
-            "issue_doc",
-            document_id,
-            {"movement_type": movement_type, "doc_number": document[1], "reason": reason, "previous_status": previous_status},
-            conn,
-        )
+        cur.execute("DELETE FROM issue_doc_history WHERE doc_id=%s", (document_id,))
+        cur.execute("DELETE FROM issue_doc_photos WHERE doc_id=%s", (document_id,))
+        cur.execute("DELETE FROM issue_items WHERE doc_id=%s", (document_id,))
+        cur.execute("DELETE FROM issue_docs WHERE id=%s", (document_id,))
         conn.commit()
         cache.clear()
-        return redirect(f"/doc/{document_id}?deleted=1")
-    except ValueError as exc:
-        conn.rollback()
-        return str(exc), 409
+        return redirect("/historia?deleted=1")
     except Exception:
         conn.rollback()
-        logger.exception("Document cancellation failed.")
-        return "Nie udało się anulować dokumentu.", 500
+        logger.exception("Document hard delete failed.")
+        return "Nie udało się usunąć dokumentu.", 500
     finally:
         conn.close()
 
@@ -8526,7 +8473,7 @@ def void_document(document_id):
 @app.route('/doc/<int:id>/delete', methods=['POST'])
 @document_delete_required
 def delete_doc(id):
-    return void_document(id)
+    return hard_delete_document(id)
 
 
 @app.route('/doc/<int:id>/restore', methods=['POST'])
@@ -8828,11 +8775,130 @@ def restore_backup():
 
 
 # 📊 HISTORIA
+PROFORMA_FILTER_KEYS = (
+    "manual_paid",
+    "manual_transfer",
+    "manual_sent",
+    "manual_client",
+    "manual_date",
+    "manual_number",
+)
+
+
+def parse_money_field(name, default=0.0):
+    raw = (request.form.get(name) or "").strip().replace(",", ".")
+    if raw == "":
+        return default
+    try:
+        return round(float(raw), 2)
+    except ValueError as exc:
+        raise ValueError(f"Nieprawidłowa kwota w polu {name}.") from exc
+
+
+def parse_optional_date_field(name):
+    value = (request.form.get(name) or "").strip()
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date().isoformat()
+    except ValueError as exc:
+        raise ValueError(f"Nieprawidłowa data w polu {name}.") from exc
+
+
+def proforma_form_values():
+    number = (request.form.get("proforma_number") or "").strip()[:100]
+    issue_date = parse_optional_date_field("issue_date")
+    client = (request.form.get("client") or "").strip()[:200]
+    if not number:
+        raise ValueError("Podaj numer proformy.")
+    if not issue_date:
+        raise ValueError("Podaj datę wystawienia.")
+    if not client:
+        raise ValueError("Podaj klienta.")
+    netto = parse_money_field("netto_amount")
+    vat = parse_money_field("vat_amount")
+    brutto_raw = (request.form.get("brutto_amount") or "").strip()
+    brutto = parse_money_field("brutto_amount") if brutto_raw else round(netto + vat, 2)
+    paid_amount = parse_money_field("paid_amount")
+    return {
+        "proforma_number": number,
+        "issue_date": issue_date,
+        "client": client,
+        "netto_amount": netto,
+        "vat_amount": vat,
+        "brutto_amount": brutto,
+        "payment_method": (request.form.get("payment_method") or "").strip()[:100] or None,
+        "payment_due_date": parse_optional_date_field("payment_due_date"),
+        "notes": (request.form.get("notes") or "").strip()[:2000] or None,
+        "paid": request.form.get("paid") == "on",
+        "bank_transfer": request.form.get("bank_transfer") == "on",
+        "sent_to_client": request.form.get("sent_to_client") == "on",
+        "payment_date": parse_optional_date_field("payment_date"),
+        "paid_amount": paid_amount,
+        "sent_date": parse_optional_date_field("sent_date"),
+    }
+
+
+def accounting_proforma_filters_from_request():
+    return {key: (request.args.get(key) or "").strip() for key in PROFORMA_FILTER_KEYS}
+
+
+def accounting_proformas_data(cur, filters):
+    where = []
+    params = []
+    if filters.get("manual_paid") == "paid":
+        where.append("paid=TRUE")
+    elif filters.get("manual_paid") == "unpaid":
+        where.append("paid=FALSE")
+    if filters.get("manual_transfer") == "transfer":
+        where.append("bank_transfer=TRUE")
+    if filters.get("manual_sent") == "sent":
+        where.append("sent_to_client=TRUE")
+    elif filters.get("manual_sent") == "unsent":
+        where.append("sent_to_client=FALSE")
+    if filters.get("manual_client"):
+        where.append("lower(client) LIKE %s")
+        params.append(f"%{filters['manual_client'].lower()}%")
+    if filters.get("manual_number"):
+        where.append("lower(proforma_number) LIKE %s")
+        params.append(f"%{filters['manual_number'].lower()}%")
+    if filters.get("manual_date"):
+        where.append("issue_date=%s")
+        params.append(filters["manual_date"])
+    where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+    cur.execute(
+        f"""
+        SELECT id,proforma_number,issue_date,client,netto_amount,vat_amount,
+               brutto_amount,payment_method,payment_due_date,notes,paid,
+               bank_transfer,sent_to_client,payment_date,paid_amount,sent_date
+        FROM accounting_proformas
+        {where_sql}
+        ORDER BY issue_date DESC,id DESC
+        """,
+        tuple(params),
+    )
+    proformas = cur.fetchall()
+    cur.execute(
+        f"""
+        SELECT COALESCE(SUM(brutto_amount),0),COALESCE(SUM(paid_amount),0),
+               COUNT(*),COUNT(*) FILTER (WHERE paid),
+               COUNT(*) FILTER (WHERE NOT paid),
+               COUNT(*) FILTER (WHERE sent_to_client)
+        FROM accounting_proformas
+        {where_sql}
+        """,
+        tuple(params),
+    )
+    totals = cur.fetchone() or (0, 0, 0, 0, 0, 0)
+    return proformas, totals
+
+
 @app.route('/ksiegowosc')
 @login_required
 @accounting_required
 def accounting_dashboard():
     filters = accounting_filters_from_request()
+    proforma_filters = accounting_proforma_filters_from_request()
     conn = db()
     cur = conn.cursor()
     try:
@@ -8841,12 +8907,16 @@ def accounting_dashboard():
             ensure_shop_accounting_row(cur, order_id)
         conn.commit()
         data = accounting_dashboard_data(cur, filters)
+        manual_proformas, manual_proforma_totals = accounting_proformas_data(cur, proforma_filters)
     finally:
         conn.close()
     return render_template(
         "accounting.html",
         payment_methods=ACCOUNTING_PAYMENT_METHODS,
         filters=filters,
+        proforma_filters=proforma_filters,
+        manual_proformas=manual_proformas,
+        manual_proforma_totals=manual_proforma_totals,
         statuses=SHOP_STATUS_FLOW,
         **data,
     )
@@ -8889,12 +8959,6 @@ def accounting_query_parts(filters):
         where.append("a.proforma_issued=TRUE")
     elif filters.get("proforma_status") == "not_issued":
         where.append("a.proforma_issued=FALSE")
-    elif filters.get("proforma_status") == "cancelled":
-        where.append(
-            "EXISTS (SELECT 1 FROM accounting_documents ad "
-            "WHERE ad.order_id=o.id AND ad.document_type='proforma' "
-            "AND ad.status='cancelled')"
-        )
     document_filters = {
         "invoice_status": ("invoice_issued", "invoice"),
         "receipt_status": ("receipt_issued", "receipt"),
@@ -8906,12 +8970,6 @@ def accounting_query_parts(filters):
             where.append(f"a.{column}=TRUE")
         elif value == "not_issued":
             where.append(f"a.{column}=FALSE")
-        elif value == "cancelled":
-            where.append(
-                "EXISTS (SELECT 1 FROM accounting_documents ad "
-                f"WHERE ad.order_id=o.id AND ad.document_type='{document_type}' "
-                "AND ad.status='cancelled')"
-            )
     text_filters = (
         ("client", "o.customer_name"),
         ("proforma_number", "a.proforma_number"),
@@ -9202,6 +9260,114 @@ def accounting_report_pdf(data, filters):
     return output.getvalue()
 
 
+@app.route('/ksiegowosc/proformy/add', methods=['POST'])
+@login_required
+@accounting_required
+def add_accounting_proforma():
+    conn = db()
+    cur = conn.cursor()
+    try:
+        values = proforma_form_values()
+        cur.execute(
+            """
+            INSERT INTO accounting_proformas(
+                proforma_number,issue_date,client,netto_amount,vat_amount,
+                brutto_amount,payment_method,payment_due_date,notes,paid,
+                bank_transfer,sent_to_client,payment_date,paid_amount,sent_date,
+                created_by,updated_by
+            ) VALUES (
+                %(proforma_number)s,%(issue_date)s,%(client)s,%(netto_amount)s,
+                %(vat_amount)s,%(brutto_amount)s,%(payment_method)s,
+                %(payment_due_date)s,%(notes)s,%(paid)s,%(bank_transfer)s,
+                %(sent_to_client)s,%(payment_date)s,%(paid_amount)s,
+                %(sent_date)s,%(actor)s,%(actor)s
+            )
+            """,
+            {**values, "actor": session.get("user")},
+        )
+        conn.commit()
+        cache.clear()
+        return redirect("/ksiegowosc?proforma_added=1")
+    except ValueError as exc:
+        conn.rollback()
+        return str(exc), 400
+    except Exception:
+        conn.rollback()
+        logger.exception("Manual accounting proforma creation failed.")
+        return "Nie udało się dodać proformy.", 500
+    finally:
+        conn.close()
+
+
+@app.route('/ksiegowosc/proformy/<int:proforma_id>/edit', methods=['POST'])
+@login_required
+@accounting_required
+def edit_accounting_proforma(proforma_id):
+    conn = db()
+    cur = conn.cursor()
+    try:
+        values = proforma_form_values()
+        cur.execute(
+            """
+            UPDATE accounting_proformas SET
+                proforma_number=%(proforma_number)s,
+                issue_date=%(issue_date)s,
+                client=%(client)s,
+                netto_amount=%(netto_amount)s,
+                vat_amount=%(vat_amount)s,
+                brutto_amount=%(brutto_amount)s,
+                payment_method=%(payment_method)s,
+                payment_due_date=%(payment_due_date)s,
+                notes=%(notes)s,
+                paid=%(paid)s,
+                bank_transfer=%(bank_transfer)s,
+                sent_to_client=%(sent_to_client)s,
+                payment_date=%(payment_date)s,
+                paid_amount=%(paid_amount)s,
+                sent_date=%(sent_date)s,
+                updated_by=%(actor)s,
+                updated_at=NOW()
+            WHERE id=%(id)s
+            """,
+            {**values, "actor": session.get("user"), "id": proforma_id},
+        )
+        if cur.rowcount != 1:
+            return "Nie znaleziono proformy.", 404
+        conn.commit()
+        cache.clear()
+        return redirect("/ksiegowosc?proforma_edited=1")
+    except ValueError as exc:
+        conn.rollback()
+        return str(exc), 400
+    except Exception:
+        conn.rollback()
+        logger.exception("Manual accounting proforma update failed.")
+        return "Nie udało się zaktualizować proformy.", 500
+    finally:
+        conn.close()
+
+
+@app.route('/ksiegowosc/proformy/<int:proforma_id>/delete', methods=['POST'])
+@login_required
+@accounting_required
+def delete_accounting_proforma(proforma_id):
+    conn = db()
+    cur = conn.cursor()
+    try:
+        cur.execute("DELETE FROM accounting_proformas WHERE id=%s", (proforma_id,))
+        if cur.rowcount != 1:
+            return "Nie znaleziono proformy.", 404
+        conn.commit()
+        cache.clear()
+        return redirect("/ksiegowosc?proforma_deleted=1")
+    except Exception:
+        conn.rollback()
+        logger.exception("Manual accounting proforma delete failed.")
+        return "Nie udało się usunąć proformy.", 500
+    finally:
+        conn.close()
+
+
 @app.route('/ksiegowosc/export.<fmt>')
 @login_required
 @accounting_required
@@ -9266,7 +9432,7 @@ def accounting_order_detail(order_id):
             """
             SELECT id,document_type,document_number,status,void_reason,voided_by,
                    voided_at,restored_by,restored_at,updated_at
-            FROM accounting_documents WHERE order_id=%s
+            FROM accounting_documents WHERE order_id=%s AND status<>'cancelled'
             ORDER BY CASE document_type
                 WHEN 'proforma' THEN 1 WHEN 'invoice' THEN 2
                 WHEN 'receipt' THEN 3 ELSE 4 END
@@ -9548,24 +9714,6 @@ def update_order_accounting(order_id):
             raise ValueError("Podaj numer wystawionej faktury.")
         if bool_values["receipt_issued"] and not receipt_number:
             raise ValueError("Podaj numer wystawionego paragonu.")
-        cur.execute(
-            """
-            SELECT document_type FROM accounting_documents
-            WHERE order_id=%s AND status='cancelled'
-            """,
-            (order_id,),
-        )
-        cancelled_types = {row[0] for row in cur.fetchall()}
-        for field, document_type in (
-            ("proforma_issued", "proforma"),
-            ("invoice_issued", "invoice"),
-            ("receipt_issued", "receipt"),
-            ("sales_document_generated", "sales"),
-        ):
-            if bool_values[field] and document_type in cancelled_types:
-                raise ValueError(
-                    "Anulowany dokument musi zostać przywrócony przez administratora."
-                )
         if bool_values["sales_document_generated"]:
             cur.execute(
                 """
@@ -9725,16 +9873,13 @@ def update_order_accounting(order_id):
 @app.route('/ksiegowosc/documents/<int:document_id>/delete', methods=['POST'])
 @login_required
 @document_delete_required
-def soft_delete_accounting_document(document_id):
-    reason = (request.form.get("reason") or "").strip()
-    if len(reason) < 3:
-        return "Podaj powód usunięcia dokumentu.", 400
+def delete_accounting_document(document_id):
     conn = db()
     cur = conn.cursor()
     try:
         cur.execute(
             """
-            SELECT order_id,document_type,document_number,status
+            SELECT order_id,document_type
             FROM accounting_documents WHERE id=%s FOR UPDATE
             """,
             (document_id,),
@@ -9742,94 +9887,63 @@ def soft_delete_accounting_document(document_id):
         document = cur.fetchone()
         if not document:
             return "Nie znaleziono dokumentu.", 404
-        order_id, document_type, _number, status = document
-        if status == "cancelled":
-            return redirect(f"/ksiegowosc/orders/{order_id}")
-        warnings = accounting_document_warnings(cur, order_id, document_type)
-        if warnings and request.form.get("confirm_links") != "on":
-            return (
-                "Dokument jest powiązany z: " + ", ".join(warnings)
-                + ". Potwierdź usunięcie.",
-                409,
-            )
-        cur.execute(
-            """
-            UPDATE accounting_documents SET status='cancelled',void_reason=%s,
-                void_previous_status=%s,voided_by=%s,voided_at=NOW(),
-                updated_by=%s,updated_at=NOW()
-            WHERE id=%s
-            """,
-            (reason,status,session.get("user"),session.get("user"),document_id),
-        )
+        order_id, document_type = document
         column_by_type = {
             "proforma": "proforma_issued",
             "invoice": "invoice_issued",
             "receipt": "receipt_issued",
             "sales": "sales_document_generated",
         }
-        stage_by_type = {
+        number_column_by_type = {
+            "proforma": "proforma_number",
+            "invoice": "invoice_number",
+            "receipt": "receipt_number",
+        }
+        updates = [f"{column_by_type[document_type]}=FALSE", "updated_by=%s", "updated_at=NOW()"]
+        params = [session.get("user")]
+        if document_type in number_column_by_type:
+            updates.append(f"{number_column_by_type[document_type]}=NULL")
+        if document_type == "sales":
+            updates.append("document_sent=FALSE")
+        cur.execute(
+            f"UPDATE shop_accounting SET {', '.join(updates)} WHERE order_id=%s",
+            (*params, order_id),
+        )
+        stage_key_by_type = {
             "proforma": "proforma_issued",
             "invoice": "invoice_issued",
             "receipt": "receipt_issued",
             "sales": "sales_document_generated",
         }
-        column = column_by_type[document_type]
         cur.execute(
-            f"""
-            UPDATE shop_accounting SET {column}=FALSE,updated_by=%s,updated_at=NOW()
-            WHERE order_id=%s
+            """
+            UPDATE shop_orders
+            SET stages=jsonb_set(COALESCE(stages,'{}'::jsonb),%s,'false'::jsonb,TRUE),
+                updated_at=NOW()
+            WHERE id=%s
             """,
-            (session.get("user"),order_id),
+            ([stage_key_by_type[document_type]], order_id),
         )
         if document_type == "sales":
+            cur.execute("DELETE FROM shop_sales_documents WHERE order_id=%s", (order_id,))
             cur.execute(
                 """
-                UPDATE shop_sales_documents SET voided_at=NOW(),voided_by=%s,
-                    void_reason=%s WHERE order_id=%s AND voided_at IS NULL
+                UPDATE shop_orders
+                SET stages=jsonb_set(COALESCE(stages,'{}'::jsonb),%s,'false'::jsonb,TRUE),
+                    updated_at=NOW()
+                WHERE id=%s
                 """,
-                (session.get("user"),reason,order_id),
+                (["document_sent"], order_id),
             )
-            cur.execute(
-                """
-                UPDATE shop_accounting SET document_sent=FALSE
-                WHERE order_id=%s
-                """,
-                (order_id,),
-            )
-            update_shop_stage(
-                cur,order_id,"document_sent",False,session.get("user","system")
-            )
-        update_shop_stage(
-            cur,order_id,stage_by_type[document_type],False,
-            session.get("user","system"),
-        )
-        accounting_history_change(
-            cur,order_id,"document",document_id,"status",status,"cancelled"
-        )
-        accounting_history_change(
-            cur,order_id,"document",document_id,"void_reason","",reason
-        )
-        shop_history(
-            cur,order_id,"anulowano dokument",
-            f"{document_type}: {reason}",
-        )
-        log_action(
-            "accounting_document.voided",
-            "accounting_document",
-            document_id,
-            {"order_id": order_id, "document_type": document_type, "reason": reason, "previous_status": status},
-            conn,
-        )
+        cur.execute("DELETE FROM accounting_history WHERE entity_type='document' AND entity_id=%s", (document_id,))
+        cur.execute("DELETE FROM accounting_documents WHERE id=%s", (document_id,))
         conn.commit()
         cache.clear()
         return redirect(f"/ksiegowosc/orders/{order_id}?deleted=1")
-    except ValueError as exc:
-        conn.rollback()
-        return str(exc), 400
     except Exception:
         conn.rollback()
-        logger.exception("Accounting document soft delete failed.")
-        return "Nie udało się anulować dokumentu.", 500
+        logger.exception("Accounting document hard delete failed.")
+        return "Nie udało się usunąć dokumentu.", 500
     finally:
         conn.close()
 
@@ -9837,91 +9951,7 @@ def soft_delete_accounting_document(document_id):
 @app.route('/ksiegowosc/documents/<int:document_id>/restore', methods=['POST'])
 @document_delete_required
 def restore_accounting_document(document_id):
-    conn = db()
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            """
-            SELECT order_id,document_type,status
-            FROM accounting_documents WHERE id=%s FOR UPDATE
-            """,
-            (document_id,),
-        )
-        document = cur.fetchone()
-        if not document:
-            return "Nie znaleziono dokumentu.", 404
-        order_id, document_type, status = document
-        if status != "cancelled":
-            return redirect(f"/ksiegowosc/orders/{order_id}")
-        if document_type == "sales":
-            cur.execute(
-                "SELECT 1 FROM shop_sales_documents WHERE order_id=%s",
-                (order_id,),
-            )
-            if not cur.fetchone():
-                raise ValueError("Brak pliku dokumentu sprzedaży do przywrócenia.")
-            cur.execute(
-                """
-                UPDATE shop_sales_documents SET voided_at=NULL,voided_by=NULL,
-                    void_reason=NULL,restored_at=NOW(),restored_by=%s
-                WHERE order_id=%s
-                """,
-                (session.get("user"),order_id),
-            )
-        cur.execute(
-            """
-            UPDATE accounting_documents SET status='active',restored_by=%s,
-                restored_at=NOW(),updated_by=%s,updated_at=NOW()
-            WHERE id=%s
-            """,
-            (session.get("user"),session.get("user"),document_id),
-        )
-        column_by_type = {
-            "proforma": "proforma_issued",
-            "invoice": "invoice_issued",
-            "receipt": "receipt_issued",
-            "sales": "sales_document_generated",
-        }
-        stage_by_type = {
-            "proforma": "proforma_issued",
-            "invoice": "invoice_issued",
-            "receipt": "receipt_issued",
-            "sales": "sales_document_generated",
-        }
-        cur.execute(
-            f"""
-            UPDATE shop_accounting SET {column_by_type[document_type]}=TRUE,
-                updated_by=%s,updated_at=NOW() WHERE order_id=%s
-            """,
-            (session.get("user"),order_id),
-        )
-        update_shop_stage(
-            cur,order_id,stage_by_type[document_type],True,
-            session.get("user","system"),
-        )
-        accounting_history_change(
-            cur,order_id,"document",document_id,"status","cancelled","active"
-        )
-        shop_history(cur,order_id,"przywrócono dokument",document_type)
-        log_action(
-            "accounting_document.restored",
-            "accounting_document",
-            document_id,
-            {"order_id": order_id, "document_type": document_type},
-            conn,
-        )
-        conn.commit()
-        cache.clear()
-        return redirect(f"/ksiegowosc/orders/{order_id}?restored=1")
-    except ValueError as exc:
-        conn.rollback()
-        return str(exc), 400
-    except Exception:
-        conn.rollback()
-        logger.exception("Accounting document restore failed.")
-        return "Nie udało się przywrócić dokumentu.", 500
-    finally:
-        conn.close()
+    return "Dokumenty są usuwane trwale i nie można ich przywrócić.", 404
 
 
 @app.route('/sklep')
@@ -11489,6 +11519,50 @@ def shop_download_document(doc_id, fmt):
     return Response(bytes(row[1]), mimetype=mimetype, headers={"Content-Disposition": f'attachment; filename="{filename}.{fmt}"'})
 
 
+@app.route('/sklep/documents/<int:doc_id>/delete', methods=['POST'])
+@login_required
+@document_delete_required
+def delete_shop_sales_document(doc_id):
+    conn = db()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT order_id FROM shop_sales_documents WHERE id=%s FOR UPDATE", (doc_id,))
+        row = cur.fetchone()
+        if not row:
+            return "Nie znaleziono dokumentu.", 404
+        order_id = row[0]
+        cur.execute("DELETE FROM accounting_documents WHERE order_id=%s AND document_type='sales'", (order_id,))
+        cur.execute("DELETE FROM shop_sales_documents WHERE id=%s", (doc_id,))
+        cur.execute(
+            """
+            UPDATE shop_accounting
+            SET sales_document_generated=FALSE,document_sent=FALSE,
+                updated_by=%s,updated_at=NOW()
+            WHERE order_id=%s
+            """,
+            (session.get("user"), order_id),
+        )
+        for stage_key in ("sales_document_generated", "document_sent"):
+            cur.execute(
+                """
+                UPDATE shop_orders
+                SET stages=jsonb_set(COALESCE(stages,'{}'::jsonb),%s,'false'::jsonb,TRUE),
+                    updated_at=NOW()
+                WHERE id=%s
+                """,
+                ([stage_key], order_id),
+            )
+        conn.commit()
+        cache.clear()
+        return redirect(f"/sklep/orders/{order_id}?document_deleted=1")
+    except Exception:
+        conn.rollback()
+        logger.exception("Shop sales document hard delete failed.")
+        return "Nie udało się usunąć dokumentu sprzedaży.", 500
+    finally:
+        conn.close()
+
+
 @app.route('/handlowiec/raport')
 @login_required
 def salesperson_report():
@@ -11537,11 +11611,8 @@ def historia():
     conn = db()
     cur = conn.cursor()
 
-    show_deleted = request.args.get("deleted") == "1"
-    if show_deleted:
-        cur.execute("SELECT * FROM issue_docs WHERE voided_at IS NOT NULL ORDER BY id DESC")
-    else:
-        cur.execute("SELECT * FROM issue_docs WHERE voided_at IS NULL ORDER BY id DESC")
+    show_deleted = False
+    cur.execute("SELECT * FROM issue_docs WHERE voided_at IS NULL ORDER BY id DESC")
     docs = cur.fetchall()
     conn.close()
 
