@@ -718,6 +718,132 @@ class InventoryFlowTests(unittest.TestCase):
                         response = warehouse_app.app.make_response(view())
                 self.assertEqual(response.status_code, 200)
 
+    def test_manual_accounting_proforma_add_edit_flags_and_delete(self):
+        connection = MagicMock()
+        cursor = MagicMock()
+        connection.cursor.return_value = cursor
+        cursor.rowcount = 1
+        form = MultiDict(
+            [
+                ("proforma_number", "PF/1"),
+                ("issue_date", "2026-07-09"),
+                ("client", "Klient A"),
+                ("netto_amount", "100"),
+                ("vat_amount", "23"),
+                ("brutto_amount", "123"),
+                ("payment_method", "Przelew"),
+                ("payment_due_date", "2026-07-16"),
+                ("notes", "Uwagi"),
+                ("paid", "on"),
+                ("bank_transfer", "on"),
+                ("sent_to_client", "on"),
+                ("payment_date", "2026-07-10"),
+                ("paid_amount", "123"),
+                ("sent_date", "2026-07-09"),
+            ]
+        )
+
+        with patch.object(warehouse_app, "db", return_value=connection):
+            with warehouse_app.app.test_request_context(
+                "/ksiegowosc/proformy/add", method="POST", data=form
+            ):
+                warehouse_app.session["user"] = "accounting@example.com"
+                warehouse_app.session["role"] = "accounting"
+                add_response = warehouse_app.add_accounting_proforma()
+            with warehouse_app.app.test_request_context(
+                "/ksiegowosc/proformy/7/edit", method="POST", data=form
+            ):
+                warehouse_app.session["user"] = "accounting@example.com"
+                warehouse_app.session["role"] = "accounting"
+                edit_response = warehouse_app.edit_accounting_proforma(7)
+            with warehouse_app.app.test_request_context(
+                "/ksiegowosc/proformy/7/delete", method="POST"
+            ):
+                warehouse_app.session["user"] = "accounting@example.com"
+                warehouse_app.session["role"] = "accounting"
+                delete_response = warehouse_app.delete_accounting_proforma(7)
+
+        self.assertEqual(add_response.status_code, 302)
+        self.assertEqual(edit_response.status_code, 302)
+        self.assertEqual(delete_response.status_code, 302)
+        executed = "\n".join(call.args[0] for call in cursor.execute.call_args_list)
+        self.assertIn("INSERT INTO accounting_proformas", executed)
+        self.assertIn("UPDATE accounting_proformas SET", executed)
+        self.assertIn("DELETE FROM accounting_proformas WHERE id=%s", executed)
+        insert_params = cursor.execute.call_args_list[0].args[1]
+        self.assertTrue(insert_params["paid"])
+        self.assertTrue(insert_params["bank_transfer"])
+        self.assertTrue(insert_params["sent_to_client"])
+
+    def test_manual_accounting_proforma_filters_cover_required_fields(self):
+        cursor = MagicMock()
+        cursor.fetchall.return_value = []
+        cursor.fetchone.return_value = (0, 0, 0, 0, 0, 0)
+        filters = {
+            "manual_paid": "unpaid",
+            "manual_transfer": "transfer",
+            "manual_sent": "unsent",
+            "manual_client": "Klient",
+            "manual_date": "2026-07-09",
+            "manual_number": "PF",
+        }
+
+        proformas, totals = warehouse_app.accounting_proformas_data(cursor, filters)
+
+        self.assertEqual(proformas, [])
+        self.assertEqual(totals, (0, 0, 0, 0, 0, 0))
+        query = cursor.execute.call_args_list[0].args[0]
+        self.assertIn("paid=FALSE", query)
+        self.assertIn("bank_transfer=TRUE", query)
+        self.assertIn("sent_to_client=FALSE", query)
+        self.assertIn("lower(client) LIKE %s", query)
+        self.assertIn("issue_date=%s", query)
+        self.assertIn("lower(proforma_number) LIKE %s", query)
+
+    def test_admin_hard_deletes_warehouse_document_without_history(self):
+        connection = MagicMock()
+        cursor = MagicMock()
+        connection.cursor.return_value = cursor
+        cursor.fetchone.return_value = ("WZ", "WZ/1")
+
+        with warehouse_app.app.test_request_context("/doc/9/delete", method="POST"):
+            warehouse_app.session["user"] = "admin@example.com"
+            warehouse_app.session["role"] = "admin"
+            with patch.object(warehouse_app, "db", return_value=connection):
+                response = warehouse_app.delete_doc(9)
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/historia", response.location)
+        executed = "\n".join(call.args[0] for call in cursor.execute.call_args_list)
+        self.assertIn("DELETE FROM issue_doc_history WHERE doc_id=%s", executed)
+        self.assertIn("DELETE FROM issue_doc_photos WHERE doc_id=%s", executed)
+        self.assertIn("DELETE FROM issue_items WHERE doc_id=%s", executed)
+        self.assertIn("DELETE FROM issue_docs WHERE id=%s", executed)
+        self.assertNotIn("voided_at=NOW()", executed)
+        self.assertNotIn("INSERT INTO issue_doc_history", executed)
+
+    def test_admin_hard_deletes_accounting_document_without_void_history(self):
+        connection = MagicMock()
+        cursor = MagicMock()
+        connection.cursor.return_value = cursor
+        cursor.fetchone.return_value = (42, "sales")
+
+        with warehouse_app.app.test_request_context(
+            "/ksiegowosc/documents/5/delete", method="POST"
+        ):
+            warehouse_app.session["user"] = "admin@example.com"
+            warehouse_app.session["role"] = "admin"
+            with patch.object(warehouse_app, "db", return_value=connection):
+                response = warehouse_app.delete_accounting_document(5)
+
+        self.assertEqual(response.status_code, 302)
+        executed = "\n".join(call.args[0] for call in cursor.execute.call_args_list)
+        self.assertIn("DELETE FROM shop_sales_documents WHERE order_id=%s", executed)
+        self.assertIn("DELETE FROM accounting_documents WHERE id=%s", executed)
+        self.assertIn("DELETE FROM accounting_history WHERE entity_type='document'", executed)
+        self.assertNotIn("status='cancelled'", executed)
+        self.assertNotIn("accounting_document.voided", executed)
+
 
 if __name__ == "__main__":
     unittest.main()

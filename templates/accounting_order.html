@@ -26,7 +26,7 @@
 <h2>Księgowość · {{ order[1] }}</h2>
 {% if request.args.get('saved') %}<div class="card" style="margin-bottom:12px;color:#166534;">Etapy księgowe zostały zapisane.</div>{% endif %}
 {% if request.args.get('edited') %}<div class="card" style="margin-bottom:12px;color:#166534;">Dokument i pozycje zostały zaktualizowane.</div>{% endif %}
-{% if request.args.get('deleted') %}<div class="card" style="margin-bottom:12px;color:#166534;">Dokument został anulowany bez usuwania danych.</div>{% endif %}
+{% if request.args.get('deleted') %}<div class="card" style="margin-bottom:12px;color:#166534;">Dokument został usunięty.</div>{% endif %}
 {% if request.args.get('restored') %}<div class="card" style="margin-bottom:12px;color:#166534;">Dokument został przywrócony.</div>{% endif %}
 
 <div class="card" style="margin-bottom:16px;">
@@ -116,24 +116,15 @@
   <div class="accounting-document-row">
     <strong>{{ {'proforma':'Proforma','invoice':'Faktura','receipt':'Paragon','sales':'Dokument sprzedaży'}.get(document[1],document[1]) }}</strong>
     · {{ document[2] or 'bez numeru' }} ·
-    {% if document[3] == 'cancelled' %}<span style="color:#b91c1c;">Anulowany</span>{% elif document[3] == 'active' %}<span style="color:#166534;">Aktywny</span>{% else %}Roboczy{% endif %}
+    {% if document[3] == 'active' %}<span style="color:#166534;">Aktywny</span>{% else %}Roboczy{% endif %}
     {% if document[1] == 'sales' and sales_document and not sales_document[1] %}
       · <a href="/sklep/documents/{{ sales_document[0] }}/pdf">PDF</a>
       · <a href="/sklep/documents/{{ sales_document[0] }}/docx">DOCX</a>
     {% endif %}
-    {% if document[3] != 'cancelled' %}
-      {% if can_delete_documents() %}
-      <form method="POST" action="/ksiegowosc/documents/{{ document[0] }}/delete" class="accounting-delete-form" style="display:grid;grid-template-columns:2fr 1fr auto;gap:8px;margin-top:8px;" onsubmit="return confirm('Dokument jest powiązany z: {{ document_warnings.get(document[0],[])|join(', ') }}. Czy na pewno go anulować?');">
-        <input name="reason" placeholder="Wymagany powód usunięcia" minlength="3" required>
-        <label><input type="checkbox" name="confirm_links" required> Potwierdzam powiązania</label>
-        <button type="submit" style="background:#ef4444;color:white;">Usuń / Anuluj dokument</button>
+    {% if can_delete_documents() %}
+      <form method="POST" action="/ksiegowosc/documents/{{ document[0] }}/delete" class="accounting-delete-form" style="margin-top:8px;" onsubmit="return confirm('Czy na pewno chcesz usunąć ten dokument? Tej operacji nie można cofnąć.');">
+        <button type="submit" style="background:#ef4444;color:white;">Usuń dokument</button>
       </form>
-      {% endif %}
-    {% else %}
-      <p>Powód: {{ document[4] }} · {{ document[5] }} · {{ document[6] }}</p>
-      {% if can_delete_documents() %}
-      <form method="POST" action="/ksiegowosc/documents/{{ document[0] }}/restore"><button type="submit">Przywróć dokument</button></form>
-      {% endif %}
     {% endif %}
   </div>
   {% else %}<p>Brak utworzonych dokumentów księgowych.</p>{% endfor %}

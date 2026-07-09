@@ -3,13 +3,6 @@
 {% block content %}
 
 <h2 style="margin-bottom:12px;">Historia dokumentów</h2>
-<div style="margin-bottom:20px;display:flex;gap:10px;flex-wrap:wrap;">
-    {% if show_deleted %}
-    <a class="btn" href="/historia">Pokaż aktywne dokumenty</a>
-    {% else %}
-    <a class="btn" href="/historia?deleted=1">Pokaż usunięte dokumenty</a>
-    {% endif %}
-</div>
 
 <style>
 .day {
@@ -55,15 +48,15 @@
 </style>
 
 {% if not days %}
-<p>{{ 'Brak usuniętych/anulowanych dokumentów.' if show_deleted else 'Brak aktywnych dokumentów.' }}</p>
+<p>Brak aktywnych dokumentów.</p>
 {% endif %}
 {% for day, docs in days.items() %}
 <details class="day" open>
     <summary class="day-title">{{ day }} ({{ docs|length }})</summary>
     {% for d in docs %}
-    <div class="doc" onclick="go('/doc/{{d[0]}}')" {% if d[8] %}style="opacity:.6;"{% endif %}>
+    <div class="doc" onclick="go('/doc/{{d[0]}}')">
         <div class="left">
-            <div class="nr">{{ d[5] }}{% if d[8] %} — ANULOWANY{% endif %}</div>
+            <div class="nr">{{ d[5] }}</div>
             <div class="kontrahent">{{ d[2] }}</div>
         </div>
         <div>→</div>

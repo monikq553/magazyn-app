@@ -1,16 +1,121 @@
 {% extends "base.html" %}
 {% block content %}
 <h2>Księgowość</h2>
+
+{% if request.args.get('proforma_added') %}<div class="card" style="margin-bottom:12px;color:#166534;">Proforma została dodana.</div>{% endif %}
+{% if request.args.get('proforma_edited') %}<div class="card" style="margin-bottom:12px;color:#166534;">Proforma została zapisana.</div>{% endif %}
+{% if request.args.get('proforma_deleted') %}<div class="card" style="margin-bottom:12px;color:#166534;">Proforma została usunięta.</div>{% endif %}
+
 <div class="tiles" style="margin-bottom:16px;">
-  <div class="tile"><strong>Suma proform</strong><br>{{ '%.2f'|format(totals[0] or 0) }} zł</div>
-  <div class="tile"><strong>Zapłacono</strong><br>{{ '%.2f'|format(totals[1] or 0) }} zł</div>
-  <div class="tile"><strong>Pozostało</strong><br>{{ '%.2f'|format(totals[2] or 0) }} zł</div>
-  <div class="tile"><strong>Proformy</strong><br>{{ totals[3] or 0 }}</div>
-  <div class="tile"><strong>Opłacone / nieopłacone</strong><br>{{ totals[4] or 0 }} / {{ totals[5] or 0 }}</div>
-  <div class="tile"><strong>Faktura / bez faktury</strong><br>{{ totals[6] or 0 }} / {{ totals[7] or 0 }}</div>
+  <div class="tile"><strong>Ręczne proformy</strong><br>{{ manual_proforma_totals[2] or 0 }}</div>
+  <div class="tile"><strong>Suma brutto proform</strong><br>{{ '%.2f'|format(manual_proforma_totals[0] or 0) }} zł</div>
+  <div class="tile"><strong>Kwota zapłacona</strong><br>{{ '%.2f'|format(manual_proforma_totals[1] or 0) }} zł</div>
+  <div class="tile"><strong>Zapłacone / niezapłacone</strong><br>{{ manual_proforma_totals[3] or 0 }} / {{ manual_proforma_totals[4] or 0 }}</div>
+  <div class="tile"><strong>Wysłane do klienta</strong><br>{{ manual_proforma_totals[5] or 0 }}</div>
 </div>
+
 <div class="card" style="margin-bottom:16px;">
-  <h3>Filtry</h3>
+  <h3>Dodaj proformę</h3>
+  <form method="POST" action="/ksiegowosc/proformy/add" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;">
+    <input name="proforma_number" placeholder="Numer proformy" required>
+    <label>Data wystawienia<input type="date" name="issue_date" required></label>
+    <input name="client" placeholder="Klient" required>
+    <input name="netto_amount" type="number" min="0" step="0.01" placeholder="Kwota netto" required>
+    <input name="vat_amount" type="number" min="0" step="0.01" placeholder="VAT" required>
+    <input name="brutto_amount" type="number" min="0" step="0.01" placeholder="Kwota brutto">
+    <select name="payment_method"><option value="">Sposób płatności</option>{% for m in payment_methods %}<option>{{ m }}</option>{% endfor %}</select>
+    <label>Termin płatności<input type="date" name="payment_due_date"></label>
+    <label>Data zapłaty<input type="date" name="payment_date"></label>
+    <input name="paid_amount" type="number" min="0" step="0.01" placeholder="Kwota zapłacona">
+    <label>Data wysłania do klienta<input type="date" name="sent_date"></label>
+    <label><input type="checkbox" name="paid"> Zapłacona</label>
+    <label><input type="checkbox" name="bank_transfer"> Przelew</label>
+    <label><input type="checkbox" name="sent_to_client"> Wysłano do klienta</label>
+    <input name="notes" placeholder="Uwagi" style="grid-column:1/-1;">
+    <button>Dodaj proformę</button>
+  </form>
+</div>
+
+<div class="card" style="margin-bottom:16px;">
+  <h3>Filtry proform</h3>
+  <form method="GET" action="/ksiegowosc" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;">
+    <input name="manual_number" placeholder="Numer proformy" value="{{ proforma_filters.manual_number }}">
+    <input name="manual_client" placeholder="Klient" value="{{ proforma_filters.manual_client }}">
+    <input type="date" name="manual_date" value="{{ proforma_filters.manual_date }}">
+    <select name="manual_paid">
+      <option value="">Zapłacona / niezapłacona</option>
+      <option value="paid" {% if proforma_filters.manual_paid == 'paid' %}selected{% endif %}>Zapłacona</option>
+      <option value="unpaid" {% if proforma_filters.manual_paid == 'unpaid' %}selected{% endif %}>Niezapłacona</option>
+    </select>
+    <select name="manual_transfer">
+      <option value="">Przelew</option>
+      <option value="transfer" {% if proforma_filters.manual_transfer == 'transfer' %}selected{% endif %}>Przelew</option>
+    </select>
+    <select name="manual_sent">
+      <option value="">Wysłano / niewysłano</option>
+      <option value="sent" {% if proforma_filters.manual_sent == 'sent' %}selected{% endif %}>Wysłano</option>
+      <option value="unsent" {% if proforma_filters.manual_sent == 'unsent' %}selected{% endif %}>Niewysłano</option>
+    </select>
+    <button>Filtruj proformy</button>
+  </form>
+</div>
+
+<div class="card" style="margin-bottom:16px;overflow:auto;">
+  <h3>Lista proform</h3>
+  <table width="100%">
+    <tr><th>Numer proformy</th><th>Klient</th><th>Kwota brutto</th><th>Zapłacona</th><th>Przelew</th><th>Wysłano</th><th>Data wystawienia</th><th>Termin płatności</th><th>Akcje</th></tr>
+    {% for p in manual_proformas %}
+    <tr>
+      <td>{{ p[1] }}</td>
+      <td>{{ p[3] }}</td>
+      <td>{{ '%.2f'|format(p[6] or 0) }}</td>
+      <td>{{ 'Tak' if p[10] else 'Nie' }}</td>
+      <td>{{ 'Tak' if p[11] else 'Nie' }}</td>
+      <td>{{ 'Tak' if p[12] else 'Nie' }}</td>
+      <td>{{ p[2] }}</td>
+      <td>{{ p[8] or '—' }}</td>
+      <td>
+        <details>
+          <summary>Edytuj</summary>
+          <form method="POST" action="/ksiegowosc/proformy/{{ p[0] }}/edit" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:8px;margin-top:8px;">
+            <input name="proforma_number" value="{{ p[1] }}" required>
+            <input type="date" name="issue_date" value="{{ p[2] }}" required>
+            <input name="client" value="{{ p[3] }}" required>
+            <input name="netto_amount" type="number" min="0" step="0.01" value="{{ p[4] or 0 }}" required>
+            <input name="vat_amount" type="number" min="0" step="0.01" value="{{ p[5] or 0 }}" required>
+            <input name="brutto_amount" type="number" min="0" step="0.01" value="{{ p[6] or 0 }}">
+            <select name="payment_method"><option value="">Sposób płatności</option>{% for m in payment_methods %}<option {% if p[7] == m %}selected{% endif %}>{{ m }}</option>{% endfor %}</select>
+            <input type="date" name="payment_due_date" value="{{ p[8] or '' }}">
+            <input type="date" name="payment_date" value="{{ p[13] or '' }}">
+            <input name="paid_amount" type="number" min="0" step="0.01" value="{{ p[14] or 0 }}">
+            <input type="date" name="sent_date" value="{{ p[15] or '' }}">
+            <label><input type="checkbox" name="paid" {% if p[10] %}checked{% endif %}> Zapłacona</label>
+            <label><input type="checkbox" name="bank_transfer" {% if p[11] %}checked{% endif %}> Przelew</label>
+            <label><input type="checkbox" name="sent_to_client" {% if p[12] %}checked{% endif %}> Wysłano do klienta</label>
+            <input name="notes" value="{{ p[9] or '' }}" placeholder="Uwagi" style="grid-column:1/-1;">
+            <button>Zapisz</button>
+          </form>
+          <form method="POST" action="/ksiegowosc/proformy/{{ p[0] }}/delete" onsubmit="return confirm('Czy na pewno chcesz usunąć ten dokument? Tej operacji nie można cofnąć.');" style="margin-top:8px;">
+            <button type="submit" style="background:#ef4444;color:white;">Usuń proformę</button>
+          </form>
+        </details>
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="9">Brak proform.</td></tr>
+    {% endfor %}
+  </table>
+</div>
+
+<div class="tiles" style="margin-bottom:16px;">
+  <div class="tile"><strong>Suma proform z zamówień</strong><br>{{ '%.2f'|format(totals[0] or 0) }} zł</div>
+  <div class="tile"><strong>Zapłacono w zamówieniach</strong><br>{{ '%.2f'|format(totals[2] or 0) }} zł</div>
+  <div class="tile"><strong>Pozostało w zamówieniach</strong><br>{{ '%.2f'|format(totals[3] or 0) }} zł</div>
+  <div class="tile"><strong>Proformy z zamówień</strong><br>{{ totals[4] or 0 }}</div>
+</div>
+
+<div class="card" style="margin-bottom:16px;">
+  <h3>Filtry zamówień księgowych</h3>
   <form method="GET" action="/ksiegowosc" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;">
     <input name="client" placeholder="Klient" value="{{ filters.client }}">
     <input type="date" name="date" value="{{ filters.date }}">
@@ -18,28 +123,16 @@
     <select name="proforma_status"><option value="">Status proformy</option><option value="issued" {% if filters.proforma_status == 'issued' %}selected{% endif %}>Wystawiona</option><option value="not_issued" {% if filters.proforma_status == 'not_issued' %}selected{% endif %}>Niewystawiona</option></select>
     <select name="payment_status"><option value="">Status płatności</option><option>Oczekuje na płatność</option><option>Płatność częściowa</option><option>Opłacone</option><option>Pobranie</option></select>
     <select name="payment_method"><option value="">Sposób płatności</option>{% for m in payment_methods %}<option {% if filters.payment_method == m %}selected{% endif %}>{{ m }}</option>{% endfor %}</select>
-    <select name="document_status"><option value="">Faktura/paragon</option><option value="invoice" {% if filters.document_status == 'invoice' %}selected{% endif %}>Faktura</option><option value="receipt" {% if filters.document_status == 'receipt' %}selected{% endif %}>Paragon</option><option value="none" {% if filters.document_status == 'none' %}selected{% endif %}>Brak</option></select>
     <input name="proforma_number" placeholder="Nr proformy" value="{{ filters.proforma_number }}">
     <input name="invoice_number" placeholder="Nr faktury" value="{{ filters.invoice_number }}">
     <input name="receipt_number" placeholder="Nr paragonu" value="{{ filters.receipt_number }}">
-    <button>Filtruj</button>
+    <button>Filtruj zamówienia</button>
   </form>
 </div>
+
 <div class="card" style="margin-bottom:16px;overflow:auto;">
-  <h3>Lista księgowa</h3>
+  <h3>Lista księgowa zamówień</h3>
   <table width="100%"><tr><th>Zamówienie</th><th>Data</th><th>Klient</th><th>Handlowiec</th><th>Płatność</th><th>Sposób</th><th>Proforma</th><th>Faktura</th><th>Paragon</th><th>Kwota</th><th>Zapłacono</th><th>Do wydania</th></tr>
   {% for o in orders %}<tr><td><a href="/sklep/orders/{{ o[0] }}">{{ o[1] }}</a></td><td>{{ o[2] }}</td><td>{{ o[3] }}</td><td>{{ o[10] or '—' }}</td><td>{{ o[4] }}</td><td>{{ o[6] or '—' }}</td><td>{{ o[7] or '—' }}</td><td>{{ o[8] or '—' }}</td><td>{{ o[9] or '—' }}</td><td>{{ '%.2f'|format(o[11] or 0) }}</td><td>{{ '%.2f'|format(o[12] or 0) }}</td><td>{{ 'Tak' if o[15] else 'Nie' }}</td></tr>{% endfor %}</table>
 </div>
-<div class="tiles" style="margin-bottom:16px;">
-  <div class="tile"><strong>Według handlowca</strong>{% for r in by_salesperson %}<br>{{ r[0] }}: {{ r[1] }} / {{ '%.2f'|format(r[2] or 0) }} zł{% endfor %}</div>
-  <div class="tile"><strong>Według płatności</strong>{% for r in by_payment %}<br>{{ r[0] }}: {{ r[1] }} / {{ '%.2f'|format(r[2] or 0) }} zł{% endfor %}</div>
-  <div class="tile"><strong>Według statusu</strong>{% for r in by_status %}<br>{{ r[0] }}: {{ r[1] }} / {{ '%.2f'|format(r[2] or 0) }} zł{% endfor %}</div>
-</div>
-{% set titles = {'waiting':'Oczekujące na płatność','paid_no_invoice':'Opłacone, oczekujące na fakturę','invoiced':'Z wystawioną fakturą','ready_warehouse':'Gotowe do przekazania magazynowi','unsettled':'Nierozliczone','finished':'Zakończone'} %}
-{% for key, title in titles.items() %}
-<div class="card" style="margin-bottom:12px;">
-  <h3>{{ title }} ({{ lists[key]|length }})</h3>
-  {% for o in lists[key][:10] %}<p><a href="/sklep/orders/{{ o[0] }}">{{ o[1] }}</a> · {{ o[3] }} · {{ o[4] }} · {{ o[10] or 'bez handlowca' }}</p>{% else %}<p>Brak.</p>{% endfor %}
-</div>
-{% endfor %}
 {% endblock %}

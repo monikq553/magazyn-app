@@ -3,16 +3,6 @@
 {% block content %}
 <h2>Dokument {{ doc[5] }}</h2>
 
-{% if doc[8] %}
-<div style="padding:12px; margin-bottom:16px; border-radius:8px; background:#fee2e2; color:#991b1b;">
-    Dokument anulowany {{ doc_meta.voided_at or doc[8] }} przez {{ doc_meta.voided_by or 'brak danych' }}.<br>
-    Powód: {{ doc_meta.void_reason or 'brak powodu' }}<br>
-    Poprzedni status: {{ doc_meta.void_previous_status or 'Aktywny' }}
-</div>
-{% endif %}
-{% if request.args.get('deleted') %}
-<div style="padding:12px; margin-bottom:16px; border-radius:8px; background:#ecfdf5; color:#166534;">Dokument został anulowany bez usuwania danych.</div>
-{% endif %}
 {% if request.args.get('restored') %}
 <div style="padding:12px; margin-bottom:16px; border-radius:8px; background:#ecfdf5; color:#166534;">Dokument został przywrócony.</div>
 {% endif %}
@@ -36,15 +26,8 @@
 </form>
 
 {% if can_delete_documents() %}
-<form method="post" action="/doc/{{ doc[0] }}/delete" onsubmit="return confirm('Anulować dokument i odwrócić jego wpływ na stany? Historia pozostanie zachowana.');" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:18px;">
-    <input type="text" name="reason" minlength="3" placeholder="Wymagany powód anulowania" required style="min-width:260px;">
-    <button type="submit" style="background:#ef4444;color:white;">Usuń / Anuluj dokument</button>
-</form>
-{% endif %}
-{% else %}
-{% if can_delete_documents() %}
-<form method="post" action="/doc/{{ doc[0] }}/restore" onsubmit="return confirm('Przywrócić dokument i ponownie zastosować jego wpływ na magazyn?');" style="margin-bottom:18px;">
-    <button type="submit">Przywróć dokument</button>
+<form method="post" action="/doc/{{ doc[0] }}/delete" onsubmit="return confirm('Czy na pewno chcesz usunąć ten dokument? Tej operacji nie można cofnąć.');" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:18px;">
+    <button type="submit" style="background:#ef4444;color:white;">Usuń dokument</button>
 </form>
 {% endif %}
 {% endif %}
