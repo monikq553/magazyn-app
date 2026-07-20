@@ -54,6 +54,7 @@ body {
     color: #422d00;
     text-decoration: none;
 }
+.brand-logo { width: 118px; height: auto; display: block; }
 
 .sidebar .brand-link {
     margin-bottom: 24px;
@@ -459,6 +460,7 @@ td {
     <!-- SIDEBAR -->
     <div class="sidebar">
         <a class="brand-link" href="/" aria-label="Pmagazyn - strona główna">
+            <img class="brand-logo" src="/static/primadera-logo.png" alt="Primadera">
             <span class="brand-copy">
                 <span class="brand-app">Pmagazyn</span>
             </span>
@@ -468,6 +470,7 @@ td {
             {% if session.get('user') %}
             <a href="/">Start</a>
             <a href="/dashboard">Dashboard</a>
+            <a href="/przelicznik">PRZELICZNIK</a>
             {% if can('inventory') %}<a href="/magazyny">Magazyny</a>{% endif %}
             {% if can('receive') %}<a href="/przyjecie">Przyjęcie</a>{% endif %}
             {% if can('issue') %}<a href="/wydanie">Wydanie</a>{% endif %}
@@ -479,12 +482,14 @@ td {
             {% if session.get('role') == 'admin' or (session.get('role') == 'warehouse' and session.get('can_import_warehouse')) %}<a href="/import-wydan">Import wydania towaru z Excela</a>{% endif %}
             {% if session.get('role') in ['admin', 'warehouse', 'accounting', 'sales'] %}<a href="/kontrahenci">Kontrahenci</a>{% endif %}
             {% if session.get('role') in ['admin', 'sales'] %}<a href="/handlowiec/raport">Raport handlowca</a>{% endif %}
+            {% if session.get('role') in ['admin', 'sales'] %}<a href="/oferty">Oferty handlowe</a>{% endif %}
             {% if can('history') %}<a href="/historia">Historia</a>{% endif %}
             {% if can('reports') %}<a href="/report">Raport dzienny</a>{% endif %}
             {% if session.get('role') == 'admin' %}
             <a href="/users">Użytkownicy</a>
             <a href="/admin/security-history">Historia bezpieczeństwa</a>
             <a href="/admin/backups">Kopie zapasowe</a>
+            <a href="/admin/tools/test-data">Narzędzia i Kosz</a>
             {% endif %}
             <a href="/change-password">Zmień hasło</a>
             <form method="POST" action="/logout">
@@ -500,6 +505,7 @@ td {
         <div class="topbar">
             <button class="mobile-menu-button" type="button" aria-label="Otwórz menu" aria-expanded="false">☰</button>
             <a class="brand-link topbar-brand" href="/" aria-label="Pmagazyn - strona główna">
+                <img class="brand-logo" src="/static/primadera-logo.png" alt="Primadera">
                 <span class="brand-copy">
                     <span class="brand-app">Pmagazyn</span>
                 </span>

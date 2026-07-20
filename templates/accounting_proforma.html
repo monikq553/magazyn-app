@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Proforma {{ proforma.proforma_number }}</h2>
+
+{% if can_edit_proformas %}
+<div class="card" style="margin-bottom:16px;">
+  <p><strong>Firma:</strong> {{ proforma.company }}</p>
+  <p><strong>Handlowiec:</strong> {{ proforma.salesperson or '—' }}</p>
+  <p><strong>Klient:</strong> {{ proforma.client }}</p>
+  <p><strong>Data wystawienia:</strong> {{ proforma.issue_date }} · <strong>Termin płatności:</strong> {{ proforma.payment_due_date or '—' }}</p>
+  <p><strong>Kwota netto:</strong> {{ '%.2f'|format(proforma.netto_amount or 0) }} zł · <strong>VAT:</strong> {{ '%.2f'|format(proforma.vat_amount or 0) }} zł · <strong>Brutto:</strong> {{ '%.2f'|format(proforma.brutto_amount or 0) }} zł</p>
+  <p><strong>Zapłacona:</strong> {{ 'Tak' if proforma.paid else 'Nie' }} · <strong>Przelew:</strong> {{ 'Tak' if proforma.bank_transfer else 'Nie' }} · <strong>Wysłano:</strong> {{ 'Tak' if proforma.sent_to_client else 'Nie' }}</p>
+  <p><strong>Data zapłaty:</strong> {{ proforma.payment_date or '—' }} · <strong>Kwota zapłacona:</strong> {{ '%.2f'|format(proforma.paid_amount or 0) }} zł · <strong>Data wysłania:</strong> {{ proforma.sent_date or '—' }}</p>
+  <p><strong>Sposób płatności:</strong> {{ proforma.payment_method or '—' }}</p>
+  <p><strong>Produkty:</strong><br><span style="white-space:pre-wrap;">{{ proforma.products or '—' }}</span></p>
+  <p><strong>Uwagi:</strong><br><span style="white-space:pre-wrap;">{{ proforma.notes or '—' }}</span></p>
+  <p><a class="btn" href="/ksiegowosc/proformy/{{ proforma.id }}/pdf">Pobierz PDF</a></p>
+</div>
+
+<div class="card" style="margin-bottom:16px;">
+  <h3>Edycja</h3>
+  <form method="POST" action="/ksiegowosc/proformy/{{ proforma.id }}/edit" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;">
+    <input name="proforma_number" value="{{ proforma.proforma_number }}" required>
+    <input type="date" name="issue_date" value="{{ proforma.issue_date }}" required>
+    <input name="client" value="{{ proforma.client }}" required>
+    <select name="company" required>{% for company in proforma_companies %}<option value="{{ company }}" {% if proforma.company == company %}selected{% endif %}>{{ company }}</option>{% endfor %}</select>
+    <input name="salesperson" value="{{ proforma.salesperson or '' }}" placeholder="Handlowiec">
+    <input name="netto_amount" type="number" min="0" step="0.01" value="{{ proforma.netto_amount or 0 }}" required>
+    <input name="vat_amount" type="number" min="0" step="0.01" value="{{ proforma.vat_amount or 0 }}" required>
+    <input name="brutto_amount" type="number" min="0" step="0.01" value="{{ proforma.brutto_amount or 0 }}">
+    <input type="date" name="payment_due_date" value="{{ proforma.payment_due_date or '' }}">
+    <select name="payment_method"><option value="">Sposób płatności</option>{% for m in payment_methods %}<option {% if proforma.payment_method == m %}selected{% endif %}>{{ m }}</option>{% endfor %}</select>
+    <input type="date" name="payment_date" value="{{ proforma.payment_date or '' }}">
+    <input name="paid_amount" type="number" min="0" step="0.01" value="{{ proforma.paid_amount or 0 }}">
+    <input type="date" name="sent_date" value="{{ proforma.sent_date or '' }}">
+    <label><input type="checkbox" name="paid" {% if proforma.paid %}checked{% endif %}> Zapłacona</label>
+    <label><input type="checkbox" name="bank_transfer" {% if proforma.bank_transfer %}checked{% endif %}> Przelew</label>
+    <label><input type="checkbox" name="sent_to_client" {% if proforma.sent_to_client %}checked{% endif %}> Wysłano do klienta</label>
+    <textarea name="products" placeholder="Produkty" style="grid-column:1/-1;">{{ proforma.products or '' }}</textarea>
+    <textarea name="notes" placeholder="Uwagi" style="grid-column:1/-1;">{{ proforma.notes or '' }}</textarea>
+    <button>Zapisz</button>
+  </form>
+</div>
+
+<form method="POST" action="/ksiegowosc/proformy/{{ proforma.id }}/delete" onsubmit="return confirm('Czy na pewno chcesz usunąć proformę? Tej operacji nie można cofnąć.');">
+  <button type="submit" style="background:#ef4444;color:white;">Usuń</button>
+</form>
+{% endif %}
+{% endblock %}

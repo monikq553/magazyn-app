@@ -26,7 +26,7 @@
 </form>
 
 {% if can_delete_documents() %}
-<form method="post" action="/doc/{{ doc[0] }}/delete" onsubmit="return confirm('Czy na pewno chcesz usunąć ten dokument? Tej operacji nie można cofnąć.');" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:18px;">
+<form method="post" action="/doc/{{ doc[0] }}/delete" onsubmit="return confirm('Przenieść dokument oraz jego pozycje i zdjęcia do Kosza?');" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:18px;">
     <button type="submit" style="background:#ef4444;color:white;">Usuń dokument</button>
 </form>
 {% endif %}

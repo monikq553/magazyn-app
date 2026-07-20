@@ -1,5 +1,10 @@
 const CACHE_NAME = "pmagazyn-shell-v3";
-const SHELL_ASSETS = [];
+const SHELL_ASSETS = [
+  "/static/favicon.ico",
+  "/static/icons/icon-180.png",
+  "/static/icons/icon-192.png",
+  "/static/icons/icon-512.png"
+];
 
 const BYPASS_PREFIXES = [
   "/auth/",

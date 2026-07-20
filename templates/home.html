@@ -2,6 +2,7 @@
 {% block content %}
 <h2 style="margin-bottom:25px;">Panel główny</h2>
 <div class="tiles">
+<a href="/przelicznik" class="tile"><div style="font-size:20px;">⇄</div><div style="margin-top:10px;font-weight:600;">PRZELICZNIK</div><div style="font-size:13px;color:#6b7280;margin-top:5px;">MB, m², m³ i sztuki</div></a>
 {% if can('inventory') %}
 <a href="/magazyny" class="tile"><div style="font-size:20px;">M</div><div style="margin-top:10px;font-weight:600;">Magazyny</div><div style="font-size:13px;color:#6b7280;margin-top:5px;">Przegląd stanów</div></a>
 {% if can('inventory_manage') %}<a href="/inwestycja-suwaj" class="tile"><div style="font-size:20px;">I</div><div style="margin-top:10px;font-weight:600;">Inwestycja Suwaj</div><div style="font-size:13px;color:#6b7280;margin-top:5px;">Segment inwestycji</div></a>{% endif %}
@@ -30,6 +31,7 @@
 {% if session.get('role') in ['admin', 'warehouse', 'accounting', 'sales'] %}
 <a href="/kontrahenci" class="tile"><div style="font-size:20px;">C</div><div style="margin-top:10px;font-weight:600;">Kontrahenci</div><div style="font-size:13px;color:#6b7280;margin-top:5px;">Edycja danych kontrahentów</div></a>
 {% endif %}
+{% if session.get('role') in ['admin', 'sales'] %}<a href="/oferty" class="tile"><div style="font-size:20px;">OF</div><div style="margin-top:10px;font-weight:600;">Oferty handlowe</div><div style="font-size:13px;color:#6b7280;margin-top:5px;">Ceny, rabaty, VAT i PDF</div></a>{% endif %}
 {% if can('history') %}
 <a href="/historia" class="tile"><div style="font-size:20px;">H</div><div style="margin-top:10px;font-weight:600;">Historia</div><div style="font-size:13px;color:#6b7280;margin-top:5px;">Dokumenty</div></a>
 {% endif %}

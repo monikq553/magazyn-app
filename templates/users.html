@@ -130,6 +130,9 @@ input, select {
             {% if u[5] != 'admin' %}
             <label><input type="checkbox" name="can_delete_documents" {% if u[9] %}checked{% endif %}> Usuwanie dokumentów</label>
             {% endif %}
+            {% if u[5] not in ['admin', 'accounting'] %}
+            <label><input type="checkbox" name="can_view_accounting" {% if u[18] %}checked{% endif %}> Podgląd księgowości</label>
+            {% endif %}
             <button class="btn">Zapisz uprawnienia</button>
         </form>
 
@@ -162,8 +165,8 @@ input, select {
         </form>
         {% endif %}
         <form method="POST" action="/delete_user/{{u[0]}}">
-            <button class="btn delete" onclick="return confirm('Usunąć użytkownika?')">
-                Usuń
+            <button class="btn delete" onclick="return confirm('Przenieść użytkownika i jego dane zależne do Kosza?')">
+                🗑 Usuń
             </button>
         </form>
         {% endif %}
