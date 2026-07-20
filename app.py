@@ -1,4 +1,6 @@
 import os
+import base64
+import re
 import logging
 import math
 import secrets
@@ -19,11 +21,14 @@ from flask import (
 )
 from functools import wraps
 import psycopg2
+from psycopg2 import sql
+from psycopg2.extras import Json
 from psycopg2.pool import ThreadedConnectionPool
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.exceptions import HTTPException
 from werkzeug.utils import secure_filename
 from datetime import datetime, timedelta
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import json
 import io
 import pandas as pd
@@ -1055,6 +1060,9 @@ def run_db_migrations():
         proforma_number TEXT NOT NULL,
         issue_date DATE NOT NULL,
         client TEXT NOT NULL,
+        company TEXT NOT NULL DEFAULT 'Primadera',
+        salesperson TEXT,
+        products TEXT,
         netto_amount REAL NOT NULL DEFAULT 0,
         vat_amount REAL NOT NULL DEFAULT 0,
         brutto_amount REAL NOT NULL DEFAULT 0,
@@ -1073,9 +1081,15 @@ def run_db_migrations():
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
     """)
+    cur.execute("""
+        ALTER TABLE accounting_proformas
+            ADD COLUMN IF NOT EXISTS company TEXT NOT NULL DEFAULT 'Primadera',
+            ADD COLUMN IF NOT EXISTS salesperson TEXT,
+            ADD COLUMN IF NOT EXISTS products TEXT
+    """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_accounting_documents_order ON accounting_documents(order_id,status,document_type)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_accounting_history_order ON accounting_history(order_id,changed_at DESC)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_accounting_proformas_filters ON accounting_proformas(lower(proforma_number),lower(client),issue_date,payment_due_date,paid,bank_transfer,sent_to_client)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_accounting_proformas_filters ON accounting_proformas(lower(proforma_number),lower(client),lower(company),lower(salesperson),issue_date,payment_due_date,paid,bank_transfer,sent_to_client)")
     cur.execute("""
         UPDATE shop_accounting a
         SET sales_document_generated=EXISTS(
@@ -1281,6 +1295,101 @@ def run_db_migrations():
     cur.execute("CREATE INDEX IF NOT EXISTS idx_issue_doc_photos_doc ON issue_doc_photos(doc_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_issue_doc_history_doc ON issue_doc_history(doc_id)")
 
+    # Commercial quotes are deliberately separate from warehouse documents.
+    # No trigger or route in this module changes products.qty or packages.qty.
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS commercial_quotes(
+        id SERIAL PRIMARY KEY,
+        quote_number TEXT UNIQUE NOT NULL,
+        issue_date DATE NOT NULL,
+        valid_until DATE,
+        delivery_term TEXT,
+        status TEXT NOT NULL DEFAULT 'robocza',
+        customer_name TEXT NOT NULL,
+        customer_address TEXT,
+        customer_nip TEXT,
+        customer_phone TEXT,
+        customer_email TEXT,
+        contractor_id INTEGER,
+        payment_terms TEXT,
+        notes TEXT,
+        seller_email TEXT NOT NULL,
+        seller_name TEXT NOT NULL,
+        seller_position TEXT,
+        seller_phone TEXT,
+        net_total NUMERIC(14,2) NOT NULL DEFAULT 0,
+        vat_total NUMERIC(14,2) NOT NULL DEFAULT 0,
+        gross_total NUMERIC(14,2) NOT NULL DEFAULT 0,
+        created_by TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        CHECK (status IN ('robocza','wysłana','zaakceptowana','odrzucona','wygasła','zamieniona na zamówienie'))
+    )
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS commercial_quote_items(
+        id SERIAL PRIMARY KEY,
+        quote_id INTEGER NOT NULL REFERENCES commercial_quotes(id) ON DELETE CASCADE,
+        position INTEGER NOT NULL,
+        product_id INTEGER REFERENCES products(id) ON DELETE SET NULL,
+        item_type TEXT NOT NULL DEFAULT 'towar',
+        description TEXT NOT NULL,
+        qty NUMERIC(14,3) NOT NULL,
+        unit TEXT NOT NULL,
+        unit_net NUMERIC(14,2) NOT NULL,
+        discount_percent NUMERIC(7,2) NOT NULL DEFAULT 0,
+        discount_amount NUMERIC(14,2) NOT NULL DEFAULT 0,
+        vat_rate NUMERIC(7,2) NOT NULL DEFAULT 23,
+        net_value NUMERIC(14,2) NOT NULL,
+        vat_value NUMERIC(14,2) NOT NULL,
+        gross_value NUMERIC(14,2) NOT NULL,
+        CHECK (qty > 0),
+        CHECK (unit IN ('szt.','m²','m³','MB','l','op.')),
+        CHECK (item_type IN ('towar','własna pozycja','transport','usługa'))
+    )
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS commercial_quote_permissions(
+        user_email TEXT PRIMARY KEY,
+        can_view_all BOOLEAN NOT NULL DEFAULT FALSE,
+        updated_by TEXT,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_quotes_owner ON commercial_quotes(lower(seller_email),issue_date DESC)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_quotes_filters ON commercial_quotes(lower(quote_number),lower(customer_name),status,issue_date)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_quote_items_quote ON commercial_quote_items(quote_id,position)")
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS trash_items(
+        id SERIAL PRIMARY KEY,
+        batch_id TEXT NOT NULL,
+        entity_type TEXT NOT NULL,
+        entity_id TEXT NOT NULL,
+        label TEXT NOT NULL,
+        payload JSONB NOT NULL,
+        record_count INTEGER NOT NULL DEFAULT 1,
+        deleted_by TEXT NOT NULL,
+        deleted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_trash_deleted_at ON trash_items(deleted_at DESC)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_trash_batch ON trash_items(batch_id)")
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS calculator_history(
+        id SERIAL PRIMARY KEY,
+        user_email TEXT NOT NULL,
+        direction TEXT NOT NULL,
+        inputs JSONB NOT NULL,
+        result NUMERIC(30,12) NOT NULL,
+        output_unit TEXT NOT NULL,
+        precision TEXT NOT NULL,
+        formula TEXT NOT NULL,
+        substitution TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_calculator_history_user ON calculator_history(lower(user_email),created_at DESC)")
+
     cur.execute("""
     CREATE TABLE IF NOT EXISTS system_settings(
         key TEXT PRIMARY KEY,
@@ -1337,6 +1446,7 @@ def run_db_migrations():
     cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS can_import_warehouse BOOLEAN NOT NULL DEFAULT FALSE")
     cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS can_import_accounting BOOLEAN NOT NULL DEFAULT FALSE")
     cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS can_delete_documents BOOLEAN NOT NULL DEFAULT FALSE")
+    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS can_view_accounting BOOLEAN NOT NULL DEFAULT FALSE")
     cur.execute("ALTER TABLE accounting_documents ADD COLUMN IF NOT EXISTS void_previous_status TEXT")
     cur.execute("""
     CREATE TABLE IF NOT EXISTS contractors(
@@ -1353,6 +1463,14 @@ def run_db_migrations():
     """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_contractors_name ON contractors(lower(name))")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_contractors_nip ON contractors(nip)")
+    cur.execute("""
+        DO $$ BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='commercial_quotes_contractor_fk') THEN
+                ALTER TABLE commercial_quotes ADD CONSTRAINT commercial_quotes_contractor_fk
+                FOREIGN KEY (contractor_id) REFERENCES contractors(id) ON DELETE SET NULL NOT VALID;
+            END IF;
+        END $$
+    """)
     cur.execute("""
     CREATE TABLE IF NOT EXISTS general_imports(
         id SERIAL PRIMARY KEY,
@@ -1595,6 +1713,7 @@ SHOP_ROLE_LABELS = {
 }
 
 ACCOUNTING_PAYMENT_METHODS = ["Przelew", "Gotówka", "Karta", "BLIK", "Autopay", "Pobranie", "Inny"]
+PROFORMA_COMPANIES = ["Primadera", "Primasort", "GoldenOak"]
 ACCOUNTING_BOOL_FIELDS = [
     "proforma_issued", "reserved_by_proforma", "waiting_for_payment", "partial_payment",
     "paid", "invoice_issued", "receipt_issued", "invoice_sent", "document_to_warehouse",
@@ -1658,6 +1777,17 @@ def accounting_required(f):
         if 'user' not in session:
             return redirect('/login')
         if session.get('role') not in {'admin', 'accounting'}:
+            return "Brak uprawnień", 403
+        return f(*args, **kwargs)
+    return decorated
+
+
+def accounting_view_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if 'user' not in session:
+            return redirect('/login')
+        if session.get('role') not in {'admin', 'accounting'} and not bool(session.get("can_view_accounting")):
             return "Brak uprawnień", 403
         return f(*args, **kwargs)
     return decorated
@@ -2949,6 +3079,8 @@ def document_delete_required(f):
 
 def current_user_can(permission):
     role = session.get("role")
+    if permission == "accounting" and bool(session.get("can_view_accounting")):
+        return True
     return permission in ROLE_PERMISSIONS.get(role, set())
 
 
@@ -3276,6 +3408,190 @@ def log_action(action, entity_type=None, entity_id=None, details=None, conn=None
             target_conn.close()
 
 
+TRASH_ENTITY_TYPES = {
+    "product": ("products", "name", "Produkty"),
+    "contractor": ("contractors", "name", "Klienci"),
+    "user": ("users", "email", "Użytkownicy"),
+    "warehouse_document": ("issue_docs", "doc_number", "Dokumenty magazynowe"),
+    "quote": ("commercial_quotes", "quote_number", "Oferty handlowe"),
+    "order": ("shop_orders", "order_number", "Zamówienia"),
+    "package": ("packages", "number", "Pakiety"),
+    "photo": ("issue_doc_photos", "filename", "Zdjęcia i załączniki"),
+    "cost": ("costs", "name", "Koszty"),
+    "proforma": ("accounting_proformas", "proforma_number", "Proformy"),
+    "reservation": ("reservations", "reservation_number", "Rezerwacje"),
+}
+TEST_DATA_GROUPS = {
+    "quotes": ("Oferty handlowe", ("quote",)),
+    "documents": ("Dokumenty magazynowe", ("warehouse_document",)),
+    "contractors": ("Klienci", ("contractor",)),
+    "photos": ("Zdjęcia", ("photo",)),
+    "products": ("Produkty", ("product",)),
+    "all": (
+        "Wszystkie dane testowe",
+        ("photo", "quote", "reservation", "order", "warehouse_document", "package", "product", "contractor", "cost", "proforma"),
+    ),
+}
+
+
+def trash_json_value(value):
+    if isinstance(value, memoryview):
+        value = value.tobytes()
+    if isinstance(value, bytes):
+        return {"__trash_type__": "bytes", "base64": base64.b64encode(value).decode("ascii")}
+    if isinstance(value, Decimal):
+        return {"__trash_type__": "decimal", "value": str(value)}
+    if isinstance(value, datetime):
+        return {"__trash_type__": "datetime", "value": value.isoformat()}
+    if hasattr(value, "isoformat"):
+        return {"__trash_type__": "date", "value": value.isoformat()}
+    return value
+
+
+def trash_restore_value(value):
+    if isinstance(value, list):
+        return Json(value, dumps=lambda payload: json.dumps(payload, ensure_ascii=False))
+    if not isinstance(value, dict):
+        return value
+    if "__trash_type__" not in value:
+        return Json(value, dumps=lambda payload: json.dumps(payload, ensure_ascii=False))
+    kind = value["__trash_type__"]
+    if kind == "bytes":
+        return psycopg2.Binary(base64.b64decode(value["base64"]))
+    if kind == "decimal":
+        return Decimal(value["value"])
+    if kind == "datetime":
+        return datetime.fromisoformat(value["value"])
+    if kind == "date":
+        return datetime.strptime(value["value"], "%Y-%m-%d").date()
+    return value
+
+
+def trash_primary_key(cur, table):
+    cur.execute("""
+        SELECT a.attname
+        FROM pg_index i
+        JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=ANY(i.indkey)
+        WHERE i.indrelid=%s::regclass AND i.indisprimary
+        ORDER BY array_position(i.indkey,a.attnum) LIMIT 1
+    """, (table,))
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
+def trash_referencing_keys(cur, table):
+    cur.execute("""
+        SELECT c.conrelid::regclass::text,child.attname,parent.attname
+        FROM pg_constraint c
+        JOIN pg_attribute child ON child.attrelid=c.conrelid AND child.attnum=c.conkey[1]
+        JOIN pg_attribute parent ON parent.attrelid=c.confrelid AND parent.attnum=c.confkey[1]
+        WHERE c.contype='f' AND c.confrelid=%s::regclass
+          AND cardinality(c.conkey)=1 AND c.conrelid<>%s::regclass
+        ORDER BY c.conrelid::regclass::text
+    """, (table, "trash_items"))
+    return cur.fetchall()
+
+
+def trash_collect_record(cur, table, primary_key, primary_value, records, visited):
+    identity = (table, str(primary_value))
+    if identity in visited:
+        return
+    visited.add(identity)
+    cur.execute(
+        sql.SQL("SELECT * FROM {} WHERE {}=%s FOR UPDATE").format(sql.Identifier(table), sql.Identifier(primary_key)),
+        (primary_value,),
+    )
+    row = cur.fetchone()
+    if not row:
+        return
+    columns = [column.name for column in cur.description]
+    values = dict(zip(columns, row))
+    records.append({"table": table, "pk": primary_key, "pk_value": primary_value, "columns": columns, "values": values})
+    for child_table, child_column, parent_column in trash_referencing_keys(cur, table):
+        if parent_column not in values or values[parent_column] is None:
+            continue
+        child_pk = trash_primary_key(cur, child_table)
+        if not child_pk:
+            continue
+        cur.execute(
+            sql.SQL("SELECT {} FROM {} WHERE {}=%s").format(sql.Identifier(child_pk), sql.Identifier(child_table), sql.Identifier(child_column)),
+            (values[parent_column],),
+        )
+        for child in cur.fetchall():
+            trash_collect_record(cur, child_table, child_pk, child[0], records, visited)
+
+
+def move_to_trash(cur, entity_type, entity_id, batch_id=None):
+    if entity_type not in TRASH_ENTITY_TYPES:
+        raise ValueError("Nieobsługiwany typ danych.")
+    table, label_column, _ = TRASH_ENTITY_TYPES[entity_type]
+    pk = trash_primary_key(cur, table)
+    records = []
+    trash_collect_record(cur, table, pk, entity_id, records, set())
+    if not records:
+        raise ValueError("Rekord nie istnieje lub został już usunięty.")
+    root = records[0]["values"]
+    if entity_type == "user" and str(root.get("email", "")).lower() == str(session.get("user", "")).lower():
+        raise ValueError("Nie można usunąć własnego konta administratora.")
+    if entity_type == "user" and root.get("role") == "admin" and root.get("status") == "active":
+        cur.execute("SELECT COUNT(*) FROM users WHERE role='admin' AND status='active'")
+        if cur.fetchone()[0] <= 1:
+            raise ValueError("Nie można usunąć ostatniego aktywnego administratora.")
+    label = str(root.get(label_column) or f"{entity_type} #{entity_id}")
+    serializable = json.loads(json.dumps(records, ensure_ascii=False, default=trash_json_value))
+    batch_id = batch_id or secrets.token_hex(12)
+    cur.execute("""
+        INSERT INTO trash_items(batch_id,entity_type,entity_id,label,payload,record_count,deleted_by)
+        VALUES (%s,%s,%s,%s,%s::jsonb,%s,%s) RETURNING id
+    """, (batch_id, entity_type, str(entity_id), label, json.dumps(serializable, ensure_ascii=False), len(records), session.get("user")))
+    trash_id = cur.fetchone()[0]
+    for record in reversed(records):
+        cur.execute(
+            sql.SQL("DELETE FROM {} WHERE {}=%s").format(sql.Identifier(record["table"]), sql.Identifier(record["pk"])),
+            (record["pk_value"],),
+        )
+    log_action("trash.move", entity_type, entity_id, {"trash_id": trash_id, "label": label, "record_count": len(records)}, conn=getattr(cur, "connection", None))
+    return trash_id
+
+
+def restore_trash_item(cur, trash_id):
+    cur.execute("SELECT entity_type,entity_id,label,payload FROM trash_items WHERE id=%s FOR UPDATE", (trash_id,))
+    item = cur.fetchone()
+    if not item:
+        raise ValueError("Elementu nie ma już w Koszu.")
+    records = item[3] if isinstance(item[3], list) else json.loads(item[3])
+    for record in records:
+        columns = record["columns"]
+        values = [trash_restore_value(record["values"].get(column)) for column in columns]
+        cur.execute(
+            sql.SQL("INSERT INTO {} ({}) VALUES ({})").format(
+                sql.Identifier(record["table"]),
+                sql.SQL(",").join(map(sql.Identifier, columns)),
+                sql.SQL(",").join(sql.Placeholder() for _ in columns),
+            ), values,
+        )
+    cur.execute("DELETE FROM trash_items WHERE id=%s", (trash_id,))
+    log_action("trash.restore", item[0], item[1], {"trash_id": trash_id, "label": item[2]}, conn=getattr(cur, "connection", None))
+
+
+def permanent_delete_trash_item(cur, trash_id):
+    cur.execute("SELECT entity_type,entity_id,label,record_count,payload FROM trash_items WHERE id=%s FOR UPDATE", (trash_id,))
+    item = cur.fetchone()
+    if not item:
+        raise ValueError("Elementu nie ma już w Koszu.")
+    if item[0] == "user":
+        records = item[4] if isinstance(item[4], list) else json.loads(item[4])
+        user_record = next((record for record in records if record["table"] == "users"), None)
+        uid = user_record and user_record["values"].get("firebase_uid")
+        if uid and FIREBASE_ADMIN_READY:
+            try:
+                auth.delete_user(uid)
+            except Exception:
+                logger.warning("Firebase user permanent deletion failed for %s", uid, exc_info=True)
+    cur.execute("DELETE FROM trash_items WHERE id=%s", (trash_id,))
+    log_action("trash.permanent_delete", item[0], item[1], {"trash_id": trash_id, "label": item[2], "record_count": item[3]}, conn=getattr(cur, "connection", None))
+
+
 def password_validation_error(password):
     password = password or ""
     if len(password) < 12:
@@ -3573,7 +3889,8 @@ def create_session():
             """
             SELECT role,status,can_import_warehouse,can_import_accounting,
                    can_delete_documents,must_change_password,id,
-                   (locked_until IS NOT NULL AND locked_until>NOW())
+                   (locked_until IS NOT NULL AND locked_until>NOW()),
+                   can_view_accounting
             FROM users
             WHERE firebase_uid=%s OR lower(email)=lower(%s)
             FOR UPDATE
@@ -3597,6 +3914,7 @@ def create_session():
             can_import_warehouse = True
             can_import_accounting = True
             can_delete_documents_value = True
+            can_view_accounting = True
             must_change_password = False
             cur.execute(
                 """
@@ -3618,6 +3936,7 @@ def create_session():
             must_change_password = bool(row[5]) if len(row) > 5 else False
             user_id = row[6] if len(row) > 6 else None
             is_temporarily_locked = bool(row[7]) if len(row) > 7 else False
+            can_view_accounting = bool(row[8]) if len(row) > 8 else False
             if role == "employee":
                 role = "warehouse"
             if status != "active":
@@ -3661,6 +3980,7 @@ def create_session():
     session['can_import_warehouse'] = role == "admin" or can_import_warehouse
     session['can_import_accounting'] = role == "admin" or can_import_accounting
     session['can_delete_documents'] = role == "admin" or can_delete_documents_value
+    session['can_view_accounting'] = role in {"admin", "accounting"} or can_view_accounting
     session['must_change_password'] = bool(must_change_password)
     response = make_response(jsonify({
         "ok": True,
@@ -3828,7 +4148,8 @@ def require_login_for_private_app():
                 """
                 SELECT role,status,can_import_warehouse,can_import_accounting,
                        can_delete_documents,must_change_password,
-                       (locked_until IS NOT NULL AND locked_until>NOW())
+                       (locked_until IS NOT NULL AND locked_until>NOW()),
+                       can_view_accounting
                 FROM users
                 WHERE firebase_uid=%s AND lower(email)=lower(%s)
                 """,
@@ -3848,7 +4169,8 @@ def require_login_for_private_app():
                 title="Aplikacja chwilowo niedostępna",
                 message="Nie udało się połączyć z bazą danych. Spróbuj ponownie później.",
             ), 503
-        if account and account[1] == "active" and not bool(account[6]):
+        is_temporarily_locked = bool(account[6]) if account and len(account) > 6 else (bool(account[5]) if account and len(account) > 5 else False)
+        if account and account[1] == "active" and not is_temporarily_locked:
             session["user"] = email
             session["uid"] = uid
             session["role"] = account[0]
@@ -3859,9 +4181,12 @@ def require_login_for_private_app():
                 account[0] == "admin" or (bool(account[3]) if len(account) > 3 else False)
             )
             session["can_delete_documents"] = (
-                account[0] == "admin" or (bool(account[4]) if len(account) > 4 else False)
+                account[0] == "admin" or (bool(account[4]) if len(account) > 6 else False)
             )
-            session["must_change_password"] = bool(account[5])
+            session["can_view_accounting"] = (
+                account[0] in {"admin", "accounting"} or (bool(account[7]) if len(account) > 7 else False)
+            )
+            session["must_change_password"] = bool(account[5]) if len(account) > 6 else (bool(account[4]) if len(account) > 4 else False)
             if request.endpoint == "login":
                 return redirect("/")
         else:
@@ -3872,6 +4197,7 @@ def require_login_for_private_app():
         session.pop("uid", None)
         session.pop("role", None)
         session.pop("can_delete_documents", None)
+        session.pop("can_view_accounting", None)
         if request.endpoint == "login":
             return None
         if request.path.startswith("/api/") or request.is_json:
@@ -4129,7 +4455,7 @@ def users():
         SELECT id, firebase_uid, first_name, last_name, email, role, status,
                can_import_warehouse, can_import_accounting, can_delete_documents, phone,
                must_change_password,last_login_at,password_changed_at,created_by,
-               password_reset_by,failed_login_attempts,locked_until
+               password_reset_by,failed_login_attempts,locked_until,can_view_accounting
         FROM users ORDER BY lower(last_name), lower(first_name), lower(email)
         """
     )
@@ -4259,33 +4585,15 @@ def add_user():
 def delete_user(user_id):
     conn = db()
     cur = conn.cursor()
-    cur.execute(
-        "SELECT firebase_uid, email, role, status FROM users WHERE id=%s FOR UPDATE",
-        (user_id,),
-    )
-    user = cur.fetchone()
-    if not user:
-        conn.close()
-        return redirect('/users')
-    if user[0] == session.get("uid"):
-        conn.close()
-        return "Nie możesz usunąć aktualnie zalogowanego konta.", 400
-    if user[2] == "admin" and user[3] == "active":
-        cur.execute("SELECT COUNT(*) FROM users WHERE role='admin' AND status='active'")
-        if cur.fetchone()[0] <= 1:
-            conn.close()
-            return "Nie można usunąć ostatniego administratora.", 400
     try:
-        auth.delete_user(user[0])
-        cur.execute("DELETE FROM users WHERE id=%s", (user_id,))
-        conn.commit()
-    except auth.UserNotFoundError:
-        cur.execute("DELETE FROM users WHERE id=%s", (user_id,))
-        conn.commit()
+        move_to_trash(cur, "user", user_id); conn.commit(); cache.clear()
+        return redirect('/users')
+    except ValueError as exc:
+        conn.rollback(); return str(exc), 400
     except Exception:
         conn.rollback()
         logger.exception("User deletion failed.")
-        return "Nie udało się usunąć użytkownika.", 502
+        return "Nie udało się przenieść użytkownika do Kosza.", 500
     finally:
         conn.close()
     return redirect('/users')
@@ -4320,10 +4628,11 @@ def update_user_role(user_id):
             can_import_warehouse=CASE WHEN %s='warehouse' THEN can_import_warehouse ELSE FALSE END,
             can_import_accounting=CASE WHEN %s='accounting' THEN can_import_accounting ELSE FALSE END,
             can_delete_documents=CASE WHEN %s='admin' THEN TRUE ELSE FALSE END,
+            can_view_accounting=CASE WHEN %s IN ('admin','accounting') THEN TRUE ELSE can_view_accounting END,
             updated_at=NOW()
         WHERE id=%s
         """,
-        (new_role, new_role, new_role, new_role, user_id),
+        (new_role, new_role, new_role, new_role, new_role, user_id),
     )
     conn.commit()
     conn.close()
@@ -4349,14 +4658,18 @@ def update_user_permissions(user_id):
             and request.form.get("can_import_accounting") == "on"
         )
         delete_allowed = user[0] != "admin" and request.form.get("can_delete_documents") == "on"
+        view_accounting_allowed = (
+            user[0] in {"admin", "accounting"}
+            or request.form.get("can_view_accounting") == "on"
+        )
         cur.execute(
             """
             UPDATE users
             SET can_import_warehouse=%s, can_import_accounting=%s,
-                can_delete_documents=%s, updated_at=NOW()
+                can_delete_documents=%s, can_view_accounting=%s, updated_at=NOW()
             WHERE id=%s
             """,
-            (warehouse_allowed, accounting_allowed, delete_allowed, user_id),
+            (warehouse_allowed, accounting_allowed, delete_allowed, view_accounting_allowed, user_id),
         )
         conn.commit()
         return redirect("/users")
@@ -4856,17 +5169,13 @@ def add_product():
 def delete_product(product_id):
     conn = db()
     cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) FROM issue_items WHERE product_id=%s", (product_id,))
-    linked = cur.fetchone()[0]
-    if linked > 0:
-        conn.close()
-        return "Nie można usunąć produktu użytego w dokumentach.", 400
-
-    cur.execute("DELETE FROM packages WHERE product_id=%s", (product_id,))
-    cur.execute("DELETE FROM products WHERE id=%s", (product_id,))
-    conn.commit()
-    conn.close()
-    return ("", 204)
+    try:
+        move_to_trash(cur, "product", product_id); conn.commit(); cache.clear(); return ("", 204)
+    except ValueError as exc:
+        conn.rollback(); return str(exc), 400
+    except Exception:
+        conn.rollback(); logger.exception("Product trash move failed."); return "Nie udało się usunąć produktu.", 500
+    finally: conn.close()
 
 
 @app.route('/delete_selected', methods=['POST'])
@@ -4878,23 +5187,14 @@ def delete_selected():
 
     conn = db()
     cur = conn.cursor()
-    for pid_raw in selected:
-        try:
-            pid = int(pid_raw)
-        except ValueError:
-            continue
-
-        cur.execute("SELECT COUNT(*) FROM issue_items WHERE product_id=%s", (pid,))
-        linked = cur.fetchone()[0]
-        if linked > 0:
-            continue
-
-        cur.execute("DELETE FROM packages WHERE product_id=%s", (pid,))
-        cur.execute("DELETE FROM products WHERE id=%s", (pid,))
-
-    conn.commit()
-    conn.close()
-    return redirect(request.referrer or '/magazyny')
+    try:
+        batch = secrets.token_hex(12)
+        for pid_raw in selected:
+            if pid_raw.isdigit(): move_to_trash(cur, "product", int(pid_raw), batch)
+        conn.commit(); cache.clear(); return redirect(request.referrer or '/magazyny')
+    except Exception:
+        conn.rollback(); logger.exception("Bulk product trash move failed."); return "Nie udało się usunąć zaznaczonych produktów.", 500
+    finally: conn.close()
 
 
 @app.route('/costs')
@@ -8411,12 +8711,13 @@ def delete_issue_doc_photo(photo_id):
     if not photo:
         conn.close()
         return "Nie znaleziono zdjęcia.", 404
-    cur.execute("DELETE FROM issue_doc_photos WHERE id=%s", (photo_id,))
-    issue_doc_history(cur, photo[0], "usunięto zdjęcie", photo[1])
-    conn.commit()
-    cache.clear()
-    conn.close()
-    return redirect(f"/doc/{photo[0]}")
+    try:
+        move_to_trash(cur, "photo", photo_id)
+        issue_doc_history(cur, photo[0], "przeniesiono zdjęcie do Kosza", photo[1])
+        conn.commit(); cache.clear(); return redirect(f"/doc/{photo[0]}")
+    except Exception:
+        conn.rollback(); logger.exception("Photo trash move failed."); return "Nie udało się usunąć zdjęcia.", 500
+    finally: conn.close()
 
 @app.route('/doc/<int:id>/edit', methods=['POST'])
 @login_required
@@ -8445,27 +8746,14 @@ def hard_delete_document(document_id):
     conn = db()
     cur = conn.cursor()
     try:
-        cur.execute(
-            """
-            SELECT movement_type, doc_number
-            FROM issue_docs WHERE id=%s FOR UPDATE
-            """,
-            (document_id,),
-        )
-        document = cur.fetchone()
-        if not document:
-            return redirect("/historia")
-        cur.execute("DELETE FROM issue_doc_history WHERE doc_id=%s", (document_id,))
-        cur.execute("DELETE FROM issue_doc_photos WHERE doc_id=%s", (document_id,))
-        cur.execute("DELETE FROM issue_items WHERE doc_id=%s", (document_id,))
-        cur.execute("DELETE FROM issue_docs WHERE id=%s", (document_id,))
-        conn.commit()
-        cache.clear()
-        return redirect("/historia?deleted=1")
+        move_to_trash(cur, "warehouse_document", document_id)
+        conn.commit(); cache.clear(); return redirect("/historia?deleted=1")
+    except ValueError:
+        conn.rollback(); return redirect("/historia")
     except Exception:
         conn.rollback()
-        logger.exception("Document hard delete failed.")
-        return "Nie udało się usunąć dokumentu.", 500
+        logger.exception("Document trash move failed.")
+        return "Nie udało się przenieść dokumentu do Kosza.", 500
     finally:
         conn.close()
 
@@ -8686,6 +8974,134 @@ def valid_backup_object_name(object_name):
     )
 
 
+@app.route('/admin/tools/test-data')
+@admin_required
+def admin_test_data():
+    conn = db(); cur = conn.cursor(); entity_counts = {}; entity_rows = {}
+    for entity_type, (table, label_column, title) in TRASH_ENTITY_TYPES.items():
+        pk = trash_primary_key(cur, table)
+        cur.execute(sql.SQL("SELECT COUNT(*) FROM {}").format(sql.Identifier(table)))
+        entity_counts[entity_type] = int(cur.fetchone()[0] or 0)
+        cur.execute(sql.SQL("SELECT {},{} FROM {} ORDER BY {} DESC LIMIT 250").format(
+            sql.Identifier(pk), sql.Identifier(label_column), sql.Identifier(table), sql.Identifier(pk)))
+        entity_rows[entity_type] = {"title": title, "rows": cur.fetchall()}
+    group_counts = {key: sum(entity_counts.get(entity, 0) for entity in entities)
+                    for key, (_label, entities) in TEST_DATA_GROUPS.items()}
+    cur.execute("SELECT id,batch_id,entity_type,entity_id,label,record_count,deleted_by,deleted_at FROM trash_items ORDER BY deleted_at DESC,id DESC")
+    trash = cur.fetchall(); conn.close()
+    return render_template("admin_data_tools.html", entity_counts=entity_counts, entity_rows=entity_rows,
+                           test_groups=TEST_DATA_GROUPS, group_counts=group_counts, trash=trash)
+
+
+@app.route('/admin/trash/move', methods=['POST'])
+@admin_required
+def admin_trash_move():
+    selections = request.form.getlist("selected")
+    if not selections: return "Nie zaznaczono żadnych rekordów.", 400
+    conn = db(); cur = conn.cursor(); batch = secrets.token_hex(12)
+    try:
+        for selection in selections:
+            entity_type, separator, entity_id = selection.partition(":")
+            if not separator or not entity_id.isdigit(): raise ValueError("Nieprawidłowe zaznaczenie.")
+            move_to_trash(cur, entity_type, int(entity_id), batch)
+        conn.commit(); cache.clear(); return redirect("/admin/tools/test-data?moved=1")
+    except ValueError as exc:
+        conn.rollback(); return str(exc), 400
+    except Exception:
+        conn.rollback(); logger.exception("Bulk move to trash failed."); return "Nie udało się przenieść danych do Kosza.", 500
+    finally: conn.close()
+
+
+@app.route('/admin/trash/<entity_type>/<int:entity_id>', methods=['POST'])
+@admin_required
+def admin_trash_single(entity_type, entity_id):
+    conn = db(); cur = conn.cursor()
+    try:
+        move_to_trash(cur, entity_type, entity_id); conn.commit(); cache.clear()
+        return redirect(request.form.get("next") or "/admin/tools/test-data")
+    except ValueError as exc:
+        conn.rollback(); return str(exc), 400
+    except Exception:
+        conn.rollback(); logger.exception("Move to trash failed."); return "Nie udało się przenieść rekordu do Kosza.", 500
+    finally: conn.close()
+
+
+@app.route('/admin/tools/test-data/delete', methods=['POST'])
+@admin_required
+def admin_delete_test_data():
+    group = request.form.get("group", "")
+    if group not in TEST_DATA_GROUPS: return "Nieprawidłowa grupa danych.", 400
+    conn = db(); cur = conn.cursor(); batch = secrets.token_hex(12)
+    try:
+        label, entity_types = TEST_DATA_GROUPS[group]; ids = []
+        for entity_type in entity_types:
+            table = TRASH_ENTITY_TYPES[entity_type][0]; pk = trash_primary_key(cur, table)
+            cur.execute(sql.SQL("SELECT {} FROM {} ORDER BY {} DESC").format(sql.Identifier(pk), sql.Identifier(table), sql.Identifier(pk)))
+            ids.extend((entity_type, row[0]) for row in cur.fetchall())
+        expected = int(request.form.get("expected_count") or -1)
+        if expected != len(ids):
+            raise ValueError(f"Liczba rekordów zmieniła się. Aktualnie operacja obejmuje {len(ids)} rekordów. Odśwież stronę i potwierdź ponownie.")
+        for entity_type, entity_id in ids:
+            try: move_to_trash(cur, entity_type, entity_id, batch)
+            except ValueError as exc:
+                if "już usunięty" not in str(exc): raise
+        log_action("test_data.delete", "group", group, {"label": label, "root_count": len(ids), "batch_id": batch}, conn=conn)
+        conn.commit(); cache.clear(); return redirect("/admin/tools/test-data?test_data_deleted=1")
+    except ValueError as exc:
+        conn.rollback(); return str(exc), 409
+    except Exception:
+        conn.rollback(); logger.exception("Test data cleanup failed."); return "Nie udało się usunąć danych testowych.", 500
+    finally: conn.close()
+
+
+@app.route('/admin/trash/restore', methods=['POST'])
+@admin_required
+def admin_trash_restore():
+    selected = [int(value) for value in request.form.getlist("trash_id") if value.isdigit()]
+    if not selected: return "Nie zaznaczono elementów Kosza.", 400
+    conn = db(); cur = conn.cursor()
+    try:
+        for trash_id in sorted(selected, reverse=True): restore_trash_item(cur, trash_id)
+        conn.commit(); cache.clear(); return redirect("/admin/tools/test-data?restored=1")
+    except Exception as exc:
+        conn.rollback(); logger.exception("Trash restore failed."); return f"Nie udało się przywrócić danych: {exc}", 409
+    finally: conn.close()
+
+
+def permanent_confirmation_valid():
+    return (request.form.get("confirm_text") or "").strip() == "USUŃ TRWALE"
+
+
+@app.route('/admin/trash/permanent-delete', methods=['POST'])
+@admin_required
+def admin_trash_permanent_delete():
+    if not permanent_confirmation_valid(): return "Wpisz dokładnie: USUŃ TRWALE", 400
+    selected = [int(value) for value in request.form.getlist("trash_id") if value.isdigit()]
+    if not selected: return "Nie zaznaczono elementów Kosza.", 400
+    conn = db(); cur = conn.cursor()
+    try:
+        for trash_id in selected: permanent_delete_trash_item(cur, trash_id)
+        conn.commit(); return redirect("/admin/tools/test-data?permanently_deleted=1")
+    except Exception:
+        conn.rollback(); logger.exception("Permanent trash deletion failed."); return "Nie udało się trwale usunąć danych.", 500
+    finally: conn.close()
+
+
+@app.route('/admin/trash/empty', methods=['POST'])
+@admin_required
+def admin_trash_empty():
+    if not permanent_confirmation_valid(): return "Wpisz dokładnie: USUŃ TRWALE", 400
+    conn = db(); cur = conn.cursor()
+    try:
+        cur.execute("SELECT id FROM trash_items ORDER BY id FOR UPDATE"); ids = [row[0] for row in cur.fetchall()]
+        for trash_id in ids: permanent_delete_trash_item(cur, trash_id)
+        log_action("trash.empty", "trash", "all", {"count": len(ids)}, conn=conn)
+        conn.commit(); return redirect("/admin/tools/test-data?trash_emptied=1")
+    except Exception:
+        conn.rollback(); logger.exception("Empty trash failed."); return "Nie udało się opróżnić Kosza.", 500
+    finally: conn.close()
+
+
 @app.route('/admin/backups')
 @admin_required
 def backups_page():
@@ -8776,6 +9192,8 @@ def restore_backup():
 
 # 📊 HISTORIA
 PROFORMA_FILTER_KEYS = (
+    "manual_company",
+    "manual_salesperson",
     "manual_paid",
     "manual_transfer",
     "manual_sent",
@@ -8809,12 +9227,16 @@ def proforma_form_values():
     number = (request.form.get("proforma_number") or "").strip()[:100]
     issue_date = parse_optional_date_field("issue_date")
     client = (request.form.get("client") or "").strip()[:200]
+    company = (request.form.get("company") or "").strip()
+    salesperson = (request.form.get("salesperson") or "").strip()[:200]
     if not number:
         raise ValueError("Podaj numer proformy.")
     if not issue_date:
         raise ValueError("Podaj datę wystawienia.")
     if not client:
         raise ValueError("Podaj klienta.")
+    if company not in PROFORMA_COMPANIES:
+        raise ValueError("Wybierz firmę.")
     netto = parse_money_field("netto_amount")
     vat = parse_money_field("vat_amount")
     brutto_raw = (request.form.get("brutto_amount") or "").strip()
@@ -8824,6 +9246,9 @@ def proforma_form_values():
         "proforma_number": number,
         "issue_date": issue_date,
         "client": client,
+        "company": company,
+        "salesperson": salesperson or None,
+        "products": (request.form.get("products") or "").strip()[:4000] or None,
         "netto_amount": netto,
         "vat_amount": vat,
         "brutto_amount": brutto,
@@ -8846,6 +9271,12 @@ def accounting_proforma_filters_from_request():
 def accounting_proformas_data(cur, filters):
     where = []
     params = []
+    if filters.get("manual_company"):
+        where.append("company=%s")
+        params.append(filters["manual_company"])
+    if filters.get("manual_salesperson"):
+        where.append("lower(COALESCE(salesperson,'')) LIKE %s")
+        params.append(f"%{filters['manual_salesperson'].lower()}%")
     if filters.get("manual_paid") == "paid":
         where.append("paid=TRUE")
     elif filters.get("manual_paid") == "unpaid":
@@ -8868,9 +9299,10 @@ def accounting_proformas_data(cur, filters):
     where_sql = (" WHERE " + " AND ".join(where)) if where else ""
     cur.execute(
         f"""
-        SELECT id,proforma_number,issue_date,client,netto_amount,vat_amount,
-               brutto_amount,payment_method,payment_due_date,notes,paid,
-               bank_transfer,sent_to_client,payment_date,paid_amount,sent_date
+        SELECT id,proforma_number,issue_date,company,client,salesperson,
+               netto_amount,vat_amount,brutto_amount,payment_due_date,
+               payment_method,notes,paid,bank_transfer,sent_to_client,
+               payment_date,paid_amount,sent_date,products
         FROM accounting_proformas
         {where_sql}
         ORDER BY issue_date DESC,id DESC
@@ -8880,8 +9312,11 @@ def accounting_proformas_data(cur, filters):
     proformas = cur.fetchall()
     cur.execute(
         f"""
-        SELECT COALESCE(SUM(brutto_amount),0),COALESCE(SUM(paid_amount),0),
-               COUNT(*),COUNT(*) FILTER (WHERE paid),
+        SELECT COUNT(*),COALESCE(SUM(brutto_amount),0),
+               COALESCE(SUM(brutto_amount) FILTER (WHERE paid),0),
+               COALESCE(SUM(brutto_amount) FILTER (WHERE NOT paid),0),
+               COALESCE(SUM(paid_amount),0),
+               COUNT(*) FILTER (WHERE paid),
                COUNT(*) FILTER (WHERE NOT paid),
                COUNT(*) FILTER (WHERE sent_to_client)
         FROM accounting_proformas
@@ -8889,13 +9324,48 @@ def accounting_proformas_data(cur, filters):
         """,
         tuple(params),
     )
-    totals = cur.fetchone() or (0, 0, 0, 0, 0, 0)
+    totals_row = cur.fetchone() or (0, 0, 0, 0, 0, 0, 0, 0)
+    cur.execute(
+        f"""
+        SELECT company,COUNT(*),COALESCE(SUM(brutto_amount),0)
+        FROM accounting_proformas
+        {where_sql}
+        GROUP BY company
+        ORDER BY company
+        """,
+        tuple(params),
+    )
+    by_company = cur.fetchall()
+    cur.execute(
+        f"""
+        SELECT COALESCE(NULLIF(salesperson,''),'Nie podano'),COUNT(*),
+               COALESCE(SUM(brutto_amount),0)
+        FROM accounting_proformas
+        {where_sql}
+        GROUP BY COALESCE(NULLIF(salesperson,''),'Nie podano')
+        ORDER BY 1
+        """,
+        tuple(params),
+    )
+    by_salesperson = cur.fetchall()
+    totals = {
+        "count": totals_row[0] or 0,
+        "total_value": totals_row[1] or 0,
+        "paid_value": totals_row[2] or 0,
+        "unpaid_value": totals_row[3] or 0,
+        "paid_amount": totals_row[4] or 0,
+        "paid_count": totals_row[5] or 0,
+        "unpaid_count": totals_row[6] or 0,
+        "sent_count": totals_row[7] or 0,
+        "by_company": by_company,
+        "by_salesperson": by_salesperson,
+    }
     return proformas, totals
 
 
 @app.route('/ksiegowosc')
 @login_required
-@accounting_required
+@accounting_view_required
 def accounting_dashboard():
     filters = accounting_filters_from_request()
     proforma_filters = accounting_proforma_filters_from_request()
@@ -8913,6 +9383,8 @@ def accounting_dashboard():
     return render_template(
         "accounting.html",
         payment_methods=ACCOUNTING_PAYMENT_METHODS,
+        proforma_companies=PROFORMA_COMPANIES,
+        can_edit_proformas=session.get("role") in {"admin", "accounting"},
         filters=filters,
         proforma_filters=proforma_filters,
         manual_proformas=manual_proformas,
@@ -9260,6 +9732,217 @@ def accounting_report_pdf(data, filters):
     return output.getvalue()
 
 
+def proforma_row_to_dict(row):
+    keys = (
+        "id","proforma_number","issue_date","company","client","salesperson",
+        "netto_amount","vat_amount","brutto_amount","payment_due_date",
+        "payment_method","notes","paid","bank_transfer","sent_to_client",
+        "payment_date","paid_amount","sent_date","products",
+    )
+    return dict(zip(keys, row))
+
+
+def fetch_accounting_proforma(cur, proforma_id):
+    cur.execute(
+        """
+        SELECT id,proforma_number,issue_date,company,client,salesperson,
+               netto_amount,vat_amount,brutto_amount,payment_due_date,
+               payment_method,notes,paid,bank_transfer,sent_to_client,
+               payment_date,paid_amount,sent_date,products
+        FROM accounting_proformas
+        WHERE id=%s
+        """,
+        (proforma_id,),
+    )
+    row = cur.fetchone()
+    return proforma_row_to_dict(row) if row else None
+
+
+def proforma_status_text(value):
+    return "Tak" if value else "Nie"
+
+
+def proformas_report_xlsx(proformas, totals, filters):
+    workbook = Workbook()
+    summary = workbook.active
+    summary.title = "Podsumowanie"
+    summary.sheet_view.showGridLines = False
+    summary["A1"] = "Proformy"
+    summary["A1"].font = Font(size=16, bold=True, color="422D00")
+    summary.merge_cells("A1:C1")
+    summary["A2"] = "Wygenerowano"
+    summary["B2"] = datetime.now()
+    summary["B2"].number_format = "yyyy-mm-dd hh:mm"
+    summary_rows = (
+        ("Liczba proform", totals["count"]),
+        ("Wartość wszystkich proform", totals["total_value"]),
+        ("Wartość zapłaconych", totals["paid_value"]),
+        ("Wartość niezapłaconych", totals["unpaid_value"]),
+        ("Kwota zapłacona", totals["paid_amount"]),
+    )
+    for row_index, (label, value) in enumerate(summary_rows, start=4):
+        summary.cell(row_index, 1, label)
+        summary.cell(row_index, 2, value or 0)
+        if row_index > 4:
+            summary.cell(row_index, 2).number_format = '#,##0.00 "zł"'
+    summary["D2"] = "Aktywne filtry"
+    summary["D2"].font = Font(bold=True)
+    filter_row = 3
+    for key, value in filters.items():
+        if value:
+            summary.cell(filter_row, 4, accounting_excel_text(key))
+            summary.cell(filter_row, 5, accounting_excel_text(value))
+            filter_row += 1
+    company_start = max(filter_row + 1, 10)
+    summary.cell(company_start, 1, "Według firmy").font = Font(bold=True)
+    for offset, row in enumerate(totals["by_company"], start=1):
+        summary.cell(company_start + offset, 1, accounting_excel_text(row[0]))
+        summary.cell(company_start + offset, 2, row[1] or 0)
+        summary.cell(company_start + offset, 3, float(row[2] or 0))
+        summary.cell(company_start + offset, 3).number_format = '#,##0.00 "zł"'
+    salesperson_start = company_start + len(totals["by_company"]) + 3
+    summary.cell(salesperson_start, 1, "Według handlowca").font = Font(bold=True)
+    for offset, row in enumerate(totals["by_salesperson"], start=1):
+        summary.cell(salesperson_start + offset, 1, accounting_excel_text(row[0]))
+        summary.cell(salesperson_start + offset, 2, row[1] or 0)
+        summary.cell(salesperson_start + offset, 3, float(row[2] or 0))
+        summary.cell(salesperson_start + offset, 3).number_format = '#,##0.00 "zł"'
+    for column, width in {"A": 34, "B": 22, "C": 22, "D": 24, "E": 28}.items():
+        summary.column_dimensions[column].width = width
+
+    sheet = workbook.create_sheet("Proformy")
+    headers = (
+        "Numer proformy","Data wystawienia","Firma","Klient","Handlowiec",
+        "Produkty","Kwota netto","VAT","Kwota brutto","Termin płatności",
+        "Sposób płatności","Zapłacona","Przelew","Wysłano","Data zapłaty",
+        "Kwota zapłacona","Data wysłania","Uwagi",
+    )
+    sheet.append(headers)
+    for row in proformas:
+        proforma = proforma_row_to_dict(row)
+        sheet.append([
+            accounting_excel_text(proforma["proforma_number"]),
+            proforma["issue_date"],
+            accounting_excel_text(proforma["company"]),
+            accounting_excel_text(proforma["client"]),
+            accounting_excel_text(proforma["salesperson"]),
+            accounting_excel_text(proforma["products"]),
+            float(proforma["netto_amount"] or 0),
+            float(proforma["vat_amount"] or 0),
+            float(proforma["brutto_amount"] or 0),
+            proforma["payment_due_date"],
+            accounting_excel_text(proforma["payment_method"]),
+            proforma_status_text(proforma["paid"]),
+            proforma_status_text(proforma["bank_transfer"]),
+            proforma_status_text(proforma["sent_to_client"]),
+            proforma["payment_date"],
+            float(proforma["paid_amount"] or 0),
+            proforma["sent_date"],
+            accounting_excel_text(proforma["notes"]),
+        ])
+    header_fill = PatternFill("solid", fgColor="FFC067")
+    for cell in sheet[1]:
+        cell.fill = header_fill
+        cell.font = Font(bold=True, color="422D00")
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+    sheet.freeze_panes = "A2"
+    sheet.auto_filter.ref = sheet.dimensions
+    widths = (22,15,16,28,22,34,14,12,14,15,18,12,10,11,14,14,14,34)
+    for index, width in enumerate(widths, start=1):
+        sheet.column_dimensions[get_column_letter(index)].width = width
+    for row in sheet.iter_rows(min_row=2):
+        for index in (1, 9, 14, 16):
+            if row[index].value:
+                row[index].number_format = "yyyy-mm-dd"
+        for index in (6, 7, 8, 15):
+            row[index].number_format = '#,##0.00 "zł"'
+    output = io.BytesIO()
+    workbook.save(output)
+    return output.getvalue()
+
+
+def proforma_pdf_bytes(proforma):
+    styles, body_font, bold_font = pdf_styles()
+    output = io.BytesIO()
+    document = SimpleDocTemplate(
+        output,pagesize=A4,leftMargin=14*mm,rightMargin=14*mm,
+        topMargin=12*mm,bottomMargin=12*mm,
+        title=f"Proforma {proforma['proforma_number']}",
+        author="Primadera",
+    )
+    title_style = ParagraphStyle(
+        "ProformaTitle",parent=styles["Title"],fontName=bold_font,fontSize=17,
+        leading=21,textColor=colors.HexColor("#422D00"),alignment=TA_CENTER,
+    )
+    normal = ParagraphStyle(
+        "ProformaNormal",parent=styles["Normal"],fontName=body_font,fontSize=9,
+        leading=12,
+    )
+    header = ParagraphStyle(
+        "ProformaHeader",parent=normal,fontName=bold_font,
+        textColor=colors.HexColor("#422D00"),
+    )
+    story = []
+    logo = primadera_pdf_logo(58 * mm, "CENTER")
+    if logo:
+        story.extend([logo, Spacer(1, 4*mm)])
+    story.extend([
+        Paragraph(f"Proforma {escape(str(proforma['proforma_number'] or ''))}", title_style),
+        Spacer(1, 5*mm),
+    ])
+    details = [
+        ("Firma", proforma["company"]),
+        ("Handlowiec", proforma["salesperson"]),
+        ("Klient", proforma["client"]),
+        ("Data wystawienia", proforma["issue_date"]),
+        ("Termin płatności", proforma["payment_due_date"]),
+        ("Sposób płatności", proforma["payment_method"]),
+        ("Zapłacona", proforma_status_text(proforma["paid"])),
+        ("Przelew", proforma_status_text(proforma["bank_transfer"])),
+        ("Wysłano do klienta", proforma_status_text(proforma["sent_to_client"])),
+    ]
+    table_data = [
+        [Paragraph(escape(label), header), Paragraph(escape(str(value or "—")), normal)]
+        for label, value in details
+    ]
+    table = Table(table_data, colWidths=[45*mm, 120*mm])
+    table.setStyle(TableStyle([
+        ("GRID",(0,0),(-1,-1),0.25,colors.HexColor("#D1D5DB")),
+        ("BACKGROUND",(0,0),(0,-1),colors.HexColor("#FFF3D8")),
+        ("VALIGN",(0,0),(-1,-1),"TOP"),
+        ("TOPPADDING",(0,0),(-1,-1),5),
+        ("BOTTOMPADDING",(0,0),(-1,-1),5),
+    ]))
+    story.extend([table, Spacer(1, 6*mm)])
+    products = escape(str(proforma["products"] or "—")).replace("\n", "<br/>")
+    story.extend([
+        Paragraph("Produkty", header),
+        Paragraph(products, normal),
+        Spacer(1, 6*mm),
+    ])
+    amount_data = [
+        [Paragraph("Netto", header), Paragraph("VAT", header), Paragraph("Brutto", header)],
+        [
+            Paragraph(f"{float(proforma['netto_amount'] or 0):.2f} zł", normal),
+            Paragraph(f"{float(proforma['vat_amount'] or 0):.2f} zł", normal),
+            Paragraph(f"{float(proforma['brutto_amount'] or 0):.2f} zł", normal),
+        ],
+    ]
+    amount_table = Table(amount_data, colWidths=[55*mm, 55*mm, 55*mm])
+    amount_table.setStyle(TableStyle([
+        ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#FFC067")),
+        ("GRID",(0,0),(-1,-1),0.3,colors.HexColor("#D1D5DB")),
+        ("ALIGN",(0,0),(-1,-1),"RIGHT"),
+        ("TOPPADDING",(0,0),(-1,-1),6),
+        ("BOTTOMPADDING",(0,0),(-1,-1),6),
+    ]))
+    story.extend([amount_table, Spacer(1, 6*mm)])
+    notes = escape(str(proforma["notes"] or "—")).replace("\n", "<br/>")
+    story.extend([Paragraph("Uwagi", header), Paragraph(notes, normal)])
+    document.build(story)
+    return output.getvalue()
+
+
 @app.route('/ksiegowosc/proformy/add', methods=['POST'])
 @login_required
 @accounting_required
@@ -9271,16 +9954,18 @@ def add_accounting_proforma():
         cur.execute(
             """
             INSERT INTO accounting_proformas(
-                proforma_number,issue_date,client,netto_amount,vat_amount,
-                brutto_amount,payment_method,payment_due_date,notes,paid,
-                bank_transfer,sent_to_client,payment_date,paid_amount,sent_date,
+                proforma_number,issue_date,client,company,salesperson,products,
+                netto_amount,vat_amount,brutto_amount,payment_method,
+                payment_due_date,notes,paid,bank_transfer,sent_to_client,
+                payment_date,paid_amount,sent_date,
                 created_by,updated_by
             ) VALUES (
-                %(proforma_number)s,%(issue_date)s,%(client)s,%(netto_amount)s,
-                %(vat_amount)s,%(brutto_amount)s,%(payment_method)s,
-                %(payment_due_date)s,%(notes)s,%(paid)s,%(bank_transfer)s,
-                %(sent_to_client)s,%(payment_date)s,%(paid_amount)s,
-                %(sent_date)s,%(actor)s,%(actor)s
+                %(proforma_number)s,%(issue_date)s,%(client)s,%(company)s,
+                %(salesperson)s,%(products)s,%(netto_amount)s,%(vat_amount)s,
+                %(brutto_amount)s,%(payment_method)s,%(payment_due_date)s,
+                %(notes)s,%(paid)s,%(bank_transfer)s,%(sent_to_client)s,
+                %(payment_date)s,%(paid_amount)s,%(sent_date)s,
+                %(actor)s,%(actor)s
             )
             """,
             {**values, "actor": session.get("user")},
@@ -9299,6 +9984,27 @@ def add_accounting_proforma():
         conn.close()
 
 
+@app.route('/ksiegowosc/proformy/<int:proforma_id>')
+@login_required
+@accounting_view_required
+def accounting_proforma_detail(proforma_id):
+    conn = db()
+    cur = conn.cursor()
+    try:
+        proforma = fetch_accounting_proforma(cur, proforma_id)
+        if not proforma:
+            return "Nie znaleziono proformy.", 404
+        return render_template(
+            "accounting_proforma.html",
+            proforma=proforma,
+            payment_methods=ACCOUNTING_PAYMENT_METHODS,
+            proforma_companies=PROFORMA_COMPANIES,
+            can_edit_proformas=session.get("role") in {"admin", "accounting"},
+        )
+    finally:
+        conn.close()
+
+
 @app.route('/ksiegowosc/proformy/<int:proforma_id>/edit', methods=['POST'])
 @login_required
 @accounting_required
@@ -9313,6 +10019,9 @@ def edit_accounting_proforma(proforma_id):
                 proforma_number=%(proforma_number)s,
                 issue_date=%(issue_date)s,
                 client=%(client)s,
+                company=%(company)s,
+                salesperson=%(salesperson)s,
+                products=%(products)s,
                 netto_amount=%(netto_amount)s,
                 vat_amount=%(vat_amount)s,
                 brutto_amount=%(brutto_amount)s,
@@ -9368,9 +10077,50 @@ def delete_accounting_proforma(proforma_id):
         conn.close()
 
 
+@app.route('/ksiegowosc/proformy/export.xlsx')
+@login_required
+@accounting_view_required
+def accounting_proformas_export():
+    filters = accounting_proforma_filters_from_request()
+    conn = db()
+    cur = conn.cursor()
+    try:
+        proformas, totals = accounting_proformas_data(cur, filters)
+        content = proformas_report_xlsx(proformas, totals, filters)
+    finally:
+        conn.close()
+    filename = f"proformy-{datetime.now().strftime('%Y%m%d-%H%M')}.xlsx"
+    return Response(
+        content,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.route('/ksiegowosc/proformy/<int:proforma_id>/pdf')
+@login_required
+@accounting_view_required
+def accounting_proforma_pdf(proforma_id):
+    conn = db()
+    cur = conn.cursor()
+    try:
+        proforma = fetch_accounting_proforma(cur, proforma_id)
+        if not proforma:
+            return "Nie znaleziono proformy.", 404
+        content = proforma_pdf_bytes(proforma)
+    finally:
+        conn.close()
+    filename = secure_filename(str(proforma["proforma_number"] or "proforma")) or "proforma"
+    return Response(
+        content,
+        mimetype="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}.pdf"'},
+    )
+
+
 @app.route('/ksiegowosc/export.<fmt>')
 @login_required
-@accounting_required
+@accounting_view_required
 def accounting_export(fmt):
     if fmt not in {"xlsx","pdf"}:
         return "Nieprawidłowy format eksportu.", 400
@@ -9398,7 +10148,7 @@ def accounting_export(fmt):
 
 @app.route('/ksiegowosc/orders/<int:order_id>')
 @login_required
-@accounting_required
+@accounting_view_required
 def accounting_order_detail(order_id):
     conn = db()
     cur = conn.cursor()
@@ -11561,6 +12311,547 @@ def delete_shop_sales_document(doc_id):
         return "Nie udało się usunąć dokumentu sprzedaży.", 500
     finally:
         conn.close()
+
+
+CALCULATOR_DIRECTIONS = {
+    "mb_m2": ("MB → m²", "m²"), "m2_mb": ("m² → MB", "MB"),
+    "mb_m3": ("MB → m³", "m³"), "m3_mb": ("m³ → MB", "MB"),
+    "m2_m3": ("m² → m³", "m³"), "m3_m2": ("m³ → m²", "m²"),
+    "pcs_mb": ("sztuki → MB", "MB"), "mb_pcs": ("MB → sztuki", "szt."),
+    "pcs_m2": ("sztuki → m²", "m²"), "m2_pcs": ("m² → sztuki", "szt."),
+    "pcs_m3": ("sztuki → m³", "m³"), "m3_pcs": ("m³ → sztuki", "szt."),
+}
+CALCULATOR_REVERSE = {
+    "mb_m2":"m2_mb", "m2_mb":"mb_m2", "mb_m3":"m3_mb", "m3_mb":"mb_m3",
+    "m2_m3":"m3_m2", "m3_m2":"m2_m3", "pcs_mb":"mb_pcs", "mb_pcs":"pcs_mb",
+    "pcs_m2":"m2_pcs", "m2_pcs":"pcs_m2", "pcs_m3":"m3_pcs", "m3_pcs":"pcs_m3",
+}
+
+
+def calculator_positive(data, key, label):
+    raw = data.get(key)
+    if raw in (None, ""):
+        raise ValueError(f"Podaj {label.lower()}")
+    try:
+        value = Decimal(str(raw).replace(",", "."))
+    except (InvalidOperation, ValueError):
+        raise ValueError(f"{label} ma nieprawidłową wartość")
+    if not value.is_finite() or value <= 0:
+        raise ValueError(f"{label} musi być większa od zera" if label.endswith("ść") else f"{label} musi być większy od zera")
+    return value
+
+
+def parse_calculator_dimensions(text, order="width_thickness_length"):
+    text = (text or "").strip()
+    if not text:
+        return {}
+    cleaned = re.sub(r"(?i)\s*mm\s*$", "", text).strip()
+    parts = [part.strip() for part in re.split(r"[xX×/]", cleaned)]
+    if len(parts) != 3:
+        raise ValueError("Wymiary wpisz jako trzy wartości, np. 140 × 22 × 3000 mm")
+    try:
+        values = [Decimal(part.replace(",", ".")) for part in parts]
+    except InvalidOperation:
+        raise ValueError("Wymiary zawierają nieprawidłową liczbę")
+    if any(not value.is_finite() or value <= 0 for value in values):
+        raise ValueError("Każdy wymiar musi być większy od zera")
+    first, second, length = values
+    width, thickness = (second, first) if order == "thickness_width_length" else (first, second)
+    return {"width_mm": width, "thickness_mm": thickness, "length_value": length, "length_unit": "mm"}
+
+
+def calculate_conversion(payload):
+    direction = str(payload.get("direction") or "")
+    if direction not in CALCULATOR_DIRECTIONS:
+        raise ValueError("Wybierz prawidłowy kierunek przeliczenia")
+    data = dict(payload)
+    parsed = parse_calculator_dimensions(data.get("dimensions"), data.get("dimension_order", "width_thickness_length"))
+    for key, value in parsed.items():
+        data[key] = str(value)
+    width = thickness = length = None
+    needs_width = direction in {"mb_m2","m2_mb","mb_m3","m3_mb","pcs_m2","m2_pcs","pcs_m3","m3_pcs"}
+    needs_thickness = direction in {"mb_m3","m3_mb","m2_m3","m3_m2","pcs_m3","m3_pcs"}
+    needs_length = direction in {"pcs_mb","mb_pcs","pcs_m2","m2_pcs","pcs_m3","m3_pcs"}
+    if needs_width: width = calculator_positive(data, "width_mm", "Szerokość") / Decimal("1000")
+    if needs_thickness: thickness = calculator_positive(data, "thickness_mm", "Grubość") / Decimal("1000")
+    if needs_length:
+        length = calculator_positive(data, "length_value", "Długość")
+        length_unit = data.get("length_unit", "mm")
+        if length_unit not in {"mm", "m"}: raise ValueError("Wybierz jednostkę długości: mm albo m")
+        if length_unit == "mm": length /= Decimal("1000")
+    value_labels = {
+        "mb": ("linear_meters", "Liczba metrów bieżących"), "m2": ("square_meters", "Liczba metrów kwadratowych"),
+        "m3": ("cubic_meters", "Liczba metrów sześciennych"), "pcs": ("pieces", "Liczba sztuk"),
+    }
+    source = direction.split("_", 1)[0]
+    amount = calculator_positive(data, *value_labels[source])
+    formulas = {
+        "mb_m2": (lambda: amount*width, "m² = MB × szerokość [m]", f"{amount} × {width}"),
+        "m2_mb": (lambda: amount/width, "MB = m² ÷ szerokość [m]", f"{amount} ÷ {width}"),
+        "mb_m3": (lambda: amount*width*thickness, "m³ = MB × szerokość [m] × grubość [m]", f"{amount} × {width} × {thickness}"),
+        "m3_mb": (lambda: amount/(width*thickness), "MB = m³ ÷ (szerokość [m] × grubość [m])", f"{amount} ÷ ({width} × {thickness})"),
+        "m2_m3": (lambda: amount*thickness, "m³ = m² × grubość [m]", f"{amount} × {thickness}"),
+        "m3_m2": (lambda: amount/thickness, "m² = m³ ÷ grubość [m]", f"{amount} ÷ {thickness}"),
+        "pcs_mb": (lambda: amount*length, "MB = sztuki × długość [m]", f"{amount} × {length}"),
+        "mb_pcs": (lambda: amount/length, "sztuki = MB ÷ długość [m]", f"{amount} ÷ {length}"),
+        "pcs_m2": (lambda: amount*length*width, "m² = sztuki × długość [m] × szerokość [m]", f"{amount} × {length} × {width}"),
+        "m2_pcs": (lambda: amount/(length*width), "sztuki = m² ÷ (długość [m] × szerokość [m])", f"{amount} ÷ ({length} × {width})"),
+        "pcs_m3": (lambda: amount*length*width*thickness, "m³ = sztuki × długość [m] × szerokość [m] × grubość [m]", f"{amount} × {length} × {width} × {thickness}"),
+        "m3_pcs": (lambda: amount/(length*width*thickness), "sztuki = m³ ÷ (długość [m] × szerokość [m] × grubość [m])", f"{amount} ÷ ({length} × {width} × {thickness})"),
+    }
+    operation, formula, substitution = formulas[direction]
+    result = operation()
+    output_unit = CALCULATOR_DIRECTIONS[direction][1]
+    precision = str(data.get("precision") or "auto")
+    if precision == "auto": places = 3 if output_unit == "m³" else 2
+    elif precision == "none": places = None
+    elif precision in {"2","3","4"}: places = int(precision)
+    else: raise ValueError("Wybierz prawidłową dokładność wyniku")
+    rounded = result if places is None else result.quantize(Decimal("1").scaleb(-places), rounding=ROUND_HALF_UP)
+    exact_text = format(result.normalize(), "f")
+    rounded_text = exact_text if places is None else f"{rounded:.{places}f}"
+    response = {
+        "direction": direction, "direction_label": CALCULATOR_DIRECTIONS[direction][0], "output_unit": output_unit,
+        "result_exact": exact_text, "result_rounded": rounded_text, "formula": formula,
+        "substitution": substitution, "precision": precision, "inputs": data,
+    }
+    if output_unit == "szt.":
+        response["pieces_floor"] = math.floor(result); response["pieces_ceil"] = math.ceil(result)
+    return response
+
+
+@app.route('/przelicznik')
+@login_required
+def calculator_page():
+    conn=db(); cur=conn.cursor()
+    cur.execute("SELECT id,direction,inputs,result,output_unit,precision,formula,substitution,created_at FROM calculator_history WHERE lower(user_email)=lower(%s) ORDER BY created_at DESC,id DESC LIMIT 30",(session.get("user", ""),))
+    history=cur.fetchall(); conn.close()
+    return render_template("calculator.html",directions=CALCULATOR_DIRECTIONS,reverse_directions=CALCULATOR_REVERSE,history=history)
+
+
+@app.route('/przelicznik/oblicz', methods=['POST'])
+@login_required
+def calculator_calculate():
+    payload=request.get_json(silent=True) or {}
+    try: result=calculate_conversion(payload)
+    except ValueError as exc: return jsonify({"ok":False,"message":str(exc)}),400
+    if not payload.get("save_history"):
+        result["ok"] = True
+        return jsonify(result)
+    conn=db(); cur=conn.cursor()
+    try:
+        cur.execute("""INSERT INTO calculator_history(user_email,direction,inputs,result,output_unit,precision,formula,substitution)
+                     VALUES (%s,%s,%s::jsonb,%s,%s,%s,%s,%s) RETURNING id,created_at""",
+                    (session.get("user"),result["direction"],json.dumps(result["inputs"],ensure_ascii=False),Decimal(result["result_exact"]),result["output_unit"],result["precision"],result["formula"],result["substitution"]))
+        row=cur.fetchone(); conn.commit(); result.update(ok=True,history_id=row[0],created_at=str(row[1])); return jsonify(result)
+    except Exception:
+        conn.rollback(); logger.exception("Calculator history save failed."); return jsonify({"ok":False,"message":"Nie udało się zapisać obliczenia."}),500
+    finally: conn.close()
+
+
+@app.route('/przelicznik/historia/<int:history_id>/usun', methods=['POST'])
+@login_required
+def calculator_history_delete(history_id):
+    conn=db(); cur=conn.cursor(); cur.execute("DELETE FROM calculator_history WHERE id=%s AND lower(user_email)=lower(%s)",(history_id,session.get("user", ""))); conn.commit(); conn.close(); return redirect("/przelicznik")
+
+
+@app.route('/przelicznik/historia/wyczysc', methods=['POST'])
+@login_required
+def calculator_history_clear():
+    conn=db(); cur=conn.cursor(); cur.execute("DELETE FROM calculator_history WHERE lower(user_email)=lower(%s)",(session.get("user", ""),)); conn.commit(); conn.close(); return redirect("/przelicznik")
+
+
+@app.route('/przelicznik/historia/wyczysc-wszystkich', methods=['POST'])
+@admin_required
+def calculator_history_clear_all():
+    conn=db(); cur=conn.cursor(); cur.execute("DELETE FROM calculator_history"); count=cur.rowcount; log_action("calculator.history.clear_all","calculator_history","all",{"count":count},conn=conn); conn.commit(); conn.close(); return redirect("/przelicznik")
+
+
+QUOTE_STATUSES = (
+    "robocza", "wysłana", "zaakceptowana", "odrzucona", "wygasła",
+    "zamieniona na zamówienie",
+)
+QUOTE_UNITS = ("szt.", "m²", "m³", "MB", "l", "op.")
+QUOTE_ITEM_TYPES = ("towar", "własna pozycja", "transport", "usługa")
+MONEY_STEP = Decimal("0.01")
+
+
+def quote_money(value):
+    return Decimal(str(value or 0)).quantize(MONEY_STEP, rounding=ROUND_HALF_UP)
+
+
+def quote_decimal(value, field, minimum=Decimal("0")):
+    try:
+        number = Decimal(str(value or "0").replace(",", "."))
+    except (InvalidOperation, ValueError):
+        raise ValueError(f"Pole {field} zawiera nieprawidłową liczbę.")
+    if not number.is_finite() or number < minimum:
+        raise ValueError(f"Pole {field} ma nieprawidłową wartość.")
+    return number
+
+
+def calculate_quote_item(qty, unit_net, discount_percent, discount_amount, vat_rate):
+    qty = quote_decimal(qty, "ilość", Decimal("0.001"))
+    unit_net = quote_decimal(unit_net, "cena netto")
+    discount_percent = quote_decimal(discount_percent, "rabat procentowy")
+    discount_amount = quote_decimal(discount_amount, "rabat kwotowy")
+    vat_rate = quote_decimal(vat_rate, "VAT")
+    if discount_percent > 100 or vat_rate > 100:
+        raise ValueError("Rabat procentowy i VAT nie mogą przekraczać 100%.")
+    base = quote_money(qty * unit_net)
+    percentage_discount = quote_money(base * discount_percent / Decimal("100"))
+    discount = quote_money(percentage_discount + discount_amount)
+    if discount > base:
+        raise ValueError("Rabat nie może przekraczać wartości pozycji.")
+    net = quote_money(base - discount)
+    vat = quote_money(net * vat_rate / Decimal("100"))
+    return {
+        "qty": qty, "unit_net": quote_money(unit_net),
+        "discount_percent": discount_percent, "discount_amount": discount_amount,
+        "vat_rate": vat_rate, "net_value": net, "vat_value": vat,
+        "gross_value": quote_money(net + vat),
+    }
+
+
+def quote_user_can_view_all(cur=None):
+    if current_user_role() == "admin":
+        return True
+    if current_user_role() != "sales":
+        return False
+    own_connection = cur is None
+    conn = db() if own_connection else None
+    cursor = conn.cursor() if own_connection else cur
+    cursor.execute(
+        "SELECT can_view_all FROM commercial_quote_permissions WHERE lower(user_email)=lower(%s)",
+        (session.get("user", ""),),
+    )
+    allowed = bool((cursor.fetchone() or (False,))[0])
+    if own_connection:
+        conn.close()
+    return allowed
+
+
+def quote_access_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if "user" not in session:
+            return redirect("/login")
+        if current_user_role() not in {"admin", "sales"}:
+            return "Brak uprawnień do ofert handlowych.", 403
+        return f(*args, **kwargs)
+    return decorated
+
+
+def quote_visibility_sql(alias="q", cur=None):
+    if quote_user_can_view_all(cur):
+        return "", []
+    return f"lower({alias}.seller_email)=lower(%s)", [session.get("user", "")]
+
+
+def parse_quote_form():
+    customer_name = (request.form.get("customer_name") or "").strip()
+    if not customer_name:
+        raise ValueError("Nazwa nabywcy jest wymagana.")
+    try:
+        issue_date = datetime.strptime(request.form.get("issue_date", ""), "%Y-%m-%d").date()
+        valid_text = request.form.get("valid_until", "").strip()
+        valid_until = datetime.strptime(valid_text, "%Y-%m-%d").date() if valid_text else None
+    except ValueError:
+        raise ValueError("Podaj prawidłowe daty oferty.")
+    if valid_until and valid_until < issue_date:
+        raise ValueError("Termin ważności nie może być wcześniejszy niż data wystawienia.")
+    descriptions = request.form.getlist("description[]")
+    product_ids = request.form.getlist("product_id[]")
+    item_types = request.form.getlist("item_type[]")
+    quantities = request.form.getlist("qty[]")
+    units = request.form.getlist("unit[]")
+    net_prices = request.form.getlist("unit_net[]")
+    gross_prices = request.form.getlist("unit_gross[]")
+    price_modes = request.form.getlist("price_mode[]")
+    discounts = request.form.getlist("discount_percent[]")
+    discount_amounts = request.form.getlist("discount_amount[]")
+    vats = request.form.getlist("vat_rate[]")
+    if not descriptions:
+        raise ValueError("Oferta musi zawierać co najmniej jedną pozycję.")
+    items = []
+    for index, description in enumerate(descriptions):
+        description = description.strip()
+        if not description:
+            raise ValueError(f"Pozycja {index + 1}: nazwa jest wymagana.")
+        unit = units[index] if index < len(units) else "szt."
+        item_type = item_types[index] if index < len(item_types) else "towar"
+        vat = quote_decimal(vats[index] if index < len(vats) else "23", "VAT")
+        mode = price_modes[index] if index < len(price_modes) else "net"
+        if mode == "gross":
+            gross = quote_decimal(gross_prices[index] if index < len(gross_prices) else 0, "cena brutto")
+            unit_net = gross / (Decimal("1") + vat / Decimal("100"))
+        else:
+            unit_net = net_prices[index] if index < len(net_prices) else 0
+        calculated = calculate_quote_item(
+            quantities[index] if index < len(quantities) else 0,
+            unit_net,
+            discounts[index] if index < len(discounts) else 0,
+            discount_amounts[index] if index < len(discount_amounts) else 0,
+            vat,
+        )
+        if unit not in QUOTE_UNITS or item_type not in QUOTE_ITEM_TYPES:
+            raise ValueError(f"Pozycja {index + 1}: nieprawidłowy typ lub jednostka.")
+        product_text = product_ids[index] if index < len(product_ids) else ""
+        items.append({
+            **calculated, "position": index + 1, "description": description[:1000],
+            "unit": unit, "item_type": item_type,
+            "product_id": int(product_text) if product_text.isdigit() else None,
+        })
+    return {
+        "issue_date": issue_date, "valid_until": valid_until,
+        "delivery_term": (request.form.get("delivery_term") or "").strip()[:300] or None,
+        "customer_name": customer_name[:300],
+        "customer_address": (request.form.get("customer_address") or "").strip()[:1000] or None,
+        "customer_nip": (request.form.get("customer_nip") or "").strip()[:30] or None,
+        "customer_phone": (request.form.get("customer_phone") or "").strip()[:50] or None,
+        "customer_email": (request.form.get("customer_email") or "").strip()[:254] or None,
+        "contractor_id": int(request.form["contractor_id"]) if request.form.get("contractor_id", "").isdigit() else None,
+        "payment_terms": (request.form.get("payment_terms") or "").strip()[:2000] or None,
+        "notes": (request.form.get("notes") or "").strip()[:5000] or None,
+        "items": items,
+        "net_total": quote_money(sum((i["net_value"] for i in items), Decimal("0"))),
+        "vat_total": quote_money(sum((i["vat_value"] for i in items), Decimal("0"))),
+        "gross_total": quote_money(sum((i["gross_value"] for i in items), Decimal("0"))),
+    }
+
+
+def next_quote_number(cur, issue_date):
+    year, month = issue_date.year, issue_date.month
+    cur.execute("SELECT pg_advisory_xact_lock(%s)", (year * 100 + month,))
+    prefix = f"OF/{year:04d}/{month:02d}/"
+    cur.execute(
+        "SELECT quote_number FROM commercial_quotes WHERE quote_number LIKE %s ORDER BY quote_number DESC LIMIT 1",
+        (prefix + "%",),
+    )
+    row = cur.fetchone()
+    sequence = int(row[0].rsplit("/", 1)[-1]) + 1 if row else 1
+    return f"{prefix}{sequence:03d}"
+
+
+def quote_form_options(cur):
+    cur.execute("SELECT id,name,nip,email,phone,address FROM contractors WHERE active=TRUE ORDER BY lower(name)")
+    contractors = cur.fetchall()
+    cur.execute("SELECT id,name,unit,price_netto,vat,warehouse FROM products ORDER BY lower(name),warehouse")
+    products = cur.fetchall()
+    return contractors, products
+
+
+def load_quote(cur, quote_id, for_update=False):
+    visibility, params = quote_visibility_sql("q", cur)
+    where = "q.id=%s" + (f" AND {visibility}" if visibility else "")
+    cur.execute(
+        f"SELECT q.* FROM commercial_quotes q WHERE {where}" + (" FOR UPDATE" if for_update else ""),
+        tuple([quote_id] + params),
+    )
+    quote = cur.fetchone()
+    if not quote:
+        return None, []
+    cur.execute("SELECT * FROM commercial_quote_items WHERE quote_id=%s ORDER BY position,id", (quote_id,))
+    return quote, cur.fetchall()
+
+
+def save_quote(cur, data, quote_id=None):
+    cur.execute(
+        "SELECT trim(concat_ws(' ',first_name,last_name)),phone FROM users WHERE lower(email)=lower(%s)",
+        (session.get("user", ""),),
+    )
+    seller = cur.fetchone() or (session.get("user", ""), None)
+    if quote_id is None:
+        number = next_quote_number(cur, data["issue_date"])
+        cur.execute("""
+            INSERT INTO commercial_quotes(
+                quote_number,issue_date,valid_until,delivery_term,customer_name,
+                customer_address,customer_nip,customer_phone,customer_email,contractor_id,
+                payment_terms,notes,seller_email,seller_name,seller_position,seller_phone,
+                net_total,vat_total,gross_total,created_by
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            RETURNING id
+        """, (
+            number,data["issue_date"],data["valid_until"],data["delivery_term"],data["customer_name"],
+            data["customer_address"],data["customer_nip"],data["customer_phone"],data["customer_email"],data["contractor_id"],
+            data["payment_terms"],data["notes"],session.get("user"),seller[0] or session.get("user"),
+            "Handlowiec",seller[1],data["net_total"],data["vat_total"],data["gross_total"],session.get("user"),
+        ))
+        quote_id = cur.fetchone()[0]
+    else:
+        cur.execute("""
+            UPDATE commercial_quotes SET issue_date=%s,valid_until=%s,delivery_term=%s,
+                customer_name=%s,customer_address=%s,customer_nip=%s,customer_phone=%s,
+                customer_email=%s,contractor_id=%s,payment_terms=%s,notes=%s,
+                net_total=%s,vat_total=%s,gross_total=%s,updated_at=NOW() WHERE id=%s
+        """, (data["issue_date"],data["valid_until"],data["delivery_term"],data["customer_name"],
+              data["customer_address"],data["customer_nip"],data["customer_phone"],data["customer_email"],
+              data["contractor_id"],data["payment_terms"],data["notes"],data["net_total"],data["vat_total"],data["gross_total"],quote_id))
+        cur.execute("DELETE FROM commercial_quote_items WHERE quote_id=%s", (quote_id,))
+    for item in data["items"]:
+        cur.execute("""
+            INSERT INTO commercial_quote_items(
+                quote_id,position,product_id,item_type,description,qty,unit,unit_net,
+                discount_percent,discount_amount,vat_rate,net_value,vat_value,gross_value
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        """, (quote_id,item["position"],item["product_id"],item["item_type"],item["description"],item["qty"],item["unit"],
+              item["unit_net"],item["discount_percent"],item["discount_amount"],item["vat_rate"],item["net_value"],item["vat_value"],item["gross_value"]))
+    return quote_id
+
+
+@app.route('/oferty')
+@quote_access_required
+def quotes_page():
+    conn = db(); cur = conn.cursor()
+    visibility, params = quote_visibility_sql("q", cur)
+    clauses = [visibility] if visibility else []
+    filters = {key: (request.args.get(key) or "").strip() for key in ("number","customer","seller","status","date")}
+    for key, sql in (("number","lower(q.quote_number) LIKE %s"),("customer","lower(q.customer_name) LIKE %s"),("seller","lower(q.seller_name) LIKE %s")):
+        if filters[key]: clauses.append(sql); params.append(f"%{filters[key].lower()}%")
+    if filters["status"] in QUOTE_STATUSES: clauses.append("q.status=%s"); params.append(filters["status"])
+    if filters["date"]: clauses.append("q.issue_date=%s"); params.append(filters["date"])
+    cur.execute(f"""SELECT q.id,q.quote_number,q.issue_date,q.valid_until,q.customer_name,q.seller_name,
+                    q.status,q.net_total,q.vat_total,q.gross_total
+                    FROM commercial_quotes q {'WHERE ' + ' AND '.join(clauses) if clauses else ''}
+                    ORDER BY q.issue_date DESC,q.id DESC""", tuple(params))
+    quotes = cur.fetchall()
+    cur.execute("SELECT email,trim(concat_ws(' ',first_name,last_name)) FROM users WHERE role='sales' AND status='active' ORDER BY lower(last_name),lower(first_name)")
+    salespeople = cur.fetchall() if current_user_role() == "admin" else []
+    permissions = {}
+    if current_user_role() == "admin":
+        cur.execute("SELECT lower(user_email),can_view_all FROM commercial_quote_permissions")
+        permissions = dict(cur.fetchall())
+    conn.close()
+    return render_template("quotes.html", quotes=quotes, filters=filters, statuses=QUOTE_STATUSES, salespeople=salespeople, permissions=permissions)
+
+
+@app.route('/oferty/nowa', methods=['GET','POST'])
+@quote_access_required
+def quote_new():
+    conn=db(); cur=conn.cursor()
+    if request.method == 'POST':
+        try:
+            quote_id=save_quote(cur,parse_quote_form()); conn.commit(); cache.clear()
+            return redirect(f"/oferty/{quote_id}")
+        except ValueError as exc:
+            conn.rollback(); error=str(exc)
+        except Exception:
+            conn.rollback(); logger.exception("Quote creation failed."); error="Nie udało się zapisać oferty."
+    else: error=None
+    contractors,products=quote_form_options(cur); conn.close()
+    return render_template("quote_form.html",quote=None,items=[],contractors=contractors,products=products,units=QUOTE_UNITS,item_types=QUOTE_ITEM_TYPES,error=error,today=datetime.now().date())
+
+
+@app.route('/oferty/<int:quote_id>')
+@quote_access_required
+def quote_detail(quote_id):
+    conn=db(); cur=conn.cursor(); quote,items=load_quote(cur,quote_id); conn.close()
+    if not quote: return "Nie znaleziono oferty.",404
+    return render_template("quote_detail.html",quote=quote,items=items,statuses=QUOTE_STATUSES)
+
+
+@app.route('/oferty/<int:quote_id>/edytuj', methods=['GET','POST'])
+@quote_access_required
+def quote_edit(quote_id):
+    conn=db(); cur=conn.cursor(); quote,items=load_quote(cur,quote_id,request.method=='POST')
+    if not quote: conn.close(); return "Nie znaleziono oferty.",404
+    error=None
+    if request.method == 'POST':
+        try:
+            save_quote(cur,parse_quote_form(),quote_id); conn.commit(); cache.clear(); return redirect(f"/oferty/{quote_id}")
+        except ValueError as exc: conn.rollback(); error=str(exc)
+        except Exception: conn.rollback(); logger.exception("Quote update failed."); error="Nie udało się zapisać oferty."
+        quote,items=load_quote(cur,quote_id)
+    contractors,products=quote_form_options(cur); conn.close()
+    return render_template("quote_form.html",quote=quote,items=items,contractors=contractors,products=products,units=QUOTE_UNITS,item_types=QUOTE_ITEM_TYPES,error=error,today=datetime.now().date())
+
+
+@app.route('/oferty/<int:quote_id>/kopiuj', methods=['POST'])
+@quote_access_required
+def quote_copy(quote_id):
+    conn=db(); cur=conn.cursor(); quote,items=load_quote(cur,quote_id)
+    if not quote: conn.close(); return "Nie znaleziono oferty.",404
+    try:
+        new_number=next_quote_number(cur,datetime.now().date())
+        cur.execute("SELECT trim(concat_ws(' ',first_name,last_name)),phone FROM users WHERE lower(email)=lower(%s)",(session.get("user", ""),))
+        seller=cur.fetchone() or (session.get("user", ""),None)
+        cur.execute("""INSERT INTO commercial_quotes(quote_number,issue_date,valid_until,delivery_term,status,customer_name,customer_address,customer_nip,customer_phone,customer_email,contractor_id,payment_terms,notes,seller_email,seller_name,seller_position,seller_phone,net_total,vat_total,gross_total,created_by)
+                     SELECT %s,CURRENT_DATE,valid_until,delivery_term,'robocza',customer_name,customer_address,customer_nip,customer_phone,customer_email,contractor_id,payment_terms,notes,%s,%s,'Handlowiec',%s,net_total,vat_total,gross_total,%s FROM commercial_quotes WHERE id=%s RETURNING id""",
+                    (new_number,session.get("user"),seller[0] or session.get("user"),seller[1],session.get("user"),quote_id))
+        new_id=cur.fetchone()[0]
+        cur.execute("""INSERT INTO commercial_quote_items(quote_id,position,product_id,item_type,description,qty,unit,unit_net,discount_percent,discount_amount,vat_rate,net_value,vat_value,gross_value)
+                     SELECT %s,position,product_id,item_type,description,qty,unit,unit_net,discount_percent,discount_amount,vat_rate,net_value,vat_value,gross_value FROM commercial_quote_items WHERE quote_id=%s""",(new_id,quote_id))
+        conn.commit(); return redirect(f"/oferty/{new_id}/edytuj")
+    except Exception: conn.rollback(); logger.exception("Quote copy failed."); return "Nie udało się skopiować oferty.",500
+    finally: conn.close()
+
+
+@app.route('/oferty/<int:quote_id>/status', methods=['POST'])
+@quote_access_required
+def quote_status(quote_id):
+    status=(request.form.get("status") or "").strip()
+    if status not in QUOTE_STATUSES: return "Nieprawidłowy status.",400
+    conn=db(); cur=conn.cursor(); quote,_=load_quote(cur,quote_id,True)
+    if not quote: conn.close(); return "Nie znaleziono oferty.",404
+    cur.execute("UPDATE commercial_quotes SET status=%s,updated_at=NOW() WHERE id=%s",(status,quote_id)); conn.commit(); conn.close()
+    return redirect(f"/oferty/{quote_id}")
+
+
+@app.route('/oferty/uprawnienia', methods=['POST'])
+@admin_required
+def quote_permissions_update():
+    email=(request.form.get("email") or "").strip().lower()
+    conn=db(); cur=conn.cursor()
+    cur.execute("SELECT 1 FROM users WHERE lower(email)=lower(%s) AND role='sales'",(email,))
+    if not cur.fetchone(): conn.close(); return "Nie znaleziono handlowca.",404
+    cur.execute("""INSERT INTO commercial_quote_permissions(user_email,can_view_all,updated_by) VALUES (%s,%s,%s)
+                 ON CONFLICT(user_email) DO UPDATE SET can_view_all=EXCLUDED.can_view_all,updated_by=EXCLUDED.updated_by,updated_at=NOW()""",
+                (email,request.form.get("can_view_all")=="1",session.get("user")))
+    conn.commit(); conn.close(); return redirect("/oferty")
+
+
+def commercial_quote_pdf(quote, items):
+    output=io.BytesIO(); styles,body_font,bold_font=pdf_styles()
+    doc=SimpleDocTemplate(output,pagesize=A4,rightMargin=10*mm,leftMargin=10*mm,topMargin=10*mm,bottomMargin=15*mm)
+    normal=ParagraphStyle("quote-normal",parent=styles["Normal"],fontSize=8,leading=10)
+    small=ParagraphStyle("quote-small",parent=normal,fontSize=7,leading=8)
+    heading=ParagraphStyle("quote-heading",parent=normal,fontName=bold_font,fontSize=9,textColor=colors.HexColor("#5a3b00"))
+    total_style=ParagraphStyle("quote-total",parent=normal,fontName=bold_font,fontSize=12,alignment=TA_RIGHT)
+    def p(value,style=normal): return Paragraph(escape(str(value or "—")).replace("\n","<br/>"),style)
+    logo=primadera_pdf_logo(55*mm)
+    brand=logo or p("PRIMADERA",ParagraphStyle("brand",parent=styles["Title"],fontName=bold_font,fontSize=20,textColor=colors.HexColor("#5a3b00")))
+    header=Table([[brand,p("OFERTA HANDLOWA\n"+str(quote[1]),ParagraphStyle("qtitle",parent=normal,fontName=bold_font,fontSize=15,leading=19,alignment=TA_RIGHT))]],colWidths=[95*mm,95*mm])
+    header.setStyle(TableStyle([("VALIGN",(0,0),(-1,-1),"TOP"),("BOTTOMPADDING",(0,0),(-1,-1),8),("LINEBELOW",(0,0),(-1,-1),1.5,colors.HexColor("#FFC067"))]))
+    seller=f"{quote[15]}\n{quote[16] or 'Handlowiec'}\n{quote[17] or ''}\n{quote[14]}"
+    buyer=f"{quote[6]}\n{quote[7] or ''}\nNIP: {quote[8] or '—'}\n{quote[9] or ''} {quote[10] or ''}"
+    parties=Table([[p("SPRZEDAWCA",heading),p("NABYWCA",heading)],[p(seller),p(buyer)]],colWidths=[95*mm,95*mm])
+    parties.setStyle(TableStyle([("BOX",(0,0),(-1,-1),.5,colors.HexColor("#d1d5db")),("INNERGRID",(0,0),(-1,-1),.5,colors.HexColor("#e5e7eb")),("BACKGROUND",(0,0),(-1,0),colors.HexColor("#fff5e5")),("VALIGN",(0,0),(-1,-1),"TOP"),("PADDING",(0,0),(-1,-1),6)]))
+    dates=Table([[p(f"Data wystawienia: {quote[2]}",small),p(f"Ważna do: {quote[3] or '—'}",small),p(f"Termin realizacji: {quote[4] or '—'}",small)]],colWidths=[63*mm,63*mm,64*mm])
+    data=[[p(x,small) for x in ("Lp.","Nazwa / opis","Ilość","J.m.","Cena netto","Rabat","Netto","VAT","Brutto")]]
+    for item in items:
+        discount=f"{item[9]}%" + (f" + {item[10]} zł" if quote_money(item[10]) else "")
+        data.append([p(item[2],small),p(item[5],small),p(item[6],small),p(item[7],small),p(f"{item[8]:.2f} zł",small),p(discount,small),p(f"{item[12]:.2f} zł",small),p(f"{item[11]}%\n{item[13]:.2f} zł",small),p(f"{item[14]:.2f} zł",small)])
+    table=Table(data,repeatRows=1,colWidths=[8*mm,54*mm,14*mm,12*mm,22*mm,20*mm,20*mm,18*mm,22*mm])
+    table.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#FFC067")),("TEXTCOLOR",(0,0),(-1,0),colors.HexColor("#422d00")),("GRID",(0,0),(-1,-1),.35,colors.HexColor("#cbd5e1")),("VALIGN",(0,0),(-1,-1),"TOP"),("LEFTPADDING",(0,0),(-1,-1),3),("RIGHTPADDING",(0,0),(-1,-1),3),("TOPPADDING",(0,0),(-1,-1),4),("BOTTOMPADDING",(0,0),(-1,-1),4)]))
+    summary=Table([[p("Suma netto",heading),p(f"{quote[18]:.2f} zł",heading)],[p("VAT",heading),p(f"{quote[19]:.2f} zł",heading)],[p("RAZEM BRUTTO",total_style),p(f"{quote[20]:.2f} zł",total_style)]],colWidths=[45*mm,45*mm],hAlign="RIGHT")
+    summary.setStyle(TableStyle([("ALIGN",(1,0),(-1,-1),"RIGHT"),("LINEABOVE",(0,2),(-1,2),1.5,colors.HexColor("#FFC067")),("BACKGROUND",(0,2),(-1,2),colors.HexColor("#fff5e5")),("PADDING",(0,0),(-1,-1),5)]))
+    story=[header,Spacer(1,5*mm),parties,Spacer(1,3*mm),dates,Spacer(1,4*mm),table,Spacer(1,3*mm),summary]
+    if quote[12]: story += [Spacer(1,3*mm),p("WARUNKI PŁATNOŚCI",heading),p(quote[12])]
+    if quote[13]: story += [Spacer(1,2*mm),p("UWAGI",heading),p(quote[13])]
+    story += [Spacer(1,10*mm),Table([[p("Sprzedawca\n\n________________________",small),p("Nabywca / Zamawiający\n\n________________________",small)]],colWidths=[95*mm,95*mm])]
+    generated=datetime.now().strftime("%d.%m.%Y %H:%M")
+    def footer(canvas,_doc):
+        canvas.saveState(); canvas.setFont(body_font,7); canvas.setFillColor(colors.HexColor("#64748b")); canvas.drawString(10*mm,7*mm,"PRIMADERA - oferta handlowa"); canvas.drawRightString(200*mm,7*mm,f"Wygenerowano {generated} | strona {_doc.page}"); canvas.restoreState()
+    doc.build(story,onFirstPage=footer,onLaterPages=footer); return output.getvalue()
+
+
+@app.route('/oferty/<int:quote_id>/pdf')
+@quote_access_required
+def quote_pdf(quote_id):
+    conn=db(); cur=conn.cursor(); quote,items=load_quote(cur,quote_id); conn.close()
+    if not quote: return "Nie znaleziono oferty.",404
+    pdf=commercial_quote_pdf(quote,items)
+    return Response(pdf,mimetype="application/pdf",headers={"Content-Disposition":f'attachment; filename="{quote[1].replace("/","-")}.pdf"'})
 
 
 @app.route('/handlowiec/raport')

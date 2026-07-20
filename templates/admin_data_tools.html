@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Narzędzia → Dane testowe</h2>
+<p style="color:#64748b">Usunięte dane trafiają do Kosza razem z rekordami zależnymi. Dopiero usunięcie z Kosza jest nieodwracalne.</p>
+{% if request.args.get('moved') or request.args.get('test_data_deleted') %}<div class="card" style="background:#ecfdf5;color:#166534;margin-bottom:16px">Dane przeniesiono do Kosza.</div>{% endif %}
+{% if request.args.get('restored') %}<div class="card" style="background:#ecfdf5;color:#166534;margin-bottom:16px">Dane zostały przywrócone.</div>{% endif %}
+<div class="card" style="margin-bottom:18px"><h3>Szybkie czyszczenie danych testowych</h3><div class="field-grid">
+{% for key, group in test_groups.items() %}<form method="POST" action="/admin/tools/test-data/delete" class="test-cleanup" data-count="{{ group_counts[key] }}" data-label="{{ group[0] }}">
+  <input type="hidden" name="group" value="{{ key }}"><input type="hidden" name="expected_count" value="{{ group_counts[key] }}">
+  <button type="submit" {% if not group_counts[key] %}disabled{% endif %}>Usuń: {{ group[0] }} ({{ group_counts[key] }})</button>
+</form>{% endfor %}
+</div></div>
+
+<form method="POST" action="/admin/trash/move" id="records-form" class="card" style="margin-bottom:18px">
+  <div class="actions" style="justify-content:space-between"><h3>Wszystkie rekordy</h3><button type="submit">Usuń zaznaczone</button></div>
+  {% for entity_type, data in entity_rows.items() %}<details style="margin:10px 0"><summary><strong>{{ data.title }} ({{ entity_counts[entity_type] }})</strong></summary>
+  <div class="table-scroll"><table><thead><tr><th><input type="checkbox" class="select-group"></th><th>ID</th><th>Nazwa / numer</th><th>Akcja</th></tr></thead><tbody>
+  {% for row in data.rows %}<tr><td><input type="checkbox" name="selected" value="{{ entity_type }}:{{ row[0] }}"></td><td>{{ row[0] }}</td><td>{{ row[1] or '—' }}</td><td><button type="submit" formaction="/admin/trash/{{ entity_type }}/{{ row[0] }}" formmethod="POST" name="next" value="/admin/tools/test-data" onclick="return confirm('Przenieść ten rekord i dane zależne do Kosza?')">🗑 Usuń</button></td></tr>
+  {% else %}<tr><td colspan="4">Brak rekordów.</td></tr>{% endfor %}</tbody></table></div></details>{% endfor %}
+</form>
+
+<div class="card"><div class="actions" style="justify-content:space-between"><h3>Kosz ({{ trash|length }})</h3></div>
+{% if trash %}<form method="POST" id="trash-form"><div class="table-scroll"><table><thead><tr><th><input type="checkbox" id="select-trash"></th><th>Element</th><th>Typ</th><th>Powiązane rekordy</th><th>Usunął</th><th>Data</th></tr></thead><tbody>
+{% for item in trash %}<tr><td><input type="checkbox" name="trash_id" value="{{ item[0] }}"></td><td>{{ item[4] }}</td><td>{{ item[2] }}</td><td>{{ item[5] }}</td><td>{{ item[6] }}</td><td>{{ item[7] }}</td></tr>{% endfor %}</tbody></table></div>
+<div class="actions" style="margin-top:14px"><button formaction="/admin/trash/restore" formmethod="POST">Przywróć zaznaczone</button><input name="confirm_text" placeholder="Wpisz: USUŃ TRWALE" autocomplete="off"><button formaction="/admin/trash/permanent-delete" formmethod="POST" class="danger">Usuń trwale zaznaczone</button><button formaction="/admin/trash/empty" formmethod="POST" class="danger">Opróżnij cały Kosz</button></div>
+</form>{% else %}<p>Kosz jest pusty.</p>{% endif %}</div>
+<script>
+document.querySelectorAll('.test-cleanup').forEach(form=>form.addEventListener('submit',event=>{const count=form.dataset.count,label=form.dataset.label;if(!confirm(`Do Kosza trafi ${count} rekordów głównych z grupy „${label}” oraz ich dane zależne. Kontynuować?`))event.preventDefault()}));
+document.querySelectorAll('.select-group').forEach(box=>box.addEventListener('change',()=>box.closest('table').querySelectorAll('tbody input[type=checkbox]').forEach(input=>input.checked=box.checked)));
+const allTrash=document.querySelector('#select-trash');if(allTrash)allTrash.addEventListener('change',()=>document.querySelectorAll('#trash-form input[name=trash_id]').forEach(input=>input.checked=allTrash.checked));
+document.querySelectorAll('.danger').forEach(button=>button.addEventListener('click',event=>{const text=document.querySelector('#trash-form input[name=confirm_text]').value;if(text!=='USUŃ TRWALE'||!confirm('To jest operacja nieodwracalna. Czy na pewno trwale usunąć dane?'))event.preventDefault()}));
+</script>
+{% endblock %}

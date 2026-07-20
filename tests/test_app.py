@@ -1,5 +1,6 @@
 import copy
 import gzip
+import io
 import json
 import os
 import unittest
@@ -17,6 +18,7 @@ from backup_service import (
     parse_backup,
 )
 from cryptography.fernet import Fernet
+from openpyxl import load_workbook
 
 
 class FakeStore:
@@ -727,7 +729,10 @@ class InventoryFlowTests(unittest.TestCase):
             [
                 ("proforma_number", "PF/1"),
                 ("issue_date", "2026-07-09"),
-                ("client", "Klient A"),
+                ("client", "Klient Łódź"),
+                ("company", "Primasort"),
+                ("salesperson", "Paweł"),
+                ("products", "Deska dębowa\nZażółć gęślą jaźń"),
                 ("netto_amount", "100"),
                 ("vat_amount", "23"),
                 ("brutto_amount", "123"),
@@ -771,15 +776,20 @@ class InventoryFlowTests(unittest.TestCase):
         self.assertIn("UPDATE accounting_proformas SET", executed)
         self.assertIn("DELETE FROM accounting_proformas WHERE id=%s", executed)
         insert_params = cursor.execute.call_args_list[0].args[1]
+        self.assertEqual(insert_params["company"], "Primasort")
+        self.assertEqual(insert_params["salesperson"], "Paweł")
+        self.assertIn("Zażółć", insert_params["products"])
         self.assertTrue(insert_params["paid"])
         self.assertTrue(insert_params["bank_transfer"])
         self.assertTrue(insert_params["sent_to_client"])
 
     def test_manual_accounting_proforma_filters_cover_required_fields(self):
         cursor = MagicMock()
-        cursor.fetchall.return_value = []
-        cursor.fetchone.return_value = (0, 0, 0, 0, 0, 0)
+        cursor.fetchall.side_effect = [[], [("Primasort", 2, 246.0)], [("Paweł", 2, 246.0)]]
+        cursor.fetchone.return_value = (2, 246.0, 123.0, 123.0, 123.0, 1, 1, 1)
         filters = {
+            "manual_company": "Primasort",
+            "manual_salesperson": "Paweł",
             "manual_paid": "unpaid",
             "manual_transfer": "transfer",
             "manual_sent": "unsent",
@@ -791,8 +801,15 @@ class InventoryFlowTests(unittest.TestCase):
         proformas, totals = warehouse_app.accounting_proformas_data(cursor, filters)
 
         self.assertEqual(proformas, [])
-        self.assertEqual(totals, (0, 0, 0, 0, 0, 0))
+        self.assertEqual(totals["count"], 2)
+        self.assertEqual(totals["total_value"], 246.0)
+        self.assertEqual(totals["paid_value"], 123.0)
+        self.assertEqual(totals["unpaid_value"], 123.0)
+        self.assertEqual(totals["by_company"], [("Primasort", 2, 246.0)])
+        self.assertEqual(totals["by_salesperson"], [("Paweł", 2, 246.0)])
         query = cursor.execute.call_args_list[0].args[0]
+        self.assertIn("company=%s", query)
+        self.assertIn("lower(COALESCE(salesperson,'')) LIKE %s", query)
         self.assertIn("paid=FALSE", query)
         self.assertIn("bank_transfer=TRUE", query)
         self.assertIn("sent_to_client=FALSE", query)
@@ -800,7 +817,69 @@ class InventoryFlowTests(unittest.TestCase):
         self.assertIn("issue_date=%s", query)
         self.assertIn("lower(proforma_number) LIKE %s", query)
 
-    def test_admin_hard_deletes_warehouse_document_without_history(self):
+    def test_manual_proforma_excel_contains_all_new_fields(self):
+        proformas = [
+            (
+                1, "PF/Ł/1", "2026-07-09", "GoldenOak", "Klient Łódź",
+                "Monika", 100.0, 23.0, 123.0, "2026-07-16", "Przelew",
+                "Uwagi ąęść", True, True, True, "2026-07-10", 123.0,
+                "2026-07-09", "Produkt żółty",
+            )
+        ]
+        totals = {
+            "count": 1,
+            "total_value": 123.0,
+            "paid_value": 123.0,
+            "unpaid_value": 0,
+            "paid_amount": 123.0,
+            "paid_count": 1,
+            "unpaid_count": 0,
+            "sent_count": 1,
+            "by_company": [("GoldenOak", 1, 123.0)],
+            "by_salesperson": [("Monika", 1, 123.0)],
+        }
+
+        content = warehouse_app.proformas_report_xlsx(proformas, totals, {})
+        workbook = load_workbook(io.BytesIO(content))
+        sheet = workbook["Proformy"]
+
+        self.assertEqual(sheet["C2"].value, "GoldenOak")
+        self.assertEqual(sheet["E2"].value, "Monika")
+        self.assertEqual(sheet["F2"].value, "Produkt żółty")
+        self.assertEqual(sheet["L2"].value, "Tak")
+        self.assertEqual(sheet["M2"].value, "Tak")
+        self.assertEqual(sheet["N2"].value, "Tak")
+
+    def test_manual_proforma_pdf_generates_with_logo_and_polish_text(self):
+        proforma = {
+            "id": 1,
+            "proforma_number": "PF/Ł/1",
+            "issue_date": "2026-07-09",
+            "company": "Primadera",
+            "client": "Klient Łódź",
+            "salesperson": "Paweł",
+            "netto_amount": 100.0,
+            "vat_amount": 23.0,
+            "brutto_amount": 123.0,
+            "payment_due_date": "2026-07-16",
+            "payment_method": "Przelew",
+            "notes": "Zażółć gęślą jaźń",
+            "paid": True,
+            "bank_transfer": True,
+            "sent_to_client": True,
+            "payment_date": "2026-07-10",
+            "paid_amount": 123.0,
+            "sent_date": "2026-07-09",
+            "products": "Deska dębowa",
+        }
+
+        pdf = warehouse_app.proforma_pdf_bytes(proforma)
+
+        self.assertTrue(pdf.startswith(b"%PDF"))
+        self.assertIn(b"/Subtype /Image", pdf)
+        self.assertGreater(len(pdf), 1000)
+
+    def test_admin_moves_warehouse_document_to_trash(self):
         connection = MagicMock()
         cursor = MagicMock()
         connection.cursor.return_value = cursor
@@ -809,18 +888,15 @@ class InventoryFlowTests(unittest.TestCase):
         with warehouse_app.app.test_request_context("/doc/9/delete", method="POST"):
             warehouse_app.session["user"] = "admin@example.com"
             warehouse_app.session["role"] = "admin"
-            with patch.object(warehouse_app, "db", return_value=connection):
+            with patch.object(warehouse_app, "db", return_value=connection), patch.object(
+                warehouse_app, "move_to_trash"
+            ) as move_to_trash:
                 response = warehouse_app.delete_doc(9)
 
         self.assertEqual(response.status_code, 302)
         self.assertIn("/historia", response.location)
-        executed = "\n".join(call.args[0] for call in cursor.execute.call_args_list)
-        self.assertIn("DELETE FROM issue_doc_history WHERE doc_id=%s", executed)
-        self.assertIn("DELETE FROM issue_doc_photos WHERE doc_id=%s", executed)
-        self.assertIn("DELETE FROM issue_items WHERE doc_id=%s", executed)
-        self.assertIn("DELETE FROM issue_docs WHERE id=%s", executed)
-        self.assertNotIn("voided_at=NOW()", executed)
-        self.assertNotIn("INSERT INTO issue_doc_history", executed)
+        move_to_trash.assert_called_once_with(cursor, "warehouse_document", 9)
+        connection.commit.assert_called_once()
 
     def test_admin_hard_deletes_accounting_document_without_void_history(self):
         connection = MagicMock()

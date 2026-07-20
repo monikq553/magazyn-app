@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="actions" style="justify-content:space-between;margin-bottom:16px">
+  <div><h2 style="margin:0">Oferty handlowe</h2><p style="color:#64748b;margin:6px 0 0">Oferty nie zmieniają stanów magazynowych.</p></div>
+  <a class="btn" href="/oferty/nowa">+ Nowa oferta</a>
+</div>
+<form class="card field-grid" method="GET" style="margin-bottom:16px">
+  <input name="number" value="{{ filters.number }}" placeholder="Numer oferty">
+  <input name="customer" value="{{ filters.customer }}" placeholder="Nabywca">
+  <input name="seller" value="{{ filters.seller }}" placeholder="Handlowiec">
+  <select name="status"><option value="">Wszystkie statusy</option>{% for status in statuses %}<option {% if filters.status == status %}selected{% endif %}>{{ status }}</option>{% endfor %}</select>
+  <input type="date" name="date" value="{{ filters.date }}">
+  <button>Szukaj</button>
+</form>
+{% if session.get('role') == 'admin' and salespeople %}
+<details class="card" style="margin-bottom:16px"><summary><strong>Dostęp handlowców do wszystkich ofert</strong></summary>
+  {% for person in salespeople %}<form method="POST" action="/oferty/uprawnienia" class="actions" style="margin-top:10px">
+    <input type="hidden" name="email" value="{{ person[0] }}"><span style="min-width:240px">{{ person[1] or person[0] }} ({{ person[0] }})</span>
+    <label><input type="checkbox" name="can_view_all" value="1" {% if permissions.get(person[0]|lower) %}checked{% endif %}> widzi oferty innych handlowców</label><button>Zapisz</button>
+  </form>{% endfor %}
+</details>
+{% endif %}
+<div class="card"><form method="POST" action="/admin/trash/move"><div class="table-scroll"><table>
+  <thead><tr>{% if session.get('role') == 'admin' %}<th><input type="checkbox" onclick="this.closest('table').querySelectorAll('tbody input[type=checkbox]').forEach(x=>x.checked=this.checked)"></th>{% endif %}<th>Numer</th><th>Data</th><th>Nabywca</th><th>Handlowiec</th><th>Status</th><th>Netto</th><th>VAT</th><th>Brutto</th><th>Akcje</th></tr></thead>
+  <tbody>{% for q in quotes %}<tr>
+    {% if session.get('role') == 'admin' %}<td><input type="checkbox" name="selected" value="quote:{{ q[0] }}"></td>{% endif %}<td><a href="/oferty/{{ q[0] }}"><strong>{{ q[1] }}</strong></a></td><td>{{ q[2] }}</td><td>{{ q[4] }}</td><td>{{ q[5] }}</td><td>{{ q[6] }}</td>
+    <td>{{ '%.2f'|format(q[7]) }} zł</td><td>{{ '%.2f'|format(q[8]) }} zł</td><td><strong>{{ '%.2f'|format(q[9]) }} zł</strong></td>
+    <td><div class="actions"><a class="btn" href="/oferty/{{ q[0] }}">Otwórz</a><a class="btn" href="/oferty/{{ q[0] }}/pdf">PDF</a>{% if session.get('role') == 'admin' %}<button formaction="/admin/trash/quote/{{ q[0] }}" name="next" value="/oferty" onclick="return confirm('Przenieść ofertę do Kosza?')">🗑</button>{% endif %}</div></td>
+  </tr>{% else %}<tr><td colspan="10">Brak ofert spełniających kryteria.</td></tr>{% endfor %}</tbody>
+</table></div>{% if session.get('role') == 'admin' %}<button style="margin-top:12px" onclick="return confirm('Przenieść zaznaczone oferty do Kosza?')">Usuń zaznaczone</button>{% endif %}</form></div>
+{% endblock %}

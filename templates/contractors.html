@@ -24,7 +24,7 @@
         <td><input form="contractor-{{ contractor[0] }}" name="email" value="{{ contractor[3] or '' }}" type="email" maxlength="254"></td>
         <td><input form="contractor-{{ contractor[0] }}" name="phone" value="{{ contractor[4] or '' }}" maxlength="50"></td>
         <td><input form="contractor-{{ contractor[0] }}" name="address" value="{{ contractor[5] or '' }}" maxlength="500"></td>
-        <td><button form="contractor-{{ contractor[0] }}" type="submit">Zapisz</button></td>
+        <td><div class="actions"><button form="contractor-{{ contractor[0] }}" type="submit">Zapisz</button>{% if session.get('role') == 'admin' %}<form method="POST" action="/admin/trash/contractor/{{ contractor[0] }}" onsubmit="return confirm('Przenieść klienta i dane zależne do Kosza?')"><input type="hidden" name="next" value="/kontrahenci"><button>🗑 Usuń</button></form>{% endif %}</div></td>
     </tr>
     {% else %}
     <tr><td colspan="6">Brak kontrahentów.</td></tr>
